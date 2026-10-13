@@ -3632,6 +3632,7 @@ dependencies = [
 name = "soundcraft-cli"
 version = "0.7.0"
 dependencies = [
+ "log",
  "serde_json",
  "soundcraft-audio-io",
  "soundcraft-automation",

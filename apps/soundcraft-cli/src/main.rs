@@ -57,7 +57,41 @@ fn help_text() -> String {
         .join("\n")
 }
 
+/// Warnings and errors from the engine and the plugin hosts (a plugin that failed to load, a state
+/// it refused) go to standard error. Without a logger they were dropped, and a plugin scan that
+/// failed looked like an empty plugin folder. `RUST_LOG` set to a bare level (`info`, `debug`,
+/// `trace`, `off`) changes the level; the app's per-target directives are not read here.
+struct StderrLogger {
+    level: log::LevelFilter,
+}
+
+impl StderrLogger {
+    fn new(rust_log: Option<&str>) -> StderrLogger {
+        StderrLogger { level: rust_log.and_then(|s| s.trim().parse().ok()).unwrap_or(log::LevelFilter::Warn) }
+    }
+}
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= self.level
+    }
+
+    fn log(&self, r: &log::Record) {
+        if self.enabled(r.metadata()) {
+            let _ = writeln!(std::io::stderr(), "{} {}: {}", r.level(), r.target(), r.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: std::sync::OnceLock<StderrLogger> = std::sync::OnceLock::new();
+
 fn main() -> ExitCode {
+    let logger = LOGGER.get_or_init(|| StderrLogger::new(std::env::var("RUST_LOG").ok().as_deref()));
+    if log::set_logger(logger).is_ok() {
+        log::set_max_level(logger.level);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first().cloned() else {
         eprintln!("usage: soundcraft-cli <info|convert|run|script|commands|describe|app|mcp|parity|plugins> …  (see --help)");
@@ -481,6 +515,21 @@ fn parity(args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_logger_passes_warnings_and_errors_unless_rust_log_names_a_level() {
+        use log::Log;
+        let at = |l: &StderrLogger, level| l.enabled(&log::Metadata::builder().level(level).target("soundcraft_vst3_host").build());
+        let default = StderrLogger::new(None);
+        assert!(at(&default, log::Level::Error) && at(&default, log::Level::Warn));
+        assert!(!at(&default, log::Level::Info) && !at(&default, log::Level::Debug));
+        let debug = StderrLogger::new(Some("debug"));
+        assert!(at(&debug, log::Level::Debug) && !at(&debug, log::Level::Trace));
+        assert_eq!(StderrLogger::new(Some(" ERROR ")).level, log::LevelFilter::Error);
+        assert_eq!(StderrLogger::new(Some("off")).level, log::LevelFilter::Off);
+        // The app's per-target directives are not read here: they keep the default.
+        assert_eq!(StderrLogger::new(Some("soundcraft_mix=trace")).level, log::LevelFilter::Warn);
+    }
 
     #[test]
     fn command_ids_are_execute_shorthand_and_control_methods_stay_methods() {

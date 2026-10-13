@@ -19,3 +19,4 @@ soundcraft-automation.workspace = true
 soundcraft-audio-io.workspace = true
 soundcraft-dsp.workspace = true
 serde_json.workspace = true
+log.workspace = true
