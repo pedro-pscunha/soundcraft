@@ -317,7 +317,7 @@ fn take_automation(s: &mut Session, track: TrackId, start: Samples, end: Samples
 fn put_automation(s: &mut Session, track: TrackId, origin: Samples, points: &[(AutoParam, AutomationPoint)]) {
     let Some(t) = s.track_mut(track) else { return };
     for (param, p) in points {
-        t.lane_mut(param).set_point(origin.saturating_add(p.at), p.value);
+        crate::cmd::mix::lane_for_edit(t, param).set_point(origin.saturating_add(p.at), p.value);
     }
 }
 

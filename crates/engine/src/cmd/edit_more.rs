@@ -537,7 +537,7 @@ fn paste_to_current_automation(e: &mut Engine, p: &Value) -> Result<Value> {
         let Some(src) = lanes.iter().max_by_key(|l| l.points.len()).filter(|l| !l.points.is_empty()) else { continue };
         let Some(tr) = s.track_mut(*t) else { continue };
         let dst = forced.clone().unwrap_or_else(|| AutoParam::parse(&tr.view).unwrap_or(AutoParam::Volume));
-        let lane = tr.lane_mut(&dst);
+        let lane = super::mix::lane_for_edit(tr, &dst);
         lane.clear_range(at, at.saturating_add(cb.length));
         for pt in &src.points {
             lane.set_point(at.saturating_add(pt.at), map_value(pt.value, &src.param, &dst));
@@ -879,7 +879,7 @@ fn trim_glide(e: &mut Engine, p: &Value, glide: bool, pan_only: bool, id: &str) 
         for param in params {
             let cur = super::mix::current_value(tr, &param);
             let (lo, hi, _) = param.range();
-            let l = tr.lane_mut(&param);
+            let l = super::mix::lane_for_edit(tr, &param);
             let before = l.value_at(r.start - 1, cur);
             let after = l.value_at(r.end, cur);
             let from = l.value_at(r.start, cur);

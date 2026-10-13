@@ -22,13 +22,7 @@ impl Rng {
 }
 
 fn insert(id: &str) -> Insert {
-    let mut i = Insert::new(id);
-    if let Some(info) = soundcraft_dsp::plugin_info(id) {
-        for p in info.params {
-            i.params.insert(p.id.to_string(), p.default);
-        }
-    }
-    i
+    soundcraft_dsp::plugin_info(id).map_or_else(|| Insert::new(id), crate::cmd::new_insert)
 }
 
 fn beat_len(sr: f64) -> usize {

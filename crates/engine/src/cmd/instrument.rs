@@ -5,7 +5,7 @@
 use super::*;
 use crate::cmd;
 use serde_json::json;
-use soundcraft_model::{Insert, TrackKind};
+use soundcraft_model::TrackKind;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -60,10 +60,7 @@ fn set_instrument(e: &mut Engine, p: &Value) -> Result<Value> {
             values.push((k.clone(), pi.clamp(x as f32)));
         }
     }
-    let mut ins = Insert::new(info.id);
-    for pi in info.params {
-        ins.params.insert(pi.id.to_string(), pi.default);
-    }
+    let mut ins = new_insert(info);
     for (k, v) in values {
         ins.params.insert(k, v);
     }
@@ -204,5 +201,29 @@ mod tests {
         assert!(e.execute("mix.instrument", &json!({"track": audio.0, "plugin": "drum_synth"})).is_err(), "an audio track");
         assert_eq!(instrument_of(&e, inst).as_deref(), Some("subtractive_synth"));
         assert_eq!(instrument_of(&e, audio), None);
+    }
+
+    /// A hosted instrument keeps its parameters in its own state. Seeding every declared default
+    /// pushed them over that state on the first block: sfizz got CC 7 and 11 at 0 and played
+    /// silence, and a stored state lost its settings.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hosted_instrument_starts_with_only_the_params_given() {
+        const DLS: &str = "au:aumu:dls :appl";
+        let Some(info) = super::super::clap::plugin_info(DLS) else {
+            eprintln!("{DLS} not installed; skipping");
+            return;
+        };
+        let mut e = Engine::default();
+        let t = track(&mut e, "instrument");
+        e.execute("mix.instrument", &json!({"track": t.0, "plugin": DLS})).unwrap();
+        let params = |e: &Engine| e.session().track(t).and_then(|tr| tr.instrument.as_ref()).map(|i| i.params.clone()).unwrap();
+        assert!(params(&e).is_empty(), "{:?}", params(&e));
+        if let Some(pi) = info.params.first() {
+            let mut given = serde_json::Map::new();
+            given.insert(pi.id.to_string(), json!(pi.default));
+            e.execute("mix.instrument", &json!({"track": t.0, "plugin": DLS, "params": given})).unwrap();
+            assert_eq!(params(&e).keys().collect::<Vec<_>>(), vec![pi.id]);
+        }
     }
 }

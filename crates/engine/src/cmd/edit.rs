@@ -337,7 +337,7 @@ fn paste(e: &mut Engine, p: &Value) -> Result<Value> {
         pasted += ops::paste(s, *t, at, clips, cb.length, sh).map_err(|why| bad("edit.paste", why))?.len();
         if follow && let (Some(lanes), Some(tr)) = (cb.automation.get(i % cb.automation.len().max(1)), s.track_mut(*t)) {
             for l in lanes {
-                let dst = tr.lane_mut(&l.param);
+                let dst = super::mix::lane_for_edit(tr, &l.param);
                 if !l.points.is_empty() {
                     dst.clear_range(at, at + cb.length);
                 }

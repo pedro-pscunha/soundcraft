@@ -21,7 +21,7 @@ mod file;
 mod health;
 mod instrument;
 mod midi;
-mod mix;
+pub(crate) mod mix;
 mod more_util;
 mod options;
 mod plugin_state;
@@ -180,6 +180,18 @@ pub fn can_redo(e: &Engine) -> std::result::Result<(), String> {
 
 pub fn has_clipboard(e: &Engine) -> std::result::Result<(), String> {
     if e.clipboard.tracks.is_empty() { Err("the clipboard is empty".into()) } else { Ok(()) }
+}
+
+/// A newly inserted plugin. A built-in starts with every declared parameter at its default. A
+/// hosted plugin (CLAP, VST3, AU) keeps its parameters in its own state, and the mixer sends every
+/// stored value on the first block, so seeded defaults would overwrite that state: it starts with
+/// none.
+pub(crate) fn new_insert(info: &soundcraft_dsp::PluginInfo) -> soundcraft_model::Insert {
+    let mut ins = soundcraft_model::Insert::new(info.id);
+    if !soundcraft_mix::is_third_party(info.id) {
+        ins.params.extend(info.params.iter().map(|p| (p.id.to_string(), p.default)));
+    }
+    ins
 }
 
 // ---- params ------------------------------------------------------------------------------

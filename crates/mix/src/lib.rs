@@ -42,9 +42,11 @@
 //!   instances made for playback render in real time.
 //!
 //! An instance starts from its stored state; the insert's parameter values are then applied on
-//! top before the first block (the session's values are kept in step with the plugin, including
-//! edits made in its own editor, so both agree; the state carries everything else). A host reads
-//! states back for saving through each instance's [`Plugin::state_reader`], on its UI thread.
+//! top before the first block. A built-in insert stores every parameter. A hosted insert stores
+//! only overrides (values set by a command, an automation lane or its own editor): everything
+//! else stays in the plugin's state, so a hosted plugin's defaults never overwrite that state. A
+//! host reads states back for saving through each instance's [`Plugin::state_reader`], on its UI
+//! thread.
 //!
 //! A built-in instrument's parameter values are applied the same way. A sample-playing
 //! instrument (the Sampler) is handed the decoded audio of its insert's

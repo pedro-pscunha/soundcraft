@@ -649,8 +649,7 @@ fn preset_menu(
     ins: &soundcraft_model::Insert,
 ) {
     if ui.button("<factory default>").clicked() {
-        let defaults: serde_json::Map<String, serde_json::Value> = info.params.iter().map(|p| (p.id.to_string(), json!(p.default))).collect();
-        let _ = app.run("mix.insert_params", json!({"track": tid.0, "slot": slot, "params": defaults, "preset": "<factory default>"}));
+        let _ = app.run("mix.insert_params", json!({"track": tid.0, "slot": slot, "params": {}, "factory": true, "preset": "<factory default>"}));
         ui.close();
     }
     let Some(dir) = preset_dir(app, info.id) else {

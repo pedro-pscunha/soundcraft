@@ -3,7 +3,7 @@
 use super::*;
 use crate::cmd;
 use serde_json::json;
-use soundcraft_model::{AutoParam, AutomationMode, INSERT_SLOTS, Insert, SEND_SLOTS, SendSlot, Session, TrackId};
+use soundcraft_model::{AutoParam, AutomationMode, INSERT_SLOTS, SEND_SLOTS, SendSlot, Session, TrackId};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -100,7 +100,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Plugin Parameters",
             [],
             None,
-            "{track?, slot, params: {id: value}, preset?: name} (unknown ids and non-numeric values are errors)",
+            "{track?, slot, params: {id: value}, preset?: name, factory?: bool} (unknown ids and non-numeric values are errors). `factory`: start from the plugin's factory settings first, as when newly inserted (every declared default for a built-in; for a hosted plugin no parameters and no stored state, so a new instance is made)",
             has_selection,
             insert_params
         ),
@@ -302,10 +302,7 @@ fn insert(e: &mut Engine, p: &Value) -> Result<Value> {
     let tr = s.track_mut(t).ok_or_else(|| bad("mix.insert", "no track"))?;
     let slot =
         explicit.or_else(|| tr.mixer.inserts.iter().position(Option::is_none)).ok_or_else(|| bad("mix.insert", "all insert slots are in use"))?;
-    let mut ins = Insert::new(info.id);
-    for pi in info.params {
-        ins.params.insert(pi.id.to_string(), pi.default);
-    }
+    let mut ins = new_insert(info);
     if let Some(obj) = p.get("params").and_then(Value::as_object) {
         for (k, v) in obj {
             let Some(pi) = info.params.iter().find(|x| x.id == k) else {
@@ -366,6 +363,10 @@ fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
     let (t, slot) = track_slot(e, p, "mix.insert_params", INSERT_SLOTS)?;
     let obj = p.get("params").and_then(Value::as_object).cloned().ok_or_else(|| bad("mix.insert_params", "`params` must be an object"))?;
     let preset = str_param(p, "preset").map(str::to_string);
+    let factory = match p.get("factory") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad("mix.insert_params", "`factory` must be true or false"))?,
+    };
     let s = e.session_mut();
     let ins = s
         .track_mut(t)
@@ -389,6 +390,14 @@ fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
     if !non_numeric.is_empty() {
         non_numeric.sort_unstable();
         return Err(bad("mix.insert_params", format!("parameter(s) need a numeric value: {}", non_numeric.join(", "))));
+    }
+    if factory {
+        ins.params = new_insert(info).params;
+        // A hosted plugin's settings are its state; without one, a new instance starts at its own
+        // defaults (also when the playing one was changed in its editor since the last save).
+        if soundcraft_mix::is_third_party(&ins.plugin) {
+            ins.clear_state();
+        }
     }
     let mut n = 0;
     for (k, v) in obj {
@@ -471,7 +480,7 @@ fn set_point(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     for t in &tracks {
         if let Some(tr) = s.track_mut(*t) {
-            let lane = tr.lane_mut(&param);
+            let lane = lane_for_edit(tr, &param);
             if let Some(from) = from {
                 lane.clear_range(from.saturating_add(1), at);
             }
@@ -490,7 +499,7 @@ fn write_range(e: &mut Engine, p: &Value) -> Result<Value> {
     for t in &tracks {
         if let Some(tr) = s.track_mut(*t) {
             let def = current_value(tr, &param);
-            tr.lane_mut(&param).write_range(r.start, r.end, v, def);
+            lane_for_edit(tr, &param).write_range(r.start, r.end, v, def);
         }
     }
     Ok(json!({}))
@@ -505,10 +514,35 @@ pub(crate) fn current_value(tr: &soundcraft_model::Track, param: &AutoParam) -> 
         AutoParam::SendLevel(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(-144.0, |s| s.level_db),
         AutoParam::SendPan(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(0.0, |s| s.pan),
         AutoParam::SendMute(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(0.0, |s| f32::from(u8::from(s.mute))),
-        AutoParam::Plugin { slot, param } => {
-            tr.mixer.inserts.get(usize::from(*slot)).and_then(Option::as_ref).and_then(|i| i.params.get(param).copied()).unwrap_or(0.0)
-        }
+        AutoParam::Plugin { slot, param } => tr
+            .mixer
+            .inserts
+            .get(usize::from(*slot))
+            .and_then(Option::as_ref)
+            .and_then(|i| i.params.get(param).copied().or_else(|| declared_default(&i.plugin, param)))
+            .unwrap_or(0.0),
     }
+}
+
+/// A plugin parameter's declared default. For a hosted plugin's parameter the session has not set,
+/// it stands in for the value the plugin keeps in its own state, which the session can't read.
+fn declared_default(plugin: &str, param: &str) -> Option<f32> {
+    super::clap::plugin_info(plugin)?.params.iter().find(|p| p.id == param).map(|p| p.default)
+}
+
+/// The lane an edit writes `param`'s automation into. The mixer plays a plugin lane only for the
+/// parameters its insert stores, and a hosted plugin's insert stores only those set since it was
+/// inserted, so a lane on any other would be accepted and never heard: the parameter is stored
+/// first, at its declared default.
+pub(crate) fn lane_for_edit<'a>(tr: &'a mut soundcraft_model::Track, param: &AutoParam) -> &'a mut soundcraft_model::AutomationLane {
+    if let AutoParam::Plugin { slot, param: id } = param
+        && let Some(Some(ins)) = tr.mixer.inserts.get_mut(usize::from(*slot))
+        && !ins.params.contains_key(id)
+        && let Some(v) = declared_default(&ins.plugin, id)
+    {
+        ins.params.insert(id.clone(), v);
+    }
+    tr.lane_mut(param)
 }
 
 fn clear_lane(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -562,7 +596,7 @@ fn write_current(e: &mut Engine, p: &Value, all: bool) -> Result<Value> {
             };
             for param in params {
                 let v = current_value(tr, &param);
-                tr.lane_mut(&param).write_range(r.start, r.end, v, v);
+                lane_for_edit(tr, &param).write_range(r.start, r.end, v, v);
             }
         }
     }
@@ -885,5 +919,46 @@ mod tests {
         let delay = e.session().busses.iter().find(|b| b.name == "Delay").unwrap().id;
         assert_eq!(sl.target, soundcraft_model::Route::Bus(delay));
         assert_eq!((sl.level_db, sl.pan, sl.mute, sl.pre_fader), (-9.0, 0.5, true, true));
+    }
+
+    /// `<factory default>`: a built-in gets every declared default back (a hosted plugin: see
+    /// `tests/hosted_plugins.rs`).
+    #[test]
+    fn factory_settings_restore_a_built_ins_defaults() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"count": 1, "name": "Gtr"})).unwrap();
+        e.execute("mix.insert", &json!({"track": "Gtr", "slot": 0, "plugin": "eq_7band"})).unwrap();
+        let params = |e: &Engine| e.session().tracks[0].mixer.inserts[0].as_ref().map(|i| (i.params.clone(), i.preset.clone())).unwrap();
+        let fresh = params(&e);
+        let pi = soundcraft_dsp::plugin_info("eq_7band").and_then(|i| i.params.first()).unwrap();
+        let other = if pi.default == pi.max { pi.min } else { pi.max };
+        e.execute("mix.insert_params", &json!({"track": "Gtr", "slot": 0, "params": {pi.id: other}, "preset": "Bright"})).unwrap();
+        assert_ne!(params(&e), fresh);
+        e.execute("mix.insert_params", &json!({"track": "Gtr", "slot": 0, "params": {}, "factory": true, "preset": "<factory default>"})).unwrap();
+        assert_eq!(params(&e), fresh);
+        assert!(e.execute("mix.insert_params", &json!({"track": "Gtr", "slot": 0, "params": {}, "factory": "yes"})).is_err());
+    }
+
+    /// A hosted plugin keeps its parameters in its own state: seeded defaults were pushed over a
+    /// restored state on the first block (see `mix.instrument`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hosted_insert_starts_with_only_the_params_given() {
+        const DELAY: &str = "au:aufx:dely:appl";
+        let Some(info) = super::super::clap::plugin_info(DELAY) else {
+            eprintln!("{DELAY} not installed; skipping");
+            return;
+        };
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"count": 1, "name": "Gtr"})).unwrap();
+        e.execute("mix.insert", &json!({"track": "Gtr", "slot": 0, "plugin": DELAY})).unwrap();
+        let params = |e: &Engine| e.session().tracks[0].mixer.inserts[0].as_ref().map(|i| i.params.clone()).unwrap();
+        assert!(params(&e).is_empty(), "{:?}", params(&e));
+        if let Some(pi) = info.params.first() {
+            let mut given = serde_json::Map::new();
+            given.insert(pi.id.to_string(), json!(pi.default));
+            e.execute("mix.insert", &json!({"track": "Gtr", "slot": 0, "plugin": DELAY, "params": given})).unwrap();
+            assert_eq!(params(&e).keys().collect::<Vec<_>>(), vec![pi.id]);
+        }
     }
 }

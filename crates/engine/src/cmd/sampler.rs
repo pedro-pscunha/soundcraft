@@ -8,7 +8,7 @@
 use super::*;
 use crate::cmd;
 use serde_json::json;
-use soundcraft_model::{Insert, TrackKind};
+use soundcraft_model::TrackKind;
 use std::path::Path;
 
 const SAMPLER: &str = "sampler";
@@ -83,11 +83,7 @@ pub(crate) fn attach(e: &mut Engine, t: TrackId, name: &str, bytes: &[u8], path:
     let tr = s.track_mut(t).ok_or_else(|| bad(id, "no track"))?;
     let keep = tr.instrument.as_ref().is_some_and(|i| i.plugin == SAMPLER);
     if !keep {
-        let mut ins = Insert::new(SAMPLER);
-        for pi in info.params {
-            ins.params.insert(pi.id.to_string(), pi.default);
-        }
-        tr.instrument = Some(ins);
+        tr.instrument = Some(super::new_insert(info));
     }
     if let Some(ins) = tr.instrument.as_mut() {
         ins.sample = Some(src);
