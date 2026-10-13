@@ -11,7 +11,7 @@ use rustfft::{FftPlanner, num_complex::Complex};
 use crate::osc::Osc;
 pub use crate::osc::Waveform;
 use crate::util::sane_sr;
-use crate::{Plugin, db_to_gain, gain_to_db};
+use crate::{Plugin, RenderMode, db_to_gain, gain_to_db};
 
 /// Largest number of samples per channel any offline function will produce.
 pub const MAX_OFFLINE_SAMPLES: usize = 1 << 28;
@@ -589,7 +589,8 @@ impl SilenceScan {
 }
 
 /// Runs a plugin over whole buffers in blocks, compensating its latency so the output lines up
-/// with the input. The buffer length is unchanged (any tail past the end is dropped; see
+/// with the input. The plugin is told it renders offline ([`Plugin::set_render_mode`]) and
+/// prepared for it. The buffer length is unchanged (any tail past the end is dropped; see
 /// [`apply_plugin_with_tail`]).
 pub fn apply_plugin(ch: &mut [Vec<f32>], plugin: &mut dyn Plugin, sample_rate: f32) {
     let len = max_len(ch);
@@ -604,6 +605,7 @@ pub fn apply_plugin(ch: &mut [Vec<f32>], plugin: &mut dyn Plugin, sample_rate: f
 /// Like [`apply_plugin`] but returns new buffers extended by the plugin's tail (capped at 60 s).
 pub fn apply_plugin_with_tail(ch: &[Vec<f32>], plugin: &mut dyn Plugin, sample_rate: f32) -> Vec<Vec<f32>> {
     let len = max_len(ch);
+    plugin.set_render_mode(RenderMode::Offline);
     plugin.prepare(sane_sr(sample_rate), 1024, ch.len());
     let tail = plugin.tail_samples().min((sane_sr(sample_rate) * 60.0) as usize);
     render(ch, plugin, sample_rate, (len + tail).min(MAX_OFFLINE_SAMPLES))
@@ -613,6 +615,7 @@ fn render(ch: &[Vec<f32>], plugin: &mut dyn Plugin, sample_rate: f32, out_len: u
     const BLOCK: usize = 1024;
     let sr = sane_sr(sample_rate);
     let channels = ch.len();
+    plugin.set_render_mode(RenderMode::Offline);
     plugin.prepare(sr, BLOCK, channels);
     plugin.reset();
     let lat = plugin.latency().min(MAX_OFFLINE_SAMPLES);

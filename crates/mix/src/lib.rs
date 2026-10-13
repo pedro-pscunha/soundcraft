@@ -36,6 +36,10 @@
 //! - without external instances (the default: offline [`render_range`], bounces, tests) `sync`
 //!   creates third-party plugins itself, synchronously, restores their stored state before the
 //!   first `process`, and drops retired instances at the end of `sync`.
+//! - offline renders ([`render_range`], [`RangeRender`] and everything built on them) use an
+//!   engine made with [`MixEngine::offline`], so every instance it creates is told before
+//!   `prepare` that it renders offline ([`Plugin::set_render_mode`]). [`MixEngine::new`] and
+//!   instances made for playback render in real time.
 //!
 //! An instance starts from its stored state; the insert's parameter values are then applied on
 //! top before the first block (the session's values are kept in step with the plugin, including
@@ -51,7 +55,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
-use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
+use soundcraft_dsp::{Plugin, RenderMode, SampleSource, Transport, db_to_gain};
 use soundcraft_midi::CtrlKind;
 use soundcraft_model::{
     AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
@@ -136,14 +140,16 @@ pub struct NewInstance {
     pub refused_state: bool,
 }
 
-/// Creates a plugin (built-in or hosted), restores `state` (if any) and prepares it. Expensive
-/// for third-party plugins: in realtime use, call it on the control thread.
-pub fn create_instance(id: &str, state: Option<&[u8]>, sample_rate: f32, max_block: usize, ch: usize) -> Option<NewInstance> {
+/// Creates a plugin (built-in or hosted), restores `state` (if any) and prepares it to render in
+/// `mode` (see [`Plugin::set_render_mode`]). Expensive for third-party plugins: in realtime use,
+/// call it on the control thread.
+pub fn create_instance(id: &str, state: Option<&[u8]>, sample_rate: f32, max_block: usize, ch: usize, mode: RenderMode) -> Option<NewInstance> {
     let mut plugin = create_plugin(id)?;
     let refused_state = state.is_some_and(|st| !plugin.load_state(st));
     if refused_state {
         log::warn!("{id}: the plugin did not accept its stored state");
     }
+    plugin.set_render_mode(mode);
     plugin.prepare(sample_rate, max_block, ch);
     Some(NewInstance { plugin, refused_state })
 }
@@ -364,6 +370,8 @@ pub struct MixEngine {
     pub metronome: bool,
     /// Third-party instances come from [`MixEngine::adopt`] instead of being created in `sync`.
     external: bool,
+    /// How the instances `sync` creates render (see [`MixEngine::offline`]).
+    mode: RenderMode,
     /// Instances handed over by the host, waiting for `sync` to place them.
     adopt: HashMap<(TrackId, usize), PreparedInstance>,
     /// Instances `sync` took out of service, for the host to drop (see [`MixEngine::take_retired`]).
@@ -377,6 +385,7 @@ struct SlotCtx<'a> {
     sr: f32,
     mb: usize,
     external: bool,
+    mode: RenderMode,
     adopt: &'a mut HashMap<(TrackId, usize), PreparedInstance>,
     retired: &'a mut Vec<Box<dyn Plugin>>,
 }
@@ -409,7 +418,7 @@ impl SlotCtx<'_> {
             }
         } else {
             let state = if third { ins.state_bytes() } else { None };
-            create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
+            create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch, self.mode).map(|n| n.plugin)
         }?;
         Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false })
     }
@@ -440,10 +449,18 @@ impl MixEngine {
             recording: false,
             metronome: false,
             external: false,
+            mode: RenderMode::Realtime,
             adopt: HashMap::new(),
             retired: Vec::new(),
             work: Vec::new(),
         }
+    }
+
+    /// An engine for offline renders (bounces, exports): every plugin `sync` creates is told it
+    /// renders offline ([`Plugin::set_render_mode`]) before it is prepared, so hosted plugins use
+    /// their offline quality. Instances made with [`MixEngine::new`] render in real time.
+    pub fn offline(sample_rate: f32, max_block: usize) -> Self {
+        MixEngine { mode: RenderMode::Offline, ..MixEngine::new(sample_rate, max_block) }
     }
 
     /// Realtime mode: third-party plugins are created by the host and handed over with
@@ -529,7 +546,8 @@ impl MixEngine {
         if self.main.len() != main_ch {
             self.main = vec![vec![0.0; mb]; main_ch];
         }
-        let mut cx = SlotCtx { sr: self.sample_rate, mb, external: self.external, adopt: &mut self.adopt, retired: &mut self.retired };
+        let mut cx =
+            SlotCtx { sr: self.sample_rate, mb, external: self.external, mode: self.mode, adopt: &mut self.adopt, retired: &mut self.retired };
         let gone: Vec<TrackId> = self.strips.keys().filter(|id| s.track(**id).is_none()).copied().collect();
         for id in gone {
             if let Some(mut st) = self.strips.remove(&id) {
@@ -2061,7 +2079,8 @@ pub fn source_channels(s: &Session, bus: Option<BusId>) -> usize {
     }
 }
 
-/// [`render_range`] or [`render_bus`] of any length, a block at a time.
+/// [`render_range`] or [`render_bus`] of any length, a block at a time. Its plugins render offline
+/// (see [`MixEngine::offline`]).
 pub struct RangeRender {
     eng: MixEngine,
     bus: Option<BusId>,
@@ -2076,7 +2095,7 @@ impl RangeRender {
     /// Renders the main mix over `range`, or `bus` when one is named.
     pub fn new(s: &Session, bus: Option<BusId>, range: Range, block: usize) -> Self {
         let nch = source_channels(s, bus);
-        let eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
+        let eng = MixEngine::offline(s.sample_rate.as_f64() as f32, block);
         let tmp = vec![vec![0.0f32; eng.max_block()]; nch];
         let len = if nch == 0 { 0 } else { usize::try_from(range.len().max(0)).unwrap_or(0) };
         RangeRender { eng, bus, tmp, start: range.start, done: 0, total: len, latency: 0 }

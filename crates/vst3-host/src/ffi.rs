@@ -15,7 +15,7 @@
 #![allow(clippy::unnecessary_cast)]
 
 use crate::{Vst3Error, scan};
-use soundcraft_dsp::Transport;
+use soundcraft_dsp::{RenderMode, Transport};
 use std::ffi::{c_char, c_int, c_void};
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
@@ -80,6 +80,14 @@ fn write_c16(s: &str, dst: &mut [u16]) {
 
 fn ok(r: sb::tresult) -> bool {
     r == sb::kResultOk
+}
+
+/// The VST3 `ProcessModes` value for `mode`.
+fn process_mode(mode: RenderMode) -> i32 {
+    match mode {
+        RenderMode::Realtime => sv::ProcessModes_::kRealtime as i32,
+        RenderMode::Offline => sv::ProcessModes_::kOffline as i32,
+    }
 }
 
 /// VST3's numbers for the MIDI controllers that aren't CCs.
@@ -526,6 +534,7 @@ impl Bundle {
             active: false,
             processing: false,
             max_frames: 0,
+            mode: RenderMode::Realtime,
             in_params: ComWrapper::new(ParamChanges::new(PARAM_QUEUE_CAP)),
             out_params: ComWrapper::new(ParamChanges::new(PARAM_QUEUE_CAP)),
             in_events: ComWrapper::new(EventList::new(EVENT_CAP)),
@@ -1117,6 +1126,8 @@ pub(crate) struct Instance {
     active: bool,
     processing: bool,
     max_frames: usize,
+    /// The mode `setupProcessing` got; every `process` call passes it too.
+    mode: RenderMode,
     in_params: ComWrapper<ParamChanges>,
     out_params: ComWrapper<ParamChanges>,
     in_events: ComWrapper<EventList>,
@@ -1293,6 +1304,12 @@ impl Instance {
         self.active
     }
 
+    /// The mode the last `configure` set the plugin up with: real time when it refused the
+    /// offline one.
+    pub fn render_mode(&self) -> RenderMode {
+        self.mode
+    }
+
     fn bus_count(&self, media: sv::MediaTypes, dir: sv::BusDirections) -> i32 {
         // SAFETY: valid component.
         unsafe { self.component.getBusCount(media as sv::MediaType, dir as sv::BusDirection) }.clamp(0, MAX_BUSES)
@@ -1321,8 +1338,9 @@ impl Instance {
 
     /// Stops processing, deactivates, negotiates the bus layout (main buses mono or stereo as
     /// asked, falling back to stereo and then to the plugin's own choice), activates the main
-    /// buses, sets up 32-bit processing and activates the component.
-    pub fn configure(&mut self, sample_rate: f64, max_frames: usize, mono: bool) -> Result<Layout, Vst3Error> {
+    /// buses, sets up 32-bit processing in `mode` (`kOffline` or `kRealtime`; real time when the
+    /// plugin refuses the offline mode, see [`Instance::render_mode`]) and activates the component.
+    pub fn configure(&mut self, sample_rate: f64, max_frames: usize, mono: bool, mode: RenderMode) -> Result<Layout, Vst3Error> {
         self.shutdown();
         let audio = sv::MediaTypes_::kAudio;
         let event = sv::MediaTypes_::kEvent;
@@ -1380,15 +1398,22 @@ impl Instance {
             return Err(Vst3Error::Process("plugin cannot process 32-bit float".into()));
         }
         let max = i32::try_from(max_frames).unwrap_or(i32::MAX);
-        let mut setup = sv::ProcessSetup {
-            processMode: sv::ProcessModes_::kRealtime as i32,
-            symbolicSampleSize: sample32,
-            maxSamplesPerBlock: max,
-            sampleRate: sample_rate,
-        };
+        let mut mode = mode;
+        let mut setup =
+            sv::ProcessSetup { processMode: process_mode(mode), symbolicSampleSize: sample32, maxSamplesPerBlock: max, sampleRate: sample_rate };
         // SAFETY: valid processor, inactive; `setup` is a valid struct for the call.
         if !ok(unsafe { p.setupProcessing(&mut setup) }) {
-            return Err(Vst3Error::Process("setupProcessing failed".into()));
+            // A plugin that refuses the offline mode still renders, in real time: better than a
+            // silent bounce.
+            if mode == RenderMode::Realtime {
+                return Err(Vst3Error::Process("setupProcessing failed".into()));
+            }
+            mode = RenderMode::Realtime;
+            setup.processMode = process_mode(mode);
+            // SAFETY: as above.
+            if !ok(unsafe { p.setupProcessing(&mut setup) }) {
+                return Err(Vst3Error::Process("setupProcessing failed".into()));
+            }
         }
         // SAFETY: valid component, configured above.
         if !ok(unsafe { self.component.setActive(1) }) {
@@ -1396,6 +1421,7 @@ impl Instance {
         }
         self.active = true;
         self.max_frames = max_frames;
+        self.mode = mode;
         self.context.sampleRate = sample_rate;
         self.context.tempo = 120.0;
         self.context.timeSigNumerator = 4;
@@ -1481,7 +1507,7 @@ impl Instance {
             None => self.context.projectTimeSamples = project_time,
         }
         let mut data = sv::ProcessData {
-            processMode: sv::ProcessModes_::kRealtime as i32,
+            processMode: process_mode(self.mode),
             symbolicSampleSize: sv::SymbolicSampleSizes_::kSample32 as i32,
             numSamples: i32::try_from(frames).unwrap_or(0),
             numInputs: i32::try_from(inputs.bufs.len()).unwrap_or(0),

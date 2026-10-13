@@ -8,7 +8,11 @@
 //!
 //! The gain plugin also implements `clap.state` (gain and mode as two little-endian f64s) and a
 //! floating-only `clap.gui` without a real window: showing it "edits" the gain to 0.25 in the GUI,
-//! reported as an output parameter event by the next `process`.
+//! reported as an output parameter event by the next `process`. It implements `clap.render`
+//! (only while deactivated) and reports 5 samples of latency instead of 3 while rendering offline,
+//! so tests can see the mode (as an offline "quality" with more lookahead). Its Mode stands in for
+//! other plugins there: in mode B it has a hard real-time requirement, in mode C it refuses
+//! `CLAP_RENDER_OFFLINE`. The synth has no `clap.render`.
 #![allow(clippy::missing_safety_doc, non_upper_case_globals)]
 
 use clap_sys::audio_buffer::clap_audio_buffer;
@@ -22,6 +26,7 @@ use clap_sys::ext::latency::*;
 use clap_sys::ext::log::*;
 use clap_sys::ext::note_ports::*;
 use clap_sys::ext::params::*;
+use clap_sys::ext::render::*;
 use clap_sys::factory::plugin_factory::*;
 use clap_sys::host::clap_host;
 use clap_sys::id::clap_id;
@@ -69,6 +74,8 @@ struct Fx {
     gain: f64,
     mode: f64,
     level: f64,
+    /// `clap.render` mode is `CLAP_RENDER_OFFLINE`.
+    offline: bool,
     active: bool,
     processing: bool,
     gui_created: bool,
@@ -343,11 +350,30 @@ unsafe extern "C" fn ports_get(p: *const clap_plugin, index: u32, is_input: bool
 
 static PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports { count: Some(ports_count), get: Some(ports_get) };
 
-unsafe extern "C" fn latency_get(_p: *const clap_plugin) -> u32 {
-    3
+unsafe extern "C" fn latency_get(p: *const clap_plugin) -> u32 {
+    if unsafe { fx(p) }.offline { 5 } else { 3 }
 }
 
 static LATENCY: clap_plugin_latency = clap_plugin_latency { get: Some(latency_get) };
+
+unsafe extern "C" fn render_hard_realtime(p: *const clap_plugin) -> bool {
+    unsafe { fx(p) }.mode.round() == 1.0
+}
+
+unsafe extern "C" fn render_set(p: *const clap_plugin, mode: clap_plugin_render_mode) -> bool {
+    let f = unsafe { fx(p) };
+    // Its latency follows the mode, and latency may only change while deactivated.
+    assert!(!f.active, "render mode set while active");
+    match mode {
+        CLAP_RENDER_REALTIME => f.offline = false,
+        CLAP_RENDER_OFFLINE if f.mode.round() == 2.0 => return false,
+        CLAP_RENDER_OFFLINE => f.offline = true,
+        _ => return false,
+    }
+    true
+}
+
+static RENDER: clap_plugin_render = clap_plugin_render { has_hard_realtime_requirement: Some(render_hard_realtime), set: Some(render_set) };
 
 unsafe extern "C" fn notes_count(p: *const clap_plugin, is_input: bool) -> u32 {
     if is_input && unsafe { fx(p) }.synth { 1 } else { 0 }
@@ -488,6 +514,8 @@ unsafe extern "C" fn get_extension(p: *const clap_plugin, id: *const c_char) -> 
         &STATE as *const _ as *const c_void
     } else if id == CLAP_EXT_GUI && !synth {
         &GUI as *const _ as *const c_void
+    } else if id == CLAP_EXT_RENDER && !synth {
+        &RENDER as *const _ as *const c_void
     } else {
         std::ptr::null()
     }
@@ -538,6 +566,7 @@ unsafe extern "C" fn factory_create(_f: *const clap_plugin_factory, host: *const
         gain: 1.0,
         mode: 0.0,
         level: 0.0,
+        offline: false,
         active: false,
         processing: false,
         gui_created: false,

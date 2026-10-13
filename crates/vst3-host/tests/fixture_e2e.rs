@@ -2,7 +2,8 @@
 //! install it as a `.vst3` bundle in a temp folder, then scan → instantiate → process → params →
 //! notes.
 
-use soundcraft_dsp::{Category, Taper, Unit};
+use soundcraft_dsp::{Category, RenderMode, Taper, Unit};
+use std::sync::{Mutex, Once};
 
 mod common;
 use common::fixture_dir;
@@ -94,6 +95,72 @@ fn gain_processes_audio_and_follows_params() {
     p.prepare(f32::NAN, 0, 0);
     let mut io = vec![vec![0.1f32; 8]];
     p.process(&mut io, 8);
+}
+
+/// Offline renders reach the plugin as the `kOffline` process mode, in `setupProcessing` and in
+/// every `process` call (the fixture checks they agree, and looks further ahead offline).
+#[test]
+fn offline_rendering_sets_the_offline_process_mode() {
+    let mut p = soundcraft_vst3_host::create(&id_of("Fixture Gain")).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 3, "real time by default");
+    p.set_render_mode(RenderMode::Offline);
+    assert_eq!(p.latency(), 3, "a change takes effect at the next prepare");
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 5, "set up with kOffline");
+    let mut io = vec![vec![0.5f32; 64]; 2];
+    p.process(&mut io, 64);
+    assert!(io[0].iter().all(|&x| (x - 0.25).abs() < 1e-6), "{:?}", &io[0][..4]);
+    p.set_render_mode(RenderMode::Realtime);
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 3, "back in real time");
+    p.process(&mut io, 64);
+}
+
+/// Warnings this test binary logged (the host's `log` output).
+fn warnings() -> Vec<String> {
+    struct Warnings(Mutex<Vec<String>>);
+    impl log::Log for Warnings {
+        fn enabled(&self, m: &log::Metadata) -> bool {
+            m.level() <= log::Level::Warn
+        }
+        fn log(&self, r: &log::Record) {
+            if self.enabled(r.metadata()) {
+                self.0.lock().unwrap().push(r.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+    static LOGGER: Warnings = Warnings(Mutex::new(Vec::new()));
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+    LOGGER.0.lock().unwrap().clone()
+}
+
+/// A plugin that refuses `kOffline` (the fixture gain in mode C) still renders in an offline
+/// render, set up with `kRealtime` (the fixture checks every `process` call carries that mode);
+/// the refusal is logged once per instance, however often it is prepared.
+#[test]
+fn a_plugin_that_refuses_the_offline_mode_renders_in_real_time() {
+    let refusals = || warnings().iter().filter(|w| w.contains("refused the kOffline process mode")).count();
+    let before = refusals();
+    let mut p = soundcraft_vst3_host::create(&id_of("Fixture Gain")).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    assert!(p.set_param("3", 2.0));
+    let mut io = vec![vec![0.5f32; 64]; 2];
+    p.process(&mut io, 64);
+    p.set_render_mode(RenderMode::Offline);
+    for _ in 0..3 {
+        p.prepare(48_000.0, 64, 2);
+        assert_eq!(p.latency(), 3, "set up with kRealtime");
+        let mut io = vec![vec![0.5f32; 64]; 2];
+        p.process(&mut io, 64);
+        assert!(io[0].iter().all(|&x| (x - 0.25).abs() < 1e-6), "it still renders: {:?}", &io[0][..4]);
+    }
+    assert_eq!(refusals() - before, 1, "logged once: {:?}", warnings());
 }
 
 #[test]

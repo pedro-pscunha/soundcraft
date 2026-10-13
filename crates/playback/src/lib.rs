@@ -826,7 +826,8 @@ impl Side {
                 continue;
             }
             self.forget(key);
-            let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
+            // Played live: these stay in real time (offline renders make their own instances).
+            let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch, soundcraft_dsp::RenderMode::Realtime);
             log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
             if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {

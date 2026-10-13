@@ -2,7 +2,7 @@
 
 use crate::ffi::{EVENT_CAP, Event, GuiLink, Instance, NotePort, PortBuffers};
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, RenderMode, Transport};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -38,6 +38,12 @@ pub struct ClapPlugin {
     held: [bool; 128],
     channels: usize,
     max_block: usize,
+    /// The mode to render in from the next `prepare` on (see `Plugin::set_render_mode`).
+    mode: RenderMode,
+    /// The plugin's `clap.render` mode (it starts in real time).
+    plugin_mode: RenderMode,
+    /// Already logged that the plugin does not render in `mode`.
+    mode_warned: bool,
     latency: usize,
     steady: i64,
     transport: Option<Transport>,
@@ -62,6 +68,9 @@ impl ClapPlugin {
             held: [false; 128],
             channels: 2,
             max_block: 0,
+            mode: RenderMode::Realtime,
+            plugin_mode: RenderMode::Realtime,
+            mode_warned: false,
             latency: 0,
             steady: 0,
             transport: None,
@@ -113,6 +122,30 @@ impl Plugin for ClapPlugin {
         self.channels = channels.clamp(1, MAX_CHANNELS);
         self.inst.deactivate();
         self.inst.service_callback();
+        // The render mode goes in while deactivated, so the plugin activates set up for it. A
+        // plugin that must run in real time (a hardware proxy) is never put offline; one that
+        // refuses the mode is asked again at the next `prepare`.
+        if self.mode != self.plugin_mode {
+            let refused = if self.mode == RenderMode::Offline && self.inst.hard_realtime() {
+                Some("it has a hard real-time requirement")
+            } else {
+                match self.inst.set_render_mode(self.mode) {
+                    Some(true) => {
+                        self.plugin_mode = self.mode;
+                        None
+                    }
+                    Some(false) => Some("it refused clap.render.set"),
+                    // Without `clap.render` it renders the same either way.
+                    None => None,
+                }
+            };
+            if let Some(why) = refused
+                && !self.mode_warned
+            {
+                self.mode_warned = true;
+                log::warn!("{}: renders in its {} mode, not {} ({why})", self.info.id, self.plugin_mode, self.mode);
+            }
+        }
         let ins = self.inst.audio_ports(true);
         let outs = self.inst.audio_ports(false);
         self.in_main = pick_main(&ins);
@@ -134,6 +167,10 @@ impl Plugin for ClapPlugin {
                 self.latency = 0;
             }
         }
+    }
+
+    fn set_render_mode(&mut self, mode: RenderMode) {
+        self.mode = mode;
     }
 
     fn reset(&mut self) {

@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (offline renders put hosted plugins in their offline mode; previously trivial: mix.instrument sets built-in instrument parameters in params (#265)) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -53,11 +53,13 @@ User report #152: a saved instrument level does not reach the bounce.
 | ARA 2 (pitch/time editors in the timeline) | ✅ | ❌ | Menu leaves Track/Clip/Window ▸ ARA still missing |
 | Crash isolation | in-process (DSP on HDX) | in-process | Out-of-process hosting would beat Pro Tools |
 | Plugin delay reporting changes on the fly | ✅ | 🟡 | Aux insert latency bug #103 (PR #133) |
+| Offline render mode in bounces | ✅ | ✅ | Bounces, freezes, commits and CLI renders tell plugins they render offline (VST3 `kOffline`, CLAP `clap.render`, AU `OfflineRender`); playback stays real time. A plugin that refuses, or a CLAP plugin with a hard real-time requirement, renders in its real-time mode (logged once per instance). Bounce Mix renders on the UI thread, so a plugin that waits for streamed data offline can stall the UI |
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-13 | minor | Hosting: offline renders put VST3, CLAP and AU plugins in their offline mode |
 | 2026-10-13 | trivial | mix.instrument sets built-in instrument parameters in params (#265) |
 | 2026-10-12 | minor | Editors: VST3 and embedded CLAP editors on Windows |
 | 2026-10-10 | major | Created: built-in processor inventory by category and third-party hosting checklist |

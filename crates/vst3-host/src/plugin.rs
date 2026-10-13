@@ -1,7 +1,7 @@
 //! `Vst3Plugin`: a loaded VST3 instance behind the safe `soundcraft_dsp::Plugin` trait.
 
 use crate::ffi::{AFTERTOUCH, BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP, PITCH_BEND};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport, Unit};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, RenderMode, Transport, Unit};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use vst3::ComWrapper;
@@ -53,6 +53,10 @@ pub struct Vst3Plugin {
     held: [bool; 128],
     channels: usize,
     max_block: usize,
+    /// The mode to set the plugin up with at the next `prepare` (see `Plugin::set_render_mode`).
+    mode: RenderMode,
+    /// Already logged that the plugin refused `mode`.
+    mode_warned: bool,
     latency: usize,
     tail: usize,
     position: i64,
@@ -99,6 +103,8 @@ impl Vst3Plugin {
             held: [false; 128],
             channels: 2,
             max_block: 0,
+            mode: RenderMode::Realtime,
+            mode_warned: false,
             latency: 0,
             tail: 0,
             position: 0,
@@ -186,7 +192,7 @@ impl Plugin for Vst3Plugin {
         let mb = max_block.clamp(1, MAX_BLOCK);
         self.channels = channels.clamp(1, MAX_CHANNELS);
         self.max_block = 0;
-        match self.inst.configure(sr, mb, self.channels == 1) {
+        match self.inst.configure(sr, mb, self.channels == 1, self.mode) {
             Ok(layout) => {
                 self.inputs = BusBuffers::new(&layout.inputs, mb);
                 self.outputs = BusBuffers::new(&layout.outputs, mb);
@@ -197,6 +203,15 @@ impl Plugin for Vst3Plugin {
                 self.latency = self.inst.latency() as usize;
                 self.tail = self.inst.tail() as usize;
                 self.midi_map = self.inst.midi_mapping();
+                if self.inst.render_mode() != self.mode && !self.mode_warned {
+                    self.mode_warned = true;
+                    log::warn!(
+                        "{}: renders in its {} mode, not {} (it refused the kOffline process mode)",
+                        self.info.id,
+                        self.inst.render_mode(),
+                        self.mode
+                    );
+                }
             }
             Err(e) => {
                 log::warn!("{}: {e}", self.info.id);
@@ -210,6 +225,10 @@ impl Plugin for Vst3Plugin {
                 self.pending.push((id, n));
             }
         }
+    }
+
+    fn set_render_mode(&mut self, mode: RenderMode) {
+        self.mode = mode;
     }
 
     fn reset(&mut self) {

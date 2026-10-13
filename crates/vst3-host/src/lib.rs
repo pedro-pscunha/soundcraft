@@ -24,6 +24,10 @@
 //! one blob (`SCV3` + length-prefixed parts); [`Plugin::load_state`] restores both (a bare
 //! component state is accepted too) and re-reads the parameter values.
 //!
+//! Offline renders ([`Plugin::set_render_mode`]) set the plugin up with the `kOffline` process
+//! mode at the next `prepare` (and pass it in every `process` call); otherwise it is `kRealtime`.
+//! A plugin that refuses `kOffline` renders in `kRealtime` (logged once per instance).
+//!
 //! Plugin editors (`IPlugView`): on macOS the view is attached to the content `NSView` of a host
 //! `NSWindow` (titled and closable, floating above the app, resized on `IPlugFrame::resizeView`);
 //! on Windows it is attached to a host `HWND` owned by the app's window (no taskbar button,

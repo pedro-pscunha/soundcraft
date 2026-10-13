@@ -3,7 +3,7 @@ use std::f32::consts::TAU;
 use soundcraft_dsp::meter::{LoudnessMeter, PeakMeter, RmsMeter};
 use soundcraft_dsp::offline::{self, FadeShape, Waveform};
 use soundcraft_dsp::spectrum::{bin_hz, magnitude_db};
-use soundcraft_dsp::{create, db_to_gain, gain_to_db, pan};
+use soundcraft_dsp::{RenderMode, create, db_to_gain, gain_to_db, pan};
 
 fn sine(freq: f32, amp: f32, sr: f32, len: usize) -> Vec<f32> {
     (0..len).map(|i| amp * (TAU * freq * i as f32 / sr).sin()).collect()
@@ -290,6 +290,53 @@ fn apply_plugin_compensates_latency() {
     let mut r = create("room_reverb").unwrap();
     let out = offline::apply_plugin_with_tail(&[vec![1.0; 100]], r.as_mut(), sr);
     assert!(out[0].len() > 100 + 48_000);
+}
+
+/// A gain that logs `set_render_mode` and `prepare` calls.
+struct Calls(Box<dyn soundcraft_dsp::Plugin>, Vec<&'static str>);
+
+impl soundcraft_dsp::Plugin for Calls {
+    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+        self.0.info()
+    }
+    fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+        self.1.push("prepare");
+        self.0.prepare(sr, mb, ch);
+    }
+    fn set_render_mode(&mut self, mode: RenderMode) {
+        self.1.push(match mode {
+            RenderMode::Offline => "offline",
+            RenderMode::Realtime => "realtime",
+        });
+    }
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+    fn set_param(&mut self, id: &str, v: f32) -> bool {
+        self.0.set_param(id, v)
+    }
+    fn param(&self, id: &str) -> Option<f32> {
+        self.0.param(id)
+    }
+    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        self.0.process(io, frames);
+    }
+}
+
+/// Every `prepare` comes after the plugin was told it renders offline (however often it is
+/// prepared), and it is never told it renders in real time.
+fn told_offline_before_every_prepare(calls: &[&str]) -> bool {
+    calls.first() == Some(&"offline") && !calls.contains(&"realtime") && calls.contains(&"prepare")
+}
+
+#[test]
+fn apply_plugin_tells_the_plugin_it_renders_offline_before_preparing_it() {
+    let mut p = Calls(create("gain").unwrap(), Vec::new());
+    offline::apply_plugin(&mut [vec![0.5; 64]], &mut p, 48_000.0);
+    assert!(told_offline_before_every_prepare(&p.1), "{:?}", p.1);
+    p.1.clear();
+    let _ = offline::apply_plugin_with_tail(&[vec![0.5; 64]], &mut p, 48_000.0);
+    assert!(told_offline_before_every_prepare(&p.1), "{:?}", p.1);
 }
 
 #[test]

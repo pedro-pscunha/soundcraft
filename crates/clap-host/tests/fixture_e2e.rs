@@ -1,7 +1,8 @@
 //! End to end: build the test CLAP plugin in `tests/fixture` (a cdylib outside the workspace),
 //! install it as a `.clap` in a temp folder, then scan → instantiate → process → params → notes.
 
-use soundcraft_dsp::{Category, Unit};
+use soundcraft_dsp::{Category, RenderMode, Unit};
+use std::sync::{Mutex, Once};
 
 mod common;
 use common::fixture_dir;
@@ -79,6 +80,114 @@ fn gain_processes_audio_and_follows_params() {
     p.prepare(f32::NAN, 0, 0);
     let mut io = vec![vec![0.1f32; 8]];
     p.process(&mut io, 8);
+}
+
+/// Offline renders reach a plugin with `clap.render` as `CLAP_RENDER_OFFLINE`, set while it is
+/// deactivated (the fixture checks), so its latency follows; one without the extension is unchanged.
+#[test]
+fn offline_rendering_sets_the_offline_render_mode() {
+    fixture_dir();
+    warnings(); // logs from here on
+    let mut p = soundcraft_clap_host::create(GAIN).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 3, "real time by default");
+    p.set_render_mode(RenderMode::Offline);
+    assert_eq!(p.latency(), 3, "a change takes effect at the next prepare");
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 5, "rendering offline");
+    let mut io = vec![vec![0.5f32; 64]; 2];
+    p.process(&mut io, 64);
+    assert!(io[0].iter().all(|&x| (x - 0.5).abs() < 1e-6), "{:?}", &io[0][..4]);
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 5, "still offline");
+    p.set_render_mode(RenderMode::Realtime);
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 3, "back in real time");
+    let mut s = soundcraft_clap_host::create(SYNTH).unwrap();
+    s.set_render_mode(RenderMode::Offline);
+    s.prepare(48_000.0, 64, 2);
+    let mut io = vec![vec![0.0f32; 64]; 2];
+    s.note_on(0, 60, 127);
+    s.process(&mut io, 64);
+    assert!(io[0].iter().all(|&x| (x - 1.0).abs() < 1e-6), "no clap.render: it plays as before");
+    assert!(!warnings().iter().any(|w| w.starts_with(SYNTH)), "and nothing to warn about: {:?}", warnings());
+}
+
+/// Warnings this test binary logged (the host's `log` output).
+fn warnings() -> Vec<String> {
+    struct Warnings(Mutex<Vec<String>>);
+    impl log::Log for Warnings {
+        fn enabled(&self, m: &log::Metadata) -> bool {
+            m.level() <= log::Level::Warn
+        }
+        fn log(&self, r: &log::Record) {
+            if self.enabled(r.metadata()) {
+                self.0.lock().unwrap().push(r.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+    static LOGGER: Warnings = Warnings(Mutex::new(Vec::new()));
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+    LOGGER.0.lock().unwrap().clone()
+}
+
+fn warnings_saying(what: &str) -> usize {
+    warnings().iter().filter(|w| w.contains(what)).count()
+}
+
+/// Sets the fixture gain's Mode (0 A, 1 B, 2 C); a block delivers the change.
+fn set_mode(p: &mut dyn soundcraft_dsp::Plugin, mode: f32) {
+    assert!(p.set_param("3", mode));
+    let mut io = vec![vec![0.0f32; 64]; 2];
+    p.process(&mut io, 64);
+}
+
+/// A plugin with a hard real-time requirement (the fixture gain in mode B) is never put offline:
+/// it renders an offline render in real time, logged once per instance.
+#[test]
+fn a_hard_real_time_plugin_is_never_put_offline() {
+    fixture_dir();
+    let before = warnings_saying("hard real-time requirement");
+    let mut p = soundcraft_clap_host::create(GAIN).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    set_mode(p.as_mut(), 1.0);
+    p.set_render_mode(RenderMode::Offline);
+    for _ in 0..3 {
+        p.prepare(48_000.0, 64, 2);
+        assert_eq!(p.latency(), 3, "in real time");
+        let mut io = vec![vec![0.5f32; 64]; 2];
+        p.process(&mut io, 64);
+        assert!(io[0].iter().all(|&x| (x - 0.5).abs() < 1e-6), "it still renders: {:?}", &io[0][..4]);
+    }
+    assert_eq!(warnings_saying("hard real-time requirement") - before, 1, "logged once: {:?}", warnings());
+}
+
+/// A plugin that refuses `CLAP_RENDER_OFFLINE` (the fixture gain in mode C) renders an offline
+/// render in real time, logged once per instance, and is asked again at the next `prepare`.
+#[test]
+fn a_refused_offline_mode_is_asked_for_again() {
+    fixture_dir();
+    let before = warnings_saying("refused clap.render.set");
+    let mut p = soundcraft_clap_host::create(GAIN).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    set_mode(p.as_mut(), 2.0);
+    p.set_render_mode(RenderMode::Offline);
+    for _ in 0..3 {
+        p.prepare(48_000.0, 64, 2);
+        assert_eq!(p.latency(), 3, "refused: in real time");
+        let mut io = vec![vec![0.5f32; 64]; 2];
+        p.process(&mut io, 64);
+        assert!(io[0].iter().all(|&x| (x - 0.5).abs() < 1e-6), "it still renders: {:?}", &io[0][..4]);
+    }
+    assert_eq!(warnings_saying("refused clap.render.set") - before, 1, "logged once: {:?}", warnings());
+    set_mode(p.as_mut(), 0.0);
+    p.prepare(48_000.0, 64, 2);
+    assert_eq!(p.latency(), 5, "accepted when asked again");
 }
 
 #[test]

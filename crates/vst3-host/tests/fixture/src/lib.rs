@@ -4,9 +4,13 @@
 //!   (connected through IConnectionPoint, synced through the component state). Params: 7 "Gain"
 //!   (plain 0..2, linear, units dB), 3 "Mode" (3 steps: A/B/C), 12 "Freq" (20..20000 Hz, log),
 //!   9 hidden, 11 bypass. Starts at gain 0.5 (its state) although the declared default is 1.0.
-//!   Reports 3 samples of latency. State: the component stores the gain (one LE f64), the
-//!   controller the Freq value (one LE f64). Its controller has an editor view (`IPlugView`,
-//!   320×240, no real drawing) supporting NSView/HWND/X11.
+//!   Reports 3 samples of latency, or 5 when set up with the `kOffline` process mode (so tests
+//!   can see the mode, as an offline "quality" with more lookahead); every `process` call must
+//!   carry the mode `setupProcessing` got. Once a `process` call has set Mode to C, it refuses
+//!   `kOffline` in `setupProcessing`, like a plugin without an offline mode. State: the
+//!   component stores the gain (one LE f64), the controller the Freq value (one LE f64). Its
+//!   controller has an editor view (`IPlugView`, 320×240, no real drawing) supporting
+//!   NSView/HWND/X11.
 //! - "Fixture Synth" (`Instrument|Synth`): a single-component instrument (the component is also
 //!   its edit controller). No audio input, one stereo output, one event input; every output
 //!   sample is the velocity of the held note (sample-accurate), 0 when none. Poly pressure, and
@@ -20,7 +24,7 @@
 #![allow(non_snake_case, clippy::missing_safety_doc)]
 
 use std::ffi::{c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{Class, ComRef, ComWrapper, uid};
@@ -68,6 +72,10 @@ struct GainProcessor {
     /// Normalized gain (plain = 2 × normalized).
     gain: AtomicU64,
     arrangement: AtomicU64,
+    /// The `processMode` of the last `setupProcessing`.
+    mode: AtomicI32,
+    /// Normalized "Mode" (param 3) as the last `process` call left it; C (1.0) refuses `kOffline`.
+    mode_param: AtomicU64,
     _live: Live,
 }
 
@@ -169,12 +177,17 @@ impl IAudioProcessorTrait for GainProcessor {
         if size == SymbolicSampleSizes_::kSample32 as i32 { kResultOk } else { kNotImplemented }
     }
     unsafe fn getLatencySamples(&self) -> u32 {
-        3
+        if self.mode.load(Ordering::Relaxed) == ProcessModes_::kOffline as i32 { 5 } else { 3 }
     }
     unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
         let s = unsafe { &*setup };
         assert_eq!(s.symbolicSampleSize, SymbolicSampleSizes_::kSample32 as i32);
         assert!(s.maxSamplesPerBlock > 0 && s.sampleRate > 0.0);
+        assert!(s.processMode == ProcessModes_::kRealtime as i32 || s.processMode == ProcessModes_::kOffline as i32);
+        if s.processMode == ProcessModes_::kOffline as i32 && f64::from_bits(self.mode_param.load(Ordering::Relaxed)) > 0.75 {
+            return kResultFalse;
+        }
+        self.mode.store(s.processMode, Ordering::Relaxed);
         kResultOk
     }
     unsafe fn setProcessing(&self, _state: TBool) -> tresult {
@@ -183,13 +196,19 @@ impl IAudioProcessorTrait for GainProcessor {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let d = unsafe { &*data };
         assert!(!d.processContext.is_null());
+        assert_eq!(d.processMode, self.mode.load(Ordering::Relaxed), "process mode differs from setupProcessing");
         if let Some(changes) = unsafe { ComRef::from_raw(d.inputParameterChanges) } {
             for i in 0..unsafe { changes.getParameterCount() } {
                 let Some(q) = (unsafe { ComRef::from_raw(changes.getParameterData(i)) }) else { continue };
                 let (mut off, mut v) = (0, 0.0);
                 let n = unsafe { q.getPointCount() };
-                if unsafe { q.getParameterId() } == 7 && n > 0 && unsafe { q.getPoint(n - 1, &mut off, &mut v) } == kResultOk {
-                    self.gain.store(v.to_bits(), Ordering::Relaxed);
+                if n == 0 || unsafe { q.getPoint(n - 1, &mut off, &mut v) } != kResultOk {
+                    continue;
+                }
+                match unsafe { q.getParameterId() } {
+                    7 => self.gain.store(v.to_bits(), Ordering::Relaxed),
+                    3 => self.mode_param.store(v.to_bits(), Ordering::Relaxed),
+                    _ => {}
                 }
             }
         }
@@ -663,6 +682,8 @@ impl IPluginFactoryTrait for Factory {
             ComWrapper::new(GainProcessor {
                 gain: AtomicU64::new(0.25f64.to_bits()),
                 arrangement: AtomicU64::new(SpeakerArr::kStereo),
+                mode: AtomicI32::new(ProcessModes_::kRealtime as i32),
+                mode_param: AtomicU64::new(0),
                 _live: Live::new(&OBJECTS),
             })
             .to_com_ptr::<FUnknown>()

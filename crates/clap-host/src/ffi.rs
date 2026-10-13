@@ -27,6 +27,7 @@ use clap_sys::ext::note_ports::{CLAP_EXT_NOTE_PORTS, clap_note_port_info, clap_p
 use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_info, clap_param_rescan_flags, clap_plugin_params,
 };
+use clap_sys::ext::render::{CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME, clap_plugin_render};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
@@ -36,7 +37,7 @@ use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
-use soundcraft_dsp::Transport;
+use soundcraft_dsp::{RenderMode, Transport};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -250,6 +251,7 @@ impl Bundle {
             latency: std::ptr::null(),
             notes: std::ptr::null(),
             state_ext: std::ptr::null(),
+            render: std::ptr::null(),
             gui: Arc::new(GuiLink::default()),
             raw: Vec::with_capacity(EVENT_CAP),
             out_params: Vec::with_capacity(EVENT_CAP),
@@ -277,6 +279,7 @@ impl Bundle {
         inst.latency = inst.extension::<clap_plugin_latency>(CLAP_EXT_LATENCY);
         inst.notes = inst.extension::<clap_plugin_note_ports>(CLAP_EXT_NOTE_PORTS);
         inst.state_ext = inst.extension::<clap_plugin_state>(CLAP_EXT_STATE);
+        inst.render = inst.extension::<clap_plugin_render>(CLAP_EXT_RENDER);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
         inst.gui = Arc::new(GuiLink {
             inner: Mutex::new(GuiInner { plugin, gui, state: inst.state_ext, alive: true, created: false, visible: false, window: None }),
@@ -1128,6 +1131,7 @@ pub(crate) struct Instance {
     latency: *const clap_plugin_latency,
     notes: *const clap_plugin_note_ports,
     state_ext: *const clap_plugin_state,
+    render: *const clap_plugin_render,
     gui: Arc<GuiLink>,
     raw: Vec<RawEvent>,
     /// Parameter values the plugin reported through output events in the current `process`.
@@ -1283,6 +1287,31 @@ impl Instance {
             Some(f) => unsafe { f(self.plugin) },
             None => 0,
         }
+    }
+
+    /// `clap.render`: the plugin must process in real time (it proxies hardware, say). `false`
+    /// without the extension.
+    pub fn hard_realtime(&self) -> bool {
+        // SAFETY: see `params`.
+        match unsafe { self.render.as_ref() }.and_then(|r| r.has_hard_realtime_requirement) {
+            // SAFETY: valid instance (a main-thread call, see the `Send` note on `Instance`).
+            Some(f) => unsafe { f(self.plugin) },
+            None => false,
+        }
+    }
+
+    /// `clap.render.set`: `CLAP_RENDER_OFFLINE` or `CLAP_RENDER_REALTIME` (the default). Whether
+    /// the plugin accepted the mode, `None` without the extension (it renders the same either way).
+    /// Call it while deactivated, so the plugin sets up for the mode when it activates.
+    pub fn set_render_mode(&mut self, mode: RenderMode) -> Option<bool> {
+        // SAFETY: see `params`.
+        let set = (unsafe { self.render.as_ref() }).and_then(|r| r.set)?;
+        let mode = match mode {
+            RenderMode::Realtime => CLAP_RENDER_REALTIME,
+            RenderMode::Offline => CLAP_RENDER_OFFLINE,
+        };
+        // SAFETY: valid instance (a main-thread call, see the `Send` note on `Instance`).
+        Some(unsafe { set(self.plugin, mode) })
     }
 
     pub fn is_active(&self) -> bool {

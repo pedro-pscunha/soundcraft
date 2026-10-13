@@ -187,6 +187,26 @@ pub struct Transport {
     pub bar: i64,
 }
 
+/// How a plugin is rendered (see [`Plugin::set_render_mode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Playback: every block is due when the audio device needs it.
+    #[default]
+    Realtime,
+    /// A bounce, AudioSuite or an export: processed faster or slower than real time, with no
+    /// deadline.
+    Offline,
+}
+
+impl std::fmt::Display for RenderMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RenderMode::Realtime => "real-time",
+            RenderMode::Offline => "offline",
+        })
+    }
+}
+
 /// A realtime audio processor or instrument.
 ///
 /// Contract: `process` never allocates or panics. It processes `min(frames, io[c].len())` frames
@@ -195,6 +215,12 @@ pub struct Transport {
 pub trait Plugin: Send {
     fn info(&self) -> &'static PluginInfo;
     fn prepare(&mut self, sample_rate: f32, max_block: usize, channels: usize);
+    /// How the plugin will be rendered. Hosts call it before `prepare`, and a change takes effect
+    /// at the next `prepare`. Hosted plugins pass [`RenderMode::Offline`] on (VST3 `kOffline`
+    /// process mode, the CLAP render extension, the Audio Unit `OfflineRender` property) so they
+    /// can switch to their offline quality and wait for streamed data. Default: real time;
+    /// built-ins ignore it.
+    fn set_render_mode(&mut self, _mode: RenderMode) {}
     fn reset(&mut self);
     /// Sets a parameter (clamped into range; NaN becomes the default). `false` if `id` is unknown.
     fn set_param(&mut self, id: &str, value: f32) -> bool;

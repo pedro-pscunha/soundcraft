@@ -26,6 +26,11 @@
 //! still works for them.
 //! Parameter changes made in the plugin's GUI arrive as output events while the plugin processes
 //! and are reported by the editor's `idle`.
+//!
+//! Offline renders ([`Plugin::set_render_mode`]) reach plugins with `clap.render` as
+//! `CLAP_RENDER_OFFLINE`, set while deactivated in the next `prepare`. A plugin with a hard
+//! real-time requirement stays in real time, and one that refuses the mode is asked again at the
+//! next `prepare` (both logged once per instance).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 

@@ -4,6 +4,7 @@
 
 use serde_json::json;
 use soundcraft_audio_io::AudioBuffer;
+use soundcraft_dsp::RenderMode;
 use soundcraft_engine::Engine;
 use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
 use soundcraft_time::Range;
@@ -69,11 +70,31 @@ fn clap_insert_renders_through_the_mix() {
     assert!(e.execute("mix.insert_param", &json!({"track": t.0, "slot": 0, "param": "Gain", "value": 1.0})).is_err());
 }
 
+/// Offline renders put a hosted plugin in its offline mode; instances made for playback stay in
+/// real time. The fixture gain reports 5 samples of latency offline and 3 in real time, but
+/// delays nothing, so a render's delay compensation moves the audio earlier by exactly that.
+#[test]
+fn offline_renders_put_hosted_plugins_in_their_offline_mode() {
+    install_fixture();
+    let gain = "clap:org.soundcraft.test.gain";
+    let mut e = Engine::default();
+    let s = e.session_mut();
+    let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+    s.pool.insert(SourceId(79), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 2000]] })));
+    let id = s.new_clip_id();
+    s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(id, "dc", SourceId(79), 0, 1000, 2000));
+    e.execute("mix.insert", &json!({"track": t.0, "plugin": gain})).unwrap();
+    let out = soundcraft_mix::render_range(e.session(), Range::new(0, 4800), 512);
+    assert_eq!(out[0].iter().position(|x| x.abs() > 1e-6), Some(1000 - 5), "the bounce rendered it offline");
+    let live = soundcraft_mix::create_instance(gain, None, 48_000.0, 512, 1, RenderMode::Realtime).unwrap();
+    assert_eq!(live.plugin.latency(), 3, "a playback instance renders in real time");
+}
+
 #[test]
 fn a_refused_state_is_reported() {
     install_fixture();
     let gain = "clap:org.soundcraft.test.gain";
-    let make = |state: Option<&[u8]>| soundcraft_mix::create_instance(gain, state, 48_000.0, 512, 2).unwrap();
+    let make = |state: Option<&[u8]>| soundcraft_mix::create_instance(gain, state, 48_000.0, 512, 2, RenderMode::Realtime).unwrap();
     let saved = make(None).plugin.save_state().unwrap();
     assert!(!make(None).refused_state);
     assert!(!make(Some(&saved)).refused_state);
@@ -99,7 +120,7 @@ fn clap_state_is_captured_stored_and_restored_before_the_first_block() {
     eng.set_external_instances(true);
     let specs = soundcraft_mix::instance_specs(e.session());
     assert_eq!(specs.len(), 1);
-    let mut p = soundcraft_mix::create_instance(&specs[0].id, None, 48_000.0, 512, specs[0].ch).unwrap().plugin;
+    let mut p = soundcraft_mix::create_instance(&specs[0].id, None, 48_000.0, 512, specs[0].ch, RenderMode::Realtime).unwrap().plugin;
     p.set_param("7", 1.5);
     let mut io = vec![vec![0.0f32; 64]];
     p.process(&mut io, 64);
