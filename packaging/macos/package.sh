@@ -4,7 +4,12 @@
 #   $DIST/soundcraft-<version>-macos-<arch>.dmg          SoundCraft.app on a drag-to-Applications DMG
 #   $DIST/soundcraft-cli-<version>-macos-<arch>.zip      the headless CLI
 #
-# Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build]
+# Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build] [--local]
+#
+# --local   a build for this Mac only (install-local.sh): signs SoundCraft.app and the CLI and stops.
+#           No DMG, zip or notarization, and no secure timestamp, so signing needs no network. The
+#           signed results stay in $CARGO_TARGET_DIR/macos-package: SoundCraft.app and
+#           soundcraft-cli-<version>-macos-<arch>/soundcraft-cli.
 #
 # Signing (env):
 #   MACOS_SIGN_IDENTITY   codesign identity (name or SHA-1). Default "-" = ad-hoc (local testing;
@@ -19,11 +24,13 @@ HERE="$ROOT/packaging/macos"
 
 ARCH=universal
 SKIP_BUILD=0
+LOCAL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
-    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
+    --local) LOCAL=1; shift ;;
+    -h | --help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -46,6 +53,8 @@ CLI_ZIP="$DIST/soundcraft-cli-$VERSION-macos-$ARCH.zip"
 NOTARIZE=0
 if [ "$IDENTITY" = "-" ]; then
   warn "macOS: ad-hoc signing (no MACOS_SIGN_IDENTITY); artifacts are not notarized"
+elif [ "$LOCAL" = 1 ]; then
+  : # a local build is never notarized
 elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
   NOTARIZE=1
 else
@@ -72,9 +81,10 @@ done
 
 # ---- signing helpers ---------------------------------------------------------------------------
 sign() {
-  # Hardened runtime + secure timestamp for a real identity; ad-hoc can't be timestamped.
+  # Hardened runtime + secure timestamp for a real identity; ad-hoc can't be timestamped, and a
+  # local build needs none (it would need Apple's timestamp server).
   local ts=(--timestamp)
-  [ "$IDENTITY" = "-" ] && ts=(--timestamp=none)
+  if [ "$IDENTITY" = "-" ] || [ "$LOCAL" = 1 ]; then ts=(--timestamp=none); fi
   local kc=()
   [ -n "${MACOS_KEYCHAIN:-}" ] && kc=(--keychain "$MACOS_KEYCHAIN")
   codesign --force --sign "$IDENTITY" ${kc[@]+"${kc[@]}"} "${ts[@]}" "$@"
@@ -125,6 +135,24 @@ if [ "$NOTARIZE" = 1 ]; then
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
   spctl --assess --type execute -vvv "$APP"
+fi
+
+# The CLI hosts the same plugins in-process (headless bounces), so it needs the app's entitlements:
+# without disable-library-validation it can't load any plugin signed by another developer.
+CLI_DIR="$WORK/soundcraft-cli-$VERSION-macos-$ARCH"
+sign_cli() {
+  mkdir -p "$CLI_DIR"
+  cp "$WORK/bin/soundcraft-cli" "$CLI_DIR/"
+  copy_docs "$CLI_DIR"
+  sign --options runtime --entitlements "$HERE/entitlements.plist" "$CLI_DIR/soundcraft-cli"
+  codesign --verify --strict --verbose=2 "$CLI_DIR/soundcraft-cli"
+}
+
+if [ "$LOCAL" = 1 ]; then
+  sign_cli
+  "$WORK/bin/soundcraft-cli" --version
+  echo "==> done (local build): $APP and $CLI_DIR/soundcraft-cli"
+  exit 0
 fi
 
 # ---- DMG ---------------------------------------------------------------------------------------
@@ -192,12 +220,7 @@ fi
 
 # ---- CLI ---------------------------------------------------------------------------------------
 echo "==> building $CLI_ZIP"
-CLI_DIR="$WORK/soundcraft-cli-$VERSION-macos-$ARCH"
-mkdir -p "$CLI_DIR"
-cp "$WORK/bin/soundcraft-cli" "$CLI_DIR/"
-copy_docs "$CLI_DIR"
-sign --options runtime "$CLI_DIR/soundcraft-cli"
-codesign --verify --strict --verbose=2 "$CLI_DIR/soundcraft-cli"
+sign_cli
 rm -f "$CLI_ZIP"
 ditto -c -k --keepParent "$CLI_DIR" "$CLI_ZIP"
 # A bare Mach-O can't carry a stapled ticket; Gatekeeper looks the notarization up online.
