@@ -1,12 +1,13 @@
 //! End to end against the Audio Units Apple ships with macOS: scan → instantiate → params →
-//! process → state, plus an instrument playing a note. Skips (passes) when a unit is missing.
+//! process → state → offline render, plus an instrument playing a note. Skips (passes) when a unit is missing.
 #![cfg(target_os = "macos")]
 
-use soundcraft_dsp::{Category, Plugin};
+use soundcraft_dsp::{Category, ParamInfo, Plugin, RenderMode, Unit};
 
 const LOWPASS: &str = "au:aufx:lpas:appl";
 const DELAY: &str = "au:aufx:dely:appl";
 const DLS: &str = "au:aumu:dls :appl";
+const ROUND_TRIP_AAC: &str = "au:aufx:raac:appl";
 
 fn available(id: &str) -> bool {
     let ok = soundcraft_au_host::scan().iter().any(|d| d.id == id);
@@ -42,6 +43,30 @@ fn run_tone(p: &mut dyn Plugin, freq: f32) -> f32 {
         }
     }
     rms(&tail)
+}
+
+/// A continuous parameter of `id` and a value well away from its default.
+fn moved_param(id: &str) -> (&'static ParamInfo, f32) {
+    let info = soundcraft_au_host::plugin_info(id).unwrap();
+    let p = info.params.iter().find(|q| !matches!(q.unit, Unit::Toggle | Unit::Choice)).unwrap();
+    let (a, b) = (p.min + (p.max - p.min) * 0.25, p.min + (p.max - p.min) * 0.75);
+    (p, if (a - p.default).abs() > (b - p.default).abs() { a } else { b })
+}
+
+fn near(x: Option<f32>, p: &ParamInfo, v: f32) -> bool {
+    x.is_some_and(|x| (x - v).abs() <= (p.max - p.min) * 1e-4)
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::new();
+    for c in bytes.chunks(3) {
+        let n = c.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            s.push(if i <= c.len() { char::from(ABC[(n >> (18 - 6 * i) & 63) as usize]) } else { '=' });
+        }
+    }
+    s
 }
 
 #[test]
@@ -127,6 +152,122 @@ fn state_reader_reads_while_another_thread_renders() {
     assert_eq!(reader.save_state(), None);
     assert!(q.load_state(&state));
     assert!((q.param(cutoff.id).unwrap() - 500.0).abs() < 1.0, "{:?}", q.param(cutoff.id));
+}
+
+#[test]
+fn delay_state_round_trips_into_a_new_instance() {
+    if !available(DELAY) {
+        return;
+    }
+    let (param, v) = moved_param(DELAY);
+    let mut p = soundcraft_au_host::create(DELAY).unwrap();
+    assert!(p.set_param(param.id, v));
+    let state = p.save_state().expect("ClassInfo");
+    drop(p);
+    let mut q = soundcraft_au_host::create(DELAY).unwrap();
+    assert!(!near(q.param(param.id), param, v), "a new instance starts from the default");
+    // As the mixer restores an insert: load, then prepare.
+    assert!(q.load_state(&state));
+    assert!(near(q.param(param.id), param, v), "{:?}", q.param(param.id));
+    q.prepare(44_100.0, 256, 2);
+    assert!(near(q.param(param.id), param, v), "prepare keeps the loaded value: {:?}", q.param(param.id));
+    assert!(run_tone(q.as_mut(), 440.0) > 0.01, "audio still processes");
+    // The unit itself holds the value, not just the host's cache.
+    let again = q.save_state().expect("ClassInfo");
+    let mut r = soundcraft_au_host::create(DELAY).unwrap();
+    assert!(r.load_state(&again));
+    assert!(near(r.param(param.id), param, v), "{:?}", r.param(param.id));
+}
+
+#[test]
+fn refused_states_keep_the_previous_one() {
+    if !available(DELAY) {
+        return;
+    }
+    let (param, v) = moved_param(DELAY);
+    let mut p = soundcraft_au_host::create(DELAY).unwrap();
+    p.prepare(48_000.0, 512, 2);
+    assert!(p.set_param(param.id, v));
+    let before = p.save_state().expect("ClassInfo");
+    let xml = |body: &str| {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\">{body}</plist>"
+        )
+        .into_bytes()
+    };
+    // AUDelay's own state format (an AUBase one): its parameter data sets `param` to `other`,
+    // then names a scope that does not exist, so the unit applies the parameter before it refuses
+    // the rest. Only setting the previous state back undoes that.
+    let other = param.min + (param.max - param.min) * 0.1;
+    let mut data = Vec::new();
+    for word in [0, 0, 1, param.id.parse::<u32>().unwrap(), other.to_bits(), 0xDEAD_BEEF] {
+        data.extend_from_slice(&u32::to_be_bytes(word));
+    }
+    let code = |s: &[u8; 4]| u32::from_be_bytes(*s);
+    let applied_in_part = xml(&format!(
+        "<dict><key>version</key><integer>0</integer><key>type</key><integer>{}</integer><key>subtype</key><integer>{}</integer>\
+         <key>manufacturer</key><integer>{}</integer><key>name</key><string>Untitled</string><key>data</key><data>{}</data></dict>",
+        code(b"aufx"),
+        code(b"dely"),
+        code(b"appl"),
+        base64(&data)
+    ));
+    let mut bad = vec![
+        ("empty", Vec::new()),
+        ("truncated", before[..before.len() / 2].to_vec()),
+        ("garbage", b"bplist00 garbage \x00\x01\x02\xff".to_vec()),
+        ("not a dictionary", xml("<array><string>x</string></array>")),
+        ("an empty dictionary", xml("<dict/>")),
+        ("an unknown version", xml("<dict><key>version</key><integer>99</integer></dict>")),
+        ("oversized", vec![0u8; (64 << 20) + 1]),
+        ("a state the unit applies in part", applied_in_part),
+    ];
+    if available(LOWPASS) {
+        bad.push(("another unit's state", soundcraft_au_host::create(LOWPASS).unwrap().save_state().expect("ClassInfo")));
+    }
+    for (what, bytes) in &bad {
+        assert!(!p.load_state(bytes), "{what} is refused");
+        assert!(near(p.param(param.id), param, v), "{what}: {:?}", p.param(param.id));
+        assert_eq!(p.save_state().as_deref(), Some(&before[..]), "{what}: the unit kept its state");
+    }
+    assert!(run_tone(p.as_mut(), 440.0) > 0.01, "audio still processes");
+}
+
+#[test]
+fn state_reader_matches_save_state_and_outlives_the_instance() {
+    if !available(DELAY) {
+        return;
+    }
+    let (param, v) = moved_param(DELAY);
+    let mut p = soundcraft_au_host::create(DELAY).unwrap();
+    assert!(p.set_param(param.id, v));
+    let mut reader = p.state_reader().expect("every unit has a ClassInfo");
+    let saved = p.save_state().expect("ClassInfo");
+    assert_eq!(reader.save_state().as_deref(), Some(&saved[..]));
+    let mut late = p.state_reader().expect("ClassInfo");
+    drop(p);
+    assert_eq!(reader.save_state(), None, "no state (and no crash) once the instance is gone");
+    assert_eq!(reader.save_state(), None);
+    assert_eq!(late.save_state(), None);
+}
+
+/// AURoundTripAAC has an offline render mode; AUDelay has none and must keep working (that the
+/// mode reaches the unit is checked in the crate's own tests).
+#[test]
+fn units_render_offline_and_back() {
+    for id in [ROUND_TRIP_AAC, DELAY] {
+        if !available(id) {
+            continue;
+        }
+        let mut p = soundcraft_au_host::create(id).unwrap();
+        p.set_render_mode(RenderMode::Offline);
+        p.prepare(48_000.0, 512, 2);
+        assert!(run_tone(p.as_mut(), 440.0) > 0.01, "{id}: processes offline");
+        p.set_render_mode(RenderMode::Realtime);
+        p.prepare(48_000.0, 512, 2);
+        assert!(run_tone(p.as_mut(), 440.0) > 0.01, "{id}: processes in real time again");
+    }
 }
 
 #[test]

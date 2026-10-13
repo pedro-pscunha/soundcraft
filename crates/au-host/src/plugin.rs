@@ -1,7 +1,7 @@
 //! `AuPlugin`: a loaded Audio Unit behind the safe `soundcraft_dsp::Plugin` trait.
 
 use crate::ffi::Instance;
-use soundcraft_dsp::{Plugin, PluginInfo, Transport};
+use soundcraft_dsp::{Plugin, PluginInfo, RenderMode, Transport};
 
 /// Most MIDI events queued between two blocks (extra events are dropped).
 const EVENT_CAP: usize = 1024;
@@ -32,6 +32,10 @@ pub struct AuPlugin {
     has_input: bool,
     /// Accepts MIDI (instruments and music effects).
     takes_midi: bool,
+    /// The mode to render in from the next `prepare` on (see `Plugin::set_render_mode`).
+    mode: RenderMode,
+    /// Already logged that the unit refused `mode`.
+    mode_warned: bool,
     channels: usize,
     latency: usize,
     tail: usize,
@@ -50,6 +54,8 @@ impl AuPlugin {
             held: [false; 128],
             has_input,
             takes_midi,
+            mode: RenderMode::Realtime,
+            mode_warned: false,
             channels: 2,
             latency: 0,
             tail: 0,
@@ -84,7 +90,7 @@ impl Plugin for AuPlugin {
     fn prepare(&mut self, sample_rate: f32, max_block: usize, channels: usize) {
         let sr = if sample_rate.is_finite() && sample_rate > 0.0 { f64::from(sample_rate) } else { 48_000.0 };
         self.channels = channels.clamp(1, MAX_CHANNELS);
-        match self.inst.configure(sr, max_block, self.channels) {
+        match self.inst.configure(sr, max_block, self.channels, self.mode) {
             Ok(_) => {
                 self.latency = self.inst.latency();
                 self.tail = self.inst.tail();
@@ -94,6 +100,14 @@ impl Plugin for AuPlugin {
                 self.latency = 0;
                 self.tail = 0;
             }
+        }
+        // A unit without an offline mode renders the same either way: nothing to tell.
+        if let Some(actual) = self.inst.render_mode()
+            && actual != self.mode
+            && !self.mode_warned
+        {
+            self.mode_warned = true;
+            log::warn!("{}: renders in its {actual} mode, not {} (it refused the OfflineRender property)", self.info.id, self.mode);
         }
         // Re-send every value so a re-initialized unit matches the session.
         for (&id, &v) in self.ids.iter().zip(&self.values) {
@@ -105,6 +119,10 @@ impl Plugin for AuPlugin {
         self.events.clear();
         self.held = [false; 128];
         self.inst.reset();
+    }
+
+    fn set_render_mode(&mut self, mode: RenderMode) {
+        self.mode = mode;
     }
 
     fn set_param(&mut self, id: &str, value: f32) -> bool {
@@ -258,5 +276,33 @@ impl Plugin for AuPlugin {
     fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
         let link = self.inst.state_link();
         Some(Box::new(move || link.save_state()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mode reaches a unit that has one (AURoundTripAAC reports its `OfflineRender`
+    /// property); AUDelay has none, so there is nothing it could refuse (and nothing to log). Both
+    /// ship with macOS; skipped where missing.
+    #[test]
+    fn the_render_mode_reaches_units_that_have_one() {
+        let Ok(mut aac) = crate::instantiate_plugin("au:aufx:raac:appl") else { return };
+        aac.prepare(48_000.0, 512, 2);
+        assert_eq!(aac.inst.unit_reports_offline(), Some(false), "real time by default");
+        aac.set_render_mode(RenderMode::Offline);
+        assert_eq!(aac.inst.unit_reports_offline(), Some(false), "a change takes effect at the next prepare");
+        aac.prepare(48_000.0, 512, 2);
+        assert_eq!(aac.inst.unit_reports_offline(), Some(true));
+        assert_eq!(aac.inst.render_mode(), Some(RenderMode::Offline));
+        aac.set_render_mode(RenderMode::Realtime);
+        aac.prepare(48_000.0, 512, 2);
+        assert_eq!(aac.inst.unit_reports_offline(), Some(false), "back in real time");
+        let Ok(mut delay) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        delay.set_render_mode(RenderMode::Offline);
+        delay.prepare(48_000.0, 512, 2);
+        assert_eq!(delay.inst.unit_reports_offline(), None);
+        assert_eq!(delay.inst.render_mode(), None, "no offline mode: nothing refused");
     }
 }

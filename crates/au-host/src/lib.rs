@@ -21,7 +21,14 @@
 //!
 //! Plugin state: [`Plugin::save_state`] returns the unit's `ClassInfo` property list
 //! (`kAudioUnitProperty_ClassInfo`) as a binary plist; [`Plugin::load_state`] parses it back and
-//! sets it, then re-reads the parameter values.
+//! sets it (a unit that refuses it gets its previous state back), tells the unit's parameter
+//! listeners that every parameter may have changed, then re-reads the parameter values.
+//! [`Plugin::state_reader`] reads the state on the UI thread while the instance renders, and
+//! returns `None` once the instance is gone.
+//!
+//! Offline renders ([`Plugin::set_render_mode`]) set the unit's `OfflineRender` property at the
+//! next `prepare`; units without one render as in real time, and a unit that refuses it is logged
+//! once per instance.
 //!
 //! Host callbacks report the session's tempo, meter, position and play state.
 //!

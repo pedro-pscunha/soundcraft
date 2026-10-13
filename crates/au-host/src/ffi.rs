@@ -6,7 +6,7 @@
 //! host callbacks read are leaked `Box`es freed only after the unit is disposed, and output buffers
 //! are re-pointed before each render.
 
-use soundcraft_dsp::Transport;
+use soundcraft_dsp::{RenderMode, Transport};
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -44,6 +44,13 @@ const PROP_PARAMETER_VALUE_STRINGS: u32 = 16;
 const PROP_TAIL_TIME: u32 = 20;
 const PROP_SET_RENDER_CALLBACK: u32 = 23;
 const PROP_HOST_CALLBACKS: u32 = 27;
+const PROP_OFFLINE_RENDER: u32 = 37;
+
+/// `kAudioUnitErr_InvalidProperty`: the unit has no such property.
+const ERR_INVALID_PROPERTY: OSStatus = -10879;
+
+/// `kAUParameterListener_AnyParameter`: "any of the unit's parameters" (notifications only).
+const ANY_PARAMETER: u32 = 0xFFFF_FFFF;
 
 const SCOPE_GLOBAL: u32 = 0;
 const SCOPE_INPUT: u32 = 1;
@@ -306,6 +313,15 @@ struct AuRenderCallbackStruct {
     input_proc_ref_con: *mut c_void,
 }
 
+/// One parameter of one unit, as parameter listeners see it.
+#[repr(C)]
+struct AudioUnitParameter {
+    unit: AudioUnit,
+    id: u32,
+    scope: u32,
+    element: u32,
+}
+
 #[repr(C)]
 struct AudioUnitParameterInfo {
     name: [c_char; 52],
@@ -344,6 +360,7 @@ unsafe extern "C" {
     ) -> OSStatus;
     fn AudioUnitReset(unit: AudioUnit, scope: u32, element: u32) -> OSStatus;
     fn MusicDeviceMIDIEvent(unit: AudioUnit, status: u32, data1: u32, data2: u32, offset: u32) -> OSStatus;
+    fn AUParameterListenerNotify(sending_listener: *mut c_void, sending_object: *mut c_void, parameter: *const AudioUnitParameter) -> OSStatus;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -370,6 +387,24 @@ fn release(cf: CFTypeRef) {
         // SAFETY: `cf` is a non-null CF object the caller owns a +1 reference to.
         unsafe { CFRelease(cf) }
     }
+}
+
+/// The unit's `ClassInfo` property list (+1: the caller releases it), or null when the unit
+/// refuses.
+///
+/// # Safety
+/// `unit` is a live Audio Unit.
+unsafe fn class_info(unit: AudioUnit) -> CFTypeRef {
+    let mut plist: CFTypeRef = ptr::null();
+    let mut size = std::mem::size_of::<CFTypeRef>() as u32;
+    // SAFETY: `unit` is live (the contract above); the property is a `CFPropertyListRef`
+    // returned +1; `plist`/`size` are locals of the right types.
+    let st = unsafe { AudioUnitGetProperty(unit, PROP_CLASS_INFO, SCOPE_GLOBAL, 0, (&mut plist as *mut CFTypeRef).cast(), &mut size) };
+    if st != 0 {
+        release(plist);
+        return ptr::null();
+    }
+    plist
 }
 
 /// Converts a borrowed CFString to a Rust string (empty on any failure or a non-string).
@@ -518,6 +553,9 @@ pub struct Instance {
     abl: AudioBufferList,
     has_input: bool,
     initialized: bool,
+    /// The render mode the unit is in (set by `configure`); `None` when it has no
+    /// `OfflineRender` property, so it renders the same either way.
+    mode: Option<RenderMode>,
     channels: usize,
     max_frames: usize,
     sample_rate: f64,
@@ -564,6 +602,7 @@ impl Instance {
             has_input,
             link: std::sync::Arc::new(StateLink(std::sync::Mutex::new(LinkedUnit(Some(unit))))),
             initialized: false,
+            mode: Some(RenderMode::Realtime),
             channels: 0,
             max_frames: 0,
             sample_rate: 48_000.0,
@@ -621,15 +660,24 @@ impl Instance {
     }
 
     /// (Re)configures and initializes the unit for `sample_rate`, `max_frames`-frame slices and
-    /// (preferably) `channels` channels on its main input and output buses. Returns the channel
-    /// count it accepted. Not realtime-safe (allocates the buffers).
-    pub fn configure(&mut self, sample_rate: f64, max_frames: usize, channels: usize) -> Result<usize, String> {
+    /// (preferably) `channels` channels on its main input and output buses, in `mode` as far as
+    /// the unit goes along (see [`Instance::render_mode`]). Returns the channel count it accepted.
+    /// Not realtime-safe (allocates the buffers).
+    pub fn configure(&mut self, sample_rate: f64, max_frames: usize, channels: usize, mode: RenderMode) -> Result<usize, String> {
         if self.initialized {
             // SAFETY: the unit is live and initialized.
             unsafe { AudioUnitUninitialize(self.unit) };
             self.initialized = false;
         }
         self.max_frames = 0;
+        // Set while uninitialized, and only when it changes (as hosts do around a bounce).
+        if self.mode.is_some_and(|m| m != mode) {
+            match self.set_property(PROP_OFFLINE_RENDER, SCOPE_GLOBAL, 0, &u32::from(mode == RenderMode::Offline)) {
+                0 => self.mode = Some(mode),
+                ERR_INVALID_PROPERTY => self.mode = None,
+                _ => {}
+            }
+        }
         let mf = max_frames.clamp(1, MAX_SLICE);
         let _ = self.set_property(PROP_MAX_FRAMES, SCOPE_GLOBAL, 0, &(mf as u32));
         if self.has_input {
@@ -681,6 +729,22 @@ impl Instance {
 
     pub fn is_ready(&self) -> bool {
         self.initialized && self.max_frames > 0
+    }
+
+    /// The render mode the unit is in (`configure` switches it; one that refuses stays in its
+    /// mode), or `None` when it has no offline render mode.
+    pub fn render_mode(&self) -> Option<RenderMode> {
+        self.mode
+    }
+
+    /// The unit's `OfflineRender` property as it reports it (`None` when it has none).
+    #[cfg(test)]
+    pub fn unit_reports_offline(&self) -> Option<bool> {
+        let mut v = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: the property is a `UInt32`; `v`/`size` are locals of the right types.
+        let st = unsafe { AudioUnitGetProperty(self.unit, PROP_OFFLINE_RENDER, SCOPE_GLOBAL, 0, (&mut v as *mut u32).cast(), &mut size) };
+        (st == 0).then_some(v != 0)
     }
 
     pub fn max_frames(&self) -> usize {
@@ -863,7 +927,9 @@ impl Instance {
     }
 
     /// Restores a blob from [`StateLink::save_state`] (hostile input: parsed by CoreFoundation,
-    /// must be a dictionary, and the unit validates it).
+    /// must be a dictionary, and the unit validates it), then tells the unit's parameter
+    /// listeners (its view) that any parameter may have changed. When the unit refuses the blob,
+    /// its previous state is set back: a unit may apply part of a state before refusing the rest.
     pub fn load_state(&self, bytes: &[u8]) -> bool {
         if bytes.is_empty() || bytes.len() > MAX_STATE {
             return false;
@@ -883,9 +949,29 @@ impl Instance {
         }
         // SAFETY: `plist` is a live CF object we own.
         let is_dict = unsafe { CFGetTypeID(plist) == CFDictionaryGetTypeID() };
-        let st = if is_dict { self.set_property(PROP_CLASS_INFO, SCOPE_GLOBAL, 0, &plist) } else { -50 };
+        let st = if is_dict {
+            // Under the link's lock: a state handle never reads the state halfway through a load.
+            let _g = self.link.lock();
+            // SAFETY: the unit is live (disposed only in `Drop`).
+            let previous = unsafe { class_info(self.unit) };
+            let st = self.set_property(PROP_CLASS_INFO, SCOPE_GLOBAL, 0, &plist);
+            if st != 0 && !previous.is_null() {
+                let _ = self.set_property(PROP_CLASS_INFO, SCOPE_GLOBAL, 0, &previous);
+            }
+            release(previous);
+            st
+        } else {
+            -50
+        };
         release(plist);
-        st == 0
+        if st != 0 {
+            return false;
+        }
+        let any = AudioUnitParameter { unit: self.unit, id: ANY_PARAMETER, scope: SCOPE_GLOBAL, element: 0 };
+        // SAFETY: the unit is live; `any` is a local; no sending listener or object (both may be
+        // null).
+        unsafe { AUParameterListenerNotify(ptr::null_mut(), ptr::null_mut(), &any) };
+        true
     }
 }
 
@@ -909,13 +995,13 @@ impl StateLink {
     pub fn save_state(&self) -> Option<Vec<u8>> {
         let g = self.lock();
         let unit = g.0?;
-        let mut plist: CFTypeRef = ptr::null();
-        let mut size = std::mem::size_of::<CFTypeRef>() as u32;
-        // SAFETY: the unit is live while the link holds it (see the type); the property is a
-        // `CFPropertyListRef` returned +1; `plist` is a local pointer.
-        let st = unsafe { AudioUnitGetProperty(unit, PROP_CLASS_INFO, SCOPE_GLOBAL, 0, (&mut plist as *mut CFTypeRef).cast(), &mut size) };
-        if st != 0 || plist.is_null() {
-            release(plist);
+        // SAFETY: the unit is live while the link holds it: the instance clears the link under
+        // this lock before disposing of it. This may run while the instance renders on the audio
+        // thread: Audio Units serve `ClassInfo` from the main thread during rendering (hosts save
+        // sessions while playing). State loads take this lock too, so a read never sees one
+        // halfway.
+        let plist = unsafe { class_info(unit) };
+        if plist.is_null() {
             return None;
         }
         let mut err: CFTypeRef = ptr::null();
@@ -962,6 +1048,59 @@ impl Drop for Instance {
 mod tests {
     use super::*;
 
+    type ListenerProc = unsafe extern "C" fn(*mut c_void, *mut c_void, *const AudioUnitParameter, f32);
+
+    #[link(name = "AudioToolbox", kind = "framework")]
+    unsafe extern "C" {
+        fn AUListenerCreate(
+            listener_proc: ListenerProc,
+            user: *mut c_void,
+            run_loop: CFTypeRef,
+            mode: CFTypeRef,
+            interval: f32,
+            out: *mut *mut c_void,
+        ) -> OSStatus;
+        fn AUListenerAddParameter(listener: *mut c_void, object: *mut c_void, parameter: *const AudioUnitParameter) -> OSStatus;
+        fn AUListenerDispose(listener: *mut c_void) -> OSStatus;
+    }
+
+    /// Counts notifications into the `AtomicU32` behind `user`.
+    unsafe extern "C" fn count(user: *mut c_void, _object: *mut c_void, _parameter: *const AudioUnitParameter, _value: f32) {
+        // SAFETY: `user` is the test's counter, alive until the listener is disposed.
+        if let Some(n) = unsafe { (user as *const AtomicU32).as_ref() } {
+            n.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_state_load_notifies_parameter_listeners() {
+        let code = |s: &[u8; 4]| u32::from_be_bytes(*s);
+        // AULowpass ships with macOS; skip where it is missing.
+        let Ok(inst) = Instance::new(code(b"aufx"), code(b"lpas"), code(b"appl"), true) else { return };
+        let state = inst.state_link().save_state().expect("ClassInfo");
+        let calls = AtomicU32::new(0);
+        let mut listener: *mut c_void = ptr::null_mut();
+        // Listens to parameter 0 only: the load's "any parameter" notice must reach it.
+        let first = AudioUnitParameter { unit: inst.unit, id: 0, scope: SCOPE_GLOBAL, element: 0 };
+        // SAFETY: `calls` outlives the listener (disposed below); without a run loop the listener
+        // is called on the notifying thread; the out pointer and the parameter are locals.
+        unsafe {
+            assert_eq!(AUListenerCreate(count, ptr::from_ref(&calls).cast_mut().cast(), ptr::null(), ptr::null(), 0.0, &mut listener), 0);
+            assert_eq!(AUListenerAddParameter(listener, ptr::null_mut(), &first), 0);
+        }
+        assert!(!inst.load_state(b"not a property list"));
+        assert!(inst.load_state(&state));
+        for _ in 0..200 {
+            if calls.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "one notice, for the accepted state only");
+        // SAFETY: the listener created above, disposed once, before `calls` goes away.
+        unsafe { AUListenerDispose(listener) };
+    }
+
     #[test]
     fn host_callbacks_report_the_transport() {
         let time = HostTime::new();
@@ -998,6 +1137,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(AudioBufferListHeader, first), 8);
         assert_eq!(std::mem::size_of::<AuRenderCallbackStruct>(), 16);
         assert_eq!(std::mem::size_of::<HostCallbackInfo>(), 40);
+        assert_eq!(std::mem::offset_of!(AudioUnitParameter, id), 8);
+        assert_eq!(std::mem::offset_of!(AudioUnitParameter, element), 16);
+        assert_eq!(std::mem::size_of::<AudioUnitParameter>(), 24);
         assert_eq!(std::mem::offset_of!(AudioUnitParameterInfo, unit_name), 56);
         assert_eq!(std::mem::offset_of!(AudioUnitParameterInfo, cf_name_string), 72);
         assert_eq!(std::mem::offset_of!(AudioUnitParameterInfo, flags), 96);
