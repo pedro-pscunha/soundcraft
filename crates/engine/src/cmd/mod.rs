@@ -6,6 +6,7 @@ use soundcraft_model::{ClipId, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::sync::OnceLock;
 
+mod au;
 mod audio_midi;
 mod audiosuite;
 mod clap;
@@ -130,6 +131,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(setup_more::specs());
         v.extend(clap::specs());
         v.extend(vst3::specs());
+        v.extend(au::specs());
         v.extend(surround::specs());
         v.extend(plugin_state::specs());
         v.extend(instrument::specs());
