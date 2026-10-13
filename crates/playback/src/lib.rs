@@ -29,7 +29,7 @@ pub use devices::AudioConfig;
 
 use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
-use soundcraft_model::{Session, TrackId};
+use soundcraft_model::{Insert, Session, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
@@ -393,10 +393,21 @@ impl AudioState {
     }
 }
 
+/// What was last created for a slot.
+#[derive(Debug, PartialEq)]
+struct Live {
+    id: String,
+    ch: usize,
+    /// False when the plugin could not be made (remembered, not retried every update).
+    created: bool,
+    /// The [`Insert::state_epoch`] it was made from: a new one means a new state to restore.
+    epoch: u64,
+}
+
 /// UI-thread bookkeeping of the third-party instances the audio thread holds.
 struct Side {
-    /// What was last created for each slot: (plugin id, channels, created ok).
-    shadow: HashMap<(TrackId, usize), (String, usize, bool)>,
+    /// What was last created for each slot.
+    shadow: HashMap<(TrackId, usize), Live>,
     /// Session sample rate the instances were prepared for.
     rate: f32,
     /// Editor handles of the live instances.
@@ -668,9 +679,11 @@ impl Player {
         let _ = self.tx.send(Cmd::Session(s, instances));
     }
 
-    /// Reads the state of every live third-party plugin, for saving the session.
-    pub fn capture_states(&self) -> PluginStates {
-        self.side().capture_states()
+    /// Reads the state of every live third-party plugin, for saving `s` (the current session):
+    /// store each on its insert with [`Insert::store_live_state`]. Slots `s` changed since the last
+    /// [`update_session`](Self::update_session) are left out (their new insert wins).
+    pub fn capture_states(&self, s: &Session) -> PluginStates {
+        self.side().capture_states(s)
     }
 
     /// Per-UI-frame housekeeping: drops retired instances and services plugin editors. Returns
@@ -791,8 +804,18 @@ fn copy_meter_snapshot(source: &MeterSnapshot, out: &mut MeterSnapshot) {
 }
 
 impl Side {
-    fn capture_states(&mut self) -> PluginStates {
-        self.states.iter_mut().filter(|(k, _)| !self.refused.contains(*k)).filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?))).collect()
+    /// Reads the live instances `s` still describes. A slot whose insert changed since the last
+    /// `prepare` (another plugin, or a new state set by a command in the same frame as the save) is
+    /// skipped: its instance is about to be made again, and its state would overwrite the new one.
+    fn capture_states(&mut self, s: &Session) -> PluginStates {
+        let current = |k: &(TrackId, usize)| {
+            self.shadow.get(k).zip(insert_at(s, *k)).is_some_and(|(l, ins)| l.id == ins.plugin && l.epoch == ins.state_epoch())
+        };
+        self.states
+            .iter_mut()
+            .filter(|(k, _)| !self.refused.contains(*k) && current(k))
+            .filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?)))
+            .collect()
     }
 
     fn open_editor(&mut self, key: (TrackId, usize)) -> Result<(), String> {
@@ -822,14 +845,18 @@ impl Side {
         let mut out = Vec::new();
         for spec in specs {
             let key = (spec.track, spec.slot);
-            if self.shadow.get(&key).is_some_and(|(id, ch, _)| *id == spec.id && *ch == spec.ch) {
+            // A new state (set by a command or a preset, or a loaded insert) makes the instance
+            // again; otherwise it would keep its old settings and the next capture would write them
+            // over the new state. Undo, Redo and captured states keep the epoch, and the instance.
+            let epoch = insert_at(s, key).map_or(0, Insert::state_epoch);
+            if self.shadow.get(&key).is_some_and(|l| l.id == spec.id && l.ch == spec.ch && l.epoch == epoch) {
                 continue;
             }
             self.forget(key);
             // Played live: these stay in real time (offline renders make their own instances).
             let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch, soundcraft_dsp::RenderMode::Realtime);
             log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
-            self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
+            self.shadow.insert(key, Live { id: spec.id.clone(), ch: spec.ch, created: made.is_some(), epoch });
             if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {
                 if let Some(e) = plugin.editor() {
                     self.editors.insert(key, e);
@@ -845,6 +872,12 @@ impl Side {
         }
         out
     }
+}
+
+/// The insert in `slot` (or the instrument, [`soundcraft_mix::INSTRUMENT_SLOT`]) of a track.
+fn insert_at(s: &Session, (t, slot): (TrackId, usize)) -> Option<&Insert> {
+    let tr = s.track(t)?;
+    if slot == soundcraft_mix::INSTRUMENT_SLOT { tr.instrument.as_ref() } else { tr.mixer.inserts.get(slot)?.as_ref() }
 }
 
 /// ITU stereo fold-down gains for each main channel of a session.
@@ -1134,18 +1167,49 @@ mod tests {
         assert_eq!(grx.try_recv().unwrap().len(), 1);
     }
 
+    /// A session with one mono track whose insert A holds a hosted plugin that is not installed:
+    /// `prepare` remembers the slot without making an instance, and a state reader stands in for
+    /// the live instance (making the instance again, `forget`, drops it).
+    fn hosted_slot() -> (Side, Session, (TrackId, usize)) {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut side = Side::new(48_000.0, channel().1);
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:does.not.exist"));
+        side.prepare(&s);
+        side.states.insert((t, 0), live(b"live"));
+        (side, s, (t, 0))
+    }
+
+    fn live(state: &'static [u8]) -> Box<dyn PluginStateReader> {
+        Box::new(move || Some(state.to_vec()))
+    }
+
+    fn insert_mut(s: &mut Session, (t, slot): (TrackId, usize)) -> &mut Insert {
+        s.track_mut(t).unwrap().mixer.inserts[slot].as_mut().unwrap()
+    }
+
     #[test]
     fn plugin_states_are_read_without_the_audio_thread() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
         let mut side = Side::new(48_000.0, channel().1);
-        let (a, b) = (TrackId(1), TrackId(2));
-        side.states.insert((b, 0), Box::new(|| Some(b"b0".to_vec())));
-        side.states.insert((a, soundcraft_mix::INSTRUMENT_SLOT), Box::new(|| Some(b"synth".to_vec())));
-        side.states.insert((a, 3), Box::new(|| Some(b"a3".to_vec())));
+        let mut s = Session::default();
+        let a = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        let b = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let hosted = || Some(Insert::new("clap:does.not.exist"));
+        s.track_mut(a).unwrap().instrument = hosted();
+        s.track_mut(a).unwrap().mixer.inserts[3] = hosted();
+        s.track_mut(a).unwrap().mixer.inserts[4] = hosted();
+        s.track_mut(b).unwrap().mixer.inserts[0] = hosted();
+        side.prepare(&s);
+        side.states.insert((b, 0), live(b"b0"));
+        side.states.insert((a, soundcraft_mix::INSTRUMENT_SLOT), live(b"synth"));
+        side.states.insert((a, 3), live(b"a3"));
         side.states.insert((a, 4), Box::new(|| None));
         let want = vec![(a, 3, b"a3".to_vec()), (a, soundcraft_mix::INSTRUMENT_SLOT, b"synth".to_vec()), (b, 0, b"b0".to_vec())];
-        assert_eq!(side.capture_states(), want);
+        assert_eq!(side.capture_states(&s), want);
         side.forget((a, 3));
-        assert_eq!(side.capture_states(), want[1..]);
+        assert_eq!(side.capture_states(&s), want[1..]);
     }
 
     struct Window;
@@ -1165,31 +1229,136 @@ mod tests {
 
     #[test]
     fn a_refused_state_is_kept_until_the_editor_opens() {
-        let mut side = Side::new(48_000.0, channel().1);
-        let k = (TrackId(1), 0);
-        side.states.insert(k, Box::new(|| Some(b"defaults".to_vec())));
+        let (mut side, s, k) = hosted_slot();
+        side.states.insert(k, live(b"defaults"));
         side.editors.insert(k, Box::new(Window));
         side.refused.insert(k);
-        assert!(side.capture_states().is_empty());
+        assert!(side.capture_states(&s).is_empty());
         side.open_editor(k).unwrap();
-        assert_eq!(side.capture_states(), vec![(TrackId(1), 0, b"defaults".to_vec())]);
+        assert_eq!(side.capture_states(&s), vec![(k.0, 0, b"defaults".to_vec())]);
     }
 
     #[test]
     fn side_creates_each_missing_instance_once() {
-        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        use soundcraft_model::{ChannelFormat, TrackKind};
         let mut side = Side::new(48_000.0, channel().1);
-        let mut s = soundcraft_model::Session::default();
+        let mut s = Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:does.not.exist"));
         s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("gain"));
         assert!(side.prepare(&s).is_empty(), "the plugin is not installed; built-ins stay with the engine");
-        assert_eq!(side.shadow.get(&(t, 0)), Some(&("clap:does.not.exist".to_string(), 1, false)));
+        let epoch = insert_mut(&mut s, (t, 0)).state_epoch();
+        assert_eq!(side.shadow.get(&(t, 0)), Some(&Live { id: "clap:does.not.exist".into(), ch: 1, created: false, epoch }));
         assert!(side.prepare(&s).is_empty());
         assert_eq!(side.shadow.len(), 1, "failures are remembered, not retried every update");
         s.track_mut(t).unwrap().mixer.inserts[0] = None;
         side.prepare(&s);
         assert!(side.shadow.is_empty());
+    }
+
+    /// A state set by a command (an agent's `mix.insert_state`, a track preset) must reach the
+    /// live instance. Before, only a new plugin id or channel count made it again, so it kept its
+    /// old settings, and the next capture before a save or bounce wrote those over the new state.
+    #[test]
+    fn a_new_state_makes_the_instance_again_and_a_captured_one_does_not() {
+        let (mut side, mut s, k) = hosted_slot();
+        // What the UI does before a save or bounce: read the live state and store it on the insert.
+        let captured = side.capture_states(&s);
+        insert_mut(&mut s, k).store_live_state(&captured[0].2);
+        side.prepare(&s);
+        assert!(side.states.contains_key(&k), "storing the live instance's own state made it again");
+        insert_mut(&mut s, k).set_state_bytes(b"another state");
+        side.prepare(&s);
+        assert!(!side.states.contains_key(&k), "the new state never reached the live instance");
+        side.states.insert(k, live(b"another state"));
+        side.prepare(&s);
+        assert!(side.states.contains_key(&k), "an unchanged state made it again");
+        // The same bytes set again (a preset loaded again over tweaks, an agent restoring a state
+        // the instance once held) are a new state too.
+        insert_mut(&mut s, k).set_state_bytes(b"another state");
+        side.prepare(&s);
+        assert!(!side.states.contains_key(&k), "setting a state again did not reset the plugin");
+    }
+
+    /// Undo and Redo swap in whole earlier documents, whose inserts hold the states captured before
+    /// them (or none). The live instance already went through those: Undo after a save, a bounce or
+    /// an autosave must not make it again from an older state.
+    #[test]
+    fn undo_and_redo_past_a_capture_keep_the_live_instance() {
+        let (mut side, mut s, k) = hosted_slot();
+        side.states.insert(k, live(b"tweaked in its editor"));
+        // A fader move: its undo step holds the insert without a state.
+        let before_fader = s.clone();
+        s.track_mut(k.0).unwrap().mixer.volume_db = -6.0;
+        side.prepare(&s);
+        // A save captures the live state and stores it on the insert.
+        let captured = side.capture_states(&s);
+        insert_mut(&mut s, k).store_live_state(&captured[0].2);
+        side.prepare(&s);
+        side.prepare(&before_fader);
+        assert!(side.states.contains_key(&k), "Undo rebuilt the plugin from the state its undo step holds");
+        side.prepare(&s);
+        assert!(side.states.contains_key(&k), "Redo rebuilt the plugin");
+    }
+
+    /// Undo of a command that set a state (loading a track preset) brings the older state back, so
+    /// the instance is made again from it; Redo brings the preset's back.
+    #[test]
+    fn undo_and_redo_of_a_new_state_make_the_instance_again() {
+        let (mut side, mut s, k) = hosted_slot();
+        let before = s.clone();
+        insert_mut(&mut s, k).set_state_bytes(b"preset");
+        side.prepare(&s);
+        side.states.insert(k, live(b"preset"));
+        side.prepare(&before);
+        assert!(!side.states.contains_key(&k), "Undo kept the preset's instance");
+        side.states.insert(k, live(b"live"));
+        side.prepare(&s);
+        assert!(!side.states.contains_key(&k), "Redo kept the older instance");
+    }
+
+    /// A captured state the UI could not store (`mix.insert_state` refuses states over 64 MiB)
+    /// leaves the session as it was. The live instance still holds its own state and must keep it.
+    #[test]
+    fn a_capture_that_was_not_stored_keeps_the_live_instance() {
+        let (mut side, mut s, k) = hosted_slot();
+        side.states.insert(k, live(b"too large to store"));
+        assert_eq!(side.capture_states(&s).len(), 1);
+        // The next edit sends the session again.
+        s.track_mut(k.0).unwrap().mixer.volume_db = -6.0;
+        side.prepare(&s);
+        assert!(side.states.contains_key(&k), "the plugin was reverted to the state the session still holds");
+    }
+
+    /// Commands run before the frame's `prepare`. A state set, or a plugin replaced, in the same
+    /// frame as a save must not get the old instance's state stored over it.
+    #[test]
+    fn a_capture_skips_slots_changed_since_the_last_prepare() {
+        let (mut side, mut s, k) = hosted_slot();
+        insert_mut(&mut s, k).set_state_bytes(b"from an agent");
+        assert!(side.capture_states(&s).is_empty(), "the old instance's state would replace the agent's");
+        side.prepare(&s);
+        side.states.insert(k, live(b"from an agent"));
+        assert_eq!(side.capture_states(&s).len(), 1);
+        s.track_mut(k.0).unwrap().mixer.inserts[0] = Some(Insert::new("clap:another.plugin"));
+        assert!(side.capture_states(&s).is_empty(), "the old plugin's state would go to the new one");
+        s.track_mut(k.0).unwrap().mixer.inserts[0] = None;
+        assert!(side.capture_states(&s).is_empty(), "the insert was removed");
+    }
+
+    /// An opened session's inserts are new, even where track ids and plugins match the old one's,
+    /// and so is the same plugin inserted again into its own slot.
+    #[test]
+    fn an_opened_session_or_a_new_insert_gets_a_new_instance() {
+        let (mut side, mut s, k) = hosted_slot();
+        let opened: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        side.prepare(&opened);
+        assert!(!side.states.contains_key(&k), "the previous session's instance was kept");
+        side.prepare(&s);
+        side.states.insert(k, live(b"tweaked"));
+        s.track_mut(k.0).unwrap().mixer.inserts[0] = Some(Insert::new("clap:does.not.exist"));
+        side.prepare(&s);
+        assert!(!side.states.contains_key(&k), "the new insert kept the old, tweaked instance");
     }
 
     #[test]

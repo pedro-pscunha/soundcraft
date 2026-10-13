@@ -421,10 +421,14 @@ pub enum Route {
 }
 
 /// A plugin instance on an insert slot.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Insert {
     /// Registry id from `soundcraft-dsp` (e.g. `eq7`, `comp`).
     pub plugin: String,
+    /// The values the mixer sends the plugin. A built-in plugin gets every declared parameter when
+    /// inserted, so this is its whole setting. A hosted plugin (CLAP, VST3, AU) keeps its settings
+    /// in its own [`state`](Self::state): this holds only the parameters set since (by a command,
+    /// the plugin panel, its editor or a preset), which the mixer sends on top of that state.
     #[serde(default, deserialize_with = "finite_params")]
     pub params: BTreeMap<String, f32>,
     #[serde(default)]
@@ -435,16 +439,41 @@ pub struct Insert {
     #[serde(default)]
     pub preset: String,
     /// Opaque plugin state (third-party plugins: CLAP state / VST3 component + controller
-    /// state), standard base64. Restored into a new instance before it first processes.
+    /// state), standard base64. Restored into a new instance before it first processes. Write it
+    /// with [`set_state_bytes`](Self::set_state_bytes), [`clear_state`](Self::clear_state) or
+    /// [`store_live_state`](Self::store_live_state), which keep [`state_epoch`](Self::state_epoch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
+    state: Option<String>,
     /// The session audio source a sample-playing instrument (the built-in Sampler) plays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<SourceId>,
+    /// See [`state_epoch`](Self::state_epoch). Not saved: a loaded insert gets a fresh one.
+    #[serde(skip, default = "next_epoch")]
+    epoch: u64,
+}
+
+/// Equal settings: the [`state_epoch`](Insert::state_epoch) is not part of the document.
+impl PartialEq for Insert {
+    fn eq(&self, o: &Self) -> bool {
+        let Insert { plugin, params, bypass, active, preset, state, sample, epoch: _ } = self;
+        *plugin == o.plugin
+            && *params == o.params
+            && *bypass == o.bypass
+            && *active == o.active
+            && *preset == o.preset
+            && *state == o.state
+            && *sample == o.sample
+    }
 }
 
 fn yes() -> bool {
     true
+}
+
+/// A number no other insert state of this process has had.
+fn next_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Insert {
@@ -457,17 +486,46 @@ impl Insert {
             preset: String::from("<factory default>"),
             state: None,
             sample: None,
+            epoch: next_epoch(),
         }
     }
 
     /// The decoded plugin state (`None` when absent or malformed).
+    /// The stored plugin state as saved (standard base64), `None` when there is none.
+    pub fn state(&self) -> Option<&str> {
+        self.state.as_deref()
+    }
+
     pub fn state_bytes(&self) -> Option<Vec<u8>> {
         self.state.as_deref().and_then(crate::b64::decode)
     }
 
-    /// Stores a plugin state blob (base64-encoded); an empty blob clears it.
+    /// Stores a new plugin state blob (base64-encoded; an empty blob clears it), set by a command
+    /// or a preset: live playback makes the plugin's instance again from it.
     pub fn set_state_bytes(&mut self, data: &[u8]) {
         self.state = (!data.is_empty()).then(|| crate::b64::encode(data));
+        self.epoch = next_epoch();
+    }
+
+    /// Drops the plugin state: live playback makes the plugin's instance again, at its defaults.
+    pub fn clear_state(&mut self) {
+        self.state = None;
+        self.epoch = next_epoch();
+    }
+
+    /// Stores the state the live instance already holds (read from it before a save or a bounce)
+    /// without asking for a new instance, so Undo back past it does not reset the plugin either.
+    pub fn store_live_state(&mut self, data: &[u8]) {
+        self.state = (!data.is_empty()).then(|| crate::b64::encode(data));
+    }
+
+    /// Which deliberate write the [`state`](Self::state) comes from: creating or loading the insert,
+    /// [`set_state_bytes`](Self::set_state_bytes) or [`clear_state`](Self::clear_state). Live
+    /// playback makes a hosted plugin's instance again when this changes, so a new state reaches
+    /// it, and keeps it when only the stored bytes differ: an undo step holds an older capture of
+    /// the same instance. Copies (undo steps) keep it; no two writes in one process share one.
+    pub fn state_epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -640,6 +698,32 @@ mod tests {
         // A hostile state string decodes to nothing rather than failing the load.
         let bad: Insert = serde_json::from_str(r#"{"plugin":"x","state":"!!!"}"#).unwrap();
         assert_eq!(bad.state_bytes(), None);
+    }
+
+    /// Live playback makes a hosted plugin's instance again when its insert's state epoch changes.
+    /// A new insert, a loaded one and a state set by a command each get a fresh epoch; a copy (an
+    /// undo step) and the live instance's own state stored back keep it.
+    #[test]
+    fn only_new_states_get_a_new_epoch() {
+        let mut i = Insert::new("clap:x");
+        assert_ne!(Insert::new("clap:x").state_epoch(), i.state_epoch(), "each new insert has its own");
+        let undo_step = i.clone();
+        assert_eq!(undo_step.state_epoch(), i.state_epoch());
+        i.store_live_state(b"what the instance holds");
+        assert_eq!(i.state_bytes().as_deref(), Some(&b"what the instance holds"[..]));
+        assert_eq!(i.state_epoch(), undo_step.state_epoch(), "the live instance's own state is not a new one");
+        let live = i.state_epoch();
+        i.set_state_bytes(b"what the instance holds");
+        assert_ne!(i.state_epoch(), live, "a state set by a command is new, even with the same bytes");
+        let set = i.state_epoch();
+        i.clear_state();
+        assert_eq!(i.state, None);
+        assert_ne!(i.state_epoch(), set);
+        let json = serde_json::to_string(&i).unwrap();
+        assert!(!json.contains("epoch"), "{json}");
+        let back: Insert = serde_json::from_str(&json).unwrap();
+        assert_ne!(back.state_epoch(), i.state_epoch(), "a loaded insert gets a new instance");
+        assert_eq!(back, i, "the epoch is not part of the document");
     }
 
     #[test]

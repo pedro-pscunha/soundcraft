@@ -139,7 +139,7 @@ fn clap_state_is_captured_stored_and_restored_before_the_first_block() {
     let restored = gain_of(&s2);
     let mut s3 = e.session().clone();
     let ins = s3.track_mut(t).unwrap().mixer.inserts[0].as_mut().unwrap();
-    ins.state = None;
+    ins.clear_state();
     ins.params.insert("7".into(), 1.5);
     let reference = gain_of(&s3);
     assert!((restored - reference).abs() < 1e-5, "state {restored} vs param 1.5 {reference}");
