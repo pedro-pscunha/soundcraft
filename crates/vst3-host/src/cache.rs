@@ -267,6 +267,24 @@ mod tests {
     }
 
     #[test]
+    fn derived_fields_are_derived_again_on_reading() {
+        let d = dir("derived");
+        let (file, a) = (d.join("vst3.json"), d.join("A.vst3"));
+        // Written by a build whose mapping got an instrument wrong.
+        let stale = Vst3Descriptor {
+            sub_categories: vec!["Instrument".into(), "Synth".into()],
+            category: Category::Other,
+            is_instrument: false,
+            ..plugin(&a)
+        };
+        let json = serde_json::json!({"version": VERSION, "scanner": scanner(), "bundles": [{"path": a, "fingerprint": PRINT, "outcome": {"plugins": [stale]}}]});
+        std::fs::write(&file, json.to_string()).unwrap();
+        let Some(Outcome::Plugins(ds)) = ScanCache::load(&file).lookup(&a, PRINT).cloned() else { panic!() };
+        assert_eq!((ds[0].category, ds[0].is_instrument), (Category::Instrument, true));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_cache_made_by_other_scanning_code_starts_cold() {
         let d = dir("scanner");
         let (file, a) = (d.join("vst3.json"), d.join("A.vst3"));

@@ -403,14 +403,23 @@ fn judge(
 
 /// The descriptors whose id is `vst3:` and their class id, as a scan in this process makes them,
 /// with `path` set to `bundle`; others are logged and dropped (they could never be created, or
-/// would claim another host's ids).
+/// would claim another host's ids). The fields derived from the sub-categories (category,
+/// instrument or not) are derived again by this build, so a fix of that mapping reaches cached
+/// plugins without a rescan.
 pub(crate) fn well_formed(ds: Vec<Vst3Descriptor>, bundle: &Path) -> Vec<Vst3Descriptor> {
     let (good, bad): (Vec<_>, Vec<_>) =
         ds.into_iter().partition(|d| parse_id(&d.id).is_some() && d.id.strip_prefix(ID_PREFIX) == Some(d.class_id.as_str()));
     if let Some(d) = bad.first() {
         log::warn!("vst3: ignoring {} malformed plugin entries for {} (such as id {:?})", bad.len(), bundle.display(), clean_reason(&d.id));
     }
-    good.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()
+    good.into_iter()
+        .map(|d| Vst3Descriptor {
+            path: bundle.to_path_buf(),
+            category: crate::scan::category_from_sub_categories(&d.sub_categories),
+            is_instrument: crate::scan::is_instrument(&d.sub_categories),
+            ..d
+        })
+        .collect()
 }
 
 /// A reason fit for a log line and a list: control characters (line breaks, terminal escapes)
