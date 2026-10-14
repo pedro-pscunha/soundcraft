@@ -41,6 +41,9 @@ pub(crate) enum Outcome {
     /// Its helper ran past its time limit once: scanned again next time, and skipped only if that
     /// times out too.
     TimedOutOnce(String),
+    /// Its helper ran past its time limit twice in a row: skipped. A rescan tries it again, and
+    /// another timeout keeps it here (it does not start over as a first one).
+    TimedOut(String),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -222,6 +225,7 @@ fn read(file: &Path) -> Result<Option<BTreeMap<PathBuf, (Fingerprint, Outcome)>>
                     Outcome::Plugins(ds) => Outcome::Plugins(crate::helper::well_formed(ds, &e.path)),
                     Outcome::Skipped(why) => Outcome::Skipped(crate::helper::clean_reason(&why)),
                     Outcome::TimedOutOnce(why) => Outcome::TimedOutOnce(crate::helper::clean_reason(&why)),
+                    Outcome::TimedOut(why) => Outcome::TimedOut(crate::helper::clean_reason(&why)),
                 };
                 (e.path, (e.fingerprint, outcome))
             })

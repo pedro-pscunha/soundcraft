@@ -167,6 +167,7 @@ fn main() {
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     the_registry_answers_while_helpers_scan(&root.join("busy"));
     a_rescan_during_a_scan_wins(&root.join("raced"));
+    a_rescan_keeps_a_timeout_after_a_timeout_a_verdict(&root.join("late"), &root.join("late-cache/vst3.json"));
     a_rescan_asked_for_during_a_scan_rescans(&root.join("pending"));
     a_folder_added_during_a_scan_is_kept(&root.join("during"));
     adding_a_folder_first_keeps_the_standard_ones(&root.join("add-first"));
@@ -542,9 +543,26 @@ fn a_timeout_is_cached_only_when_it_happens_twice(dir: &Path, cache: &Path) {
     assert!(cached_outcome(cache, &crashy)["skipped"].is_string(), "a crash, at once");
     assert_eq!(run(), (false, true), "the timeout is tried once more, the crash is not");
     assert_eq!((launches(&twice), launches(&crashy)), (2, 1));
-    assert!(cached_outcome(cache, &twice)["skipped"].is_string(), "twice in a row: a skip");
+    assert!(cached_outcome(cache, &twice)["timed_out"].is_string(), "twice in a row: a skip");
     assert_eq!(run(), (true, true));
     assert_eq!((launches(&twice), launches(&crashy)), (2, 1), "neither is tried again");
+}
+
+/// A rescan tries a bundle that timed out again, but a timeout after an earlier one (provisional
+/// or confirmed) stays a verdict: it does not start over as a first, provisional one.
+fn a_rescan_keeps_a_timeout_after_a_timeout_a_verdict(dir: &Path, cache: &Path) {
+    let (late, _) = install(dir, "Late", Some("hang-entry"));
+    soundcraft_vst3_host::set_scan_helper(Some(ScanHelper { cache: Some(cache.to_path_buf()), ..helper() }));
+    soundcraft_vst3_host::add_search_dir(dir);
+    assert!(cached_outcome(cache, &late)["timed_out_once"].is_string(), "a first timeout: provisional");
+    let mut tried = launches(&late);
+    for _ in 0..2 {
+        soundcraft_vst3_host::rescan();
+        tried += 1;
+        assert_eq!(launches(&late), tried, "tried again by the rescan");
+        assert!(cached_outcome(cache, &late)["timed_out"].is_string(), "after a timeout: a verdict, {}", cached_outcome(cache, &late));
+    }
+    soundcraft_vst3_host::set_scan_helper(None);
 }
 
 fn skipped_bundles_are_remembered_until_rescan(dir: &Path, cache: &Path) {

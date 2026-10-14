@@ -137,7 +137,8 @@ struct Pending {
     path: PathBuf,
     /// Its fingerprint now (with a scan cache).
     print: Option<Fingerprint>,
-    /// Its helper timed out on the last scan too (the cache says so, for this fingerprint).
+    /// Its helper timed out on the last scan too (the cache says so, for this fingerprint, even on
+    /// a rescan).
     timed_out_before: bool,
     state: State,
 }
@@ -174,21 +175,26 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         .filter(|p| !known.iter().any(|s| &s.path == p))
         .map(|path| {
             let print = cache.as_ref().and_then(|_| cache::fingerprint(&path));
-            let known = match (&cache, print) {
-                (Some(c), Some(print)) if !fresh => c.lookup(&path, print).cloned(),
+            let previous = match (&cache, print) {
+                (Some(c), Some(print)) => c.lookup(&path, print).cloned(),
                 _ => None,
             };
-            let timed_out_before = matches!(known, Some(Outcome::TimedOutOnce(_)));
+            // Looked at on a rescan too: a timeout after an earlier one stays a verdict.
+            let timed_out_before = matches!(previous, Some(Outcome::TimedOutOnce(_) | Outcome::TimedOut(_)));
             // A first timeout is tried again: only a second one in a row is a verdict.
-            let state = match known {
+            let state = match previous {
+                _ if fresh => State::Todo,
                 Some(Outcome::TimedOutOnce(_)) | None => State::Todo,
                 Some(outcome) => State::Cached(outcome),
             };
             Pending { path, print, timed_out_before, state }
         })
         .collect();
-    let earlier: Vec<String> =
-        pending.iter().filter(|p| matches!(p.state, State::Cached(Outcome::Skipped(_)))).map(|p| bundle_name(&p.path)).collect();
+    let earlier: Vec<String> = pending
+        .iter()
+        .filter(|p| matches!(p.state, State::Cached(Outcome::Skipped(_) | Outcome::TimedOut(_))))
+        .map(|p| bundle_name(&p.path))
+        .collect();
     if !earlier.is_empty() {
         log::info!("vst3: {} bundles skipped by an earlier scan ({}); rescan to retry", earlier.len(), earlier.join(", "));
     }
@@ -207,7 +213,7 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
             Ok(ds) => Some(Outcome::Plugins(ds.clone())),
             Err(Skip::Bundle(why)) => Some(Outcome::Skipped(why.clone())),
             // Provisional the first time; a second timeout in a row is a verdict.
-            Err(Skip::TimedOut(why)) if p.timed_out_before => Some(Outcome::Skipped(why.clone())),
+            Err(Skip::TimedOut(why)) if p.timed_out_before => Some(Outcome::TimedOut(why.clone())),
             Err(Skip::TimedOut(why)) => Some(Outcome::TimedOutOnce(why.clone())),
             Err(Skip::Host(_) | Skip::HostStuck(_)) => None,
         };
@@ -241,7 +247,9 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         let known_to_load = loads(&p);
         match p.state {
             State::Cached(Outcome::Plugins(ds)) | State::Done(Ok(ds)) => merge(&mut out, ds),
-            State::Cached(Outcome::Skipped(reason)) => skipped.push(SkippedBundle { path: p.path, reason, from_cache: true, helper_failed: false }),
+            State::Cached(Outcome::Skipped(reason) | Outcome::TimedOut(reason)) => {
+                skipped.push(SkippedBundle { path: p.path, reason, from_cache: true, helper_failed: false })
+            }
             State::Done(Err(Skip::Bundle(reason) | Skip::TimedOut(reason))) => {
                 skipped.push(SkippedBundle { path: p.path, reason, from_cache: false, helper_failed: false })
             }
