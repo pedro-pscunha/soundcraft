@@ -27,8 +27,9 @@ mod macos {
     use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
     use std::cell::{Cell, RefCell};
 
-    /// Space and left Shift (virtual key codes).
+    /// Space, W and left Shift (virtual key codes).
     const SPACE: u16 = 49;
+    const W: u16 = 13;
     const SHIFT: u16 = 56;
 
     thread_local! {
@@ -180,7 +181,11 @@ mod macos {
 
     /// A synthetic key event for `window`.
     fn key(window: &NSWindow, ty: NSEventType, code: u16, flags: NSEventModifierFlags) -> Retained<NSEvent> {
-        let chars = NSString::from_str(if code == SPACE { " " } else { "" });
+        let chars = NSString::from_str(match code {
+            SPACE => " ",
+            W => "w",
+            _ => "",
+        });
         NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             ty,
             NSPoint::new(0.0, 0.0),
@@ -429,6 +434,27 @@ mod macos {
         testing::set_app_active(Some(true));
         assert!(w.closed_by_user(mtm), "hidden while the app is active: closed");
         testing::set_app_active(None);
+
+        // ⌘W that the plugin does not take closes its editor window; handed on, it would close
+        // SoundCraft's window. ⌘W with another modifier is handed on like any ⌘-key, and a
+        // plugin view that takes ⌘W keeps it.
+        autoreleasepool(|_| {
+            let other = PluginWindow::new(mtm, "Other Plugin", NSSize::new(100.0, 100.0));
+            let win = other.window(mtm);
+            assert!(win.makeFirstResponder(None));
+            type_key(win, NSEventType::KeyDown, W, NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+            type_key(win, NSEventType::KeyDown, W, NSEventModifierFlags::Command | NSEventModifierFlags::Option);
+            assert_eq!(seen(), [("soundcraft", "down", W), ("soundcraft", "down", W)]);
+            let taking = plugin_view(mtm, true);
+            other.content_view(mtm).expect("a content view").addSubview(&taking);
+            assert!(win.makeFirstResponder(Some(&taking)));
+            type_key(win, NSEventType::KeyDown, W, NSEventModifierFlags::Command);
+            assert_eq!(seen(), [("plugin", "down", W)]);
+            // Closed (the window's `close` lets go of the ⌘⌥W still held), not handed on.
+            assert!(win.makeFirstResponder(None));
+            type_key(win, NSEventType::KeyDown, W, NSEventModifierFlags::Command | NSEventModifierFlags::CapsLock);
+            assert_eq!(seen(), [("soundcraft", "up", W), ("soundcraft", "flags", 0)], "⌘W closes the window");
+        });
 
         // Closing lets go of the keys too.
         autoreleasepool(|_| {

@@ -44,6 +44,12 @@ define_class!(
     impl HostWindow {
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            // ⌘W that the plugin did not take closes this editor (handed on, it would close
+            // SoundCraft's window).
+            if is_close_window(event) {
+                self.performClose(None);
+                return;
+            }
             // While SoundCraft has a text field focused, a key handed on would type into it unseen.
             if APP_WANTS_KEYBOARD.load(Ordering::Relaxed) || !forward(self.mtm(), event, Key::Down) {
                 // SAFETY: NSWindow's own `keyDown:`, with the event AppKit passed in.
@@ -127,6 +133,14 @@ impl HostWindow {
             }
         });
     }
+}
+
+/// A plain ⌘W (no other modifier; Caps Lock aside), by the character it types, so it follows
+/// the keyboard layout as menu shortcuts do.
+fn is_close_window(event: &NSEvent) -> bool {
+    let held = NSEventModifierFlags::Shift | NSEventModifierFlags::Control | NSEventModifierFlags::Option | NSEventModifierFlags::Command;
+    event.modifierFlags() & held == NSEventModifierFlags::Command
+        && event.charactersIgnoringModifiers().is_some_and(|c| c.to_string().eq_ignore_ascii_case("w"))
 }
 
 /// A synthetic key event (`None` if AppKit makes none).
