@@ -25,9 +25,12 @@
 //! creates. The helper's standard error (plugin chatter) goes to the debug log. A helper that
 //! fails on SoundCraft's side (cannot start, or is no scan helper of this protocol: an older
 //! SoundCraft after an update in place) says nothing about the plugins. No further helper is
-//! started for that scan, nothing is skipped or cached, and its bundles are loaded in this process
-//! instead (logged once). Without a helper (library users, tests) scans load every bundle in this
-//! process, as before. The apps set all this up with `soundcraft_engine::plugin_scan_startup`.
+//! started for that scan and nothing is cached. Of the bundles it had not scanned, only those the
+//! scan cache knows to load (their last outcome, for the same fingerprint, is a list of plugins)
+//! are loaded in this process; the others, and any bundle a stuck helper was running, are listed
+//! as not scanned ([`SkippedBundle::helper_failed`]) and tried again by the next scan. Without a
+//! helper (library users, tests) scans load every bundle in this process, as before. The apps set
+//! all this up with `soundcraft_engine::plugin_scan_startup`.
 //!
 //! Scans run without the registry lock, so the registry answers other calls while helpers work; a
 //! [`rescan`] asked for during a scan waits for it and scans again. A nonempty
@@ -35,14 +38,20 @@
 //! keep the installed plugins out ([`scan::default_search_paths`]).
 //!
 //! A helper scan can keep a cache file ([`ScanHelper::cache`]; the apps put it in their settings
-//! folder): per bundle, its plugins or why it was skipped, under the bundle's fingerprint (its
-//! binary's size and modification time, the bundle's modification time) and a format version. A
-//! later scan, in this run or another, starts helpers only for new or changed bundles, drops the
-//! bundles that are gone and writes the file back whole (a temporary file renamed over it). So a
-//! plugin that never answers costs its time limit once, not in every run: it stays skipped (logged
-//! once per process at info level) until it changes or [`rescan`] retries every bundle and rewrites
-//! the cache. An unreadable or corrupt cache is logged and scanned over, never an error. In-process
-//! scans use no cache: they exist to load each bundle here, and cannot skip one that hangs anyway.
+//! folder, [`SCAN_CACHE_FILE`]): per bundle, its plugins or why it was skipped, under the bundle's
+//! fingerprint (its binary's size and modification time, the bundle's modification time). The file
+//! names its format version and the scanning code that wrote it (SoundCraft's version, the helper
+//! protocol, the scanner revision): another one starts cold. A later scan, in this run or another,
+//! starts helpers only for new or changed bundles, drops the bundles that are gone and writes back
+//! its own findings over the file as it then is (a temporary file renamed over it). A crash or a
+//! load failure is cached at once; a timeout first only as "timed out once": the next scan tries the
+//! bundle again, and a second timeout in a row is a skip. So a plugin that never answers costs its
+//! time limit twice, then nothing: it stays skipped (logged once per process at info level) until
+//! it changes or [`rescan`] retries every bundle and rewrites the cache. Categories are derived
+//! again from the cached sub-categories on every read. An unreadable or corrupt cache is logged and
+//! scanned over, never an error. Bundles whose path is not UTF-8 (Linux only) are not cached.
+//! In-process scans use no cache: they exist to load each bundle here, and cannot skip one that
+//! hangs anyway.
 //!
 //! `PluginInfo` must be `&'static`: the registry leaks exactly one `PluginInfo` (with its param
 //! table) per plugin *type* the first time that type is instantiated, and caches it. The leak is
@@ -348,7 +357,8 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
     api::scan_paths(dirs)
 }
 
-/// The plugins of the last scan, without scanning: `None` until something has scanned.
+/// The plugins of the last scan, without scanning: `None` until something has scanned, and while a
+/// rescan runs.
 pub fn cached() -> Option<Vec<Vst3Descriptor>> {
     api::cached()
 }
@@ -399,9 +409,11 @@ pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
 }
 
 /// Scans in helper processes from now on (`Some`), or in this process again (`None`, the
-/// default). With a helper, [`scan()`], [`rescan`], [`add_search_dir`] and [`scan_paths`] never load
-/// a plugin binary here: a bundle that hangs, crashes or fails in its helper is logged and skipped
-/// (see [`skipped`]), and [`instantiate`] loads only the bundle of the plugin it creates.
+/// default). With a helper, [`scan()`], [`rescan`], [`add_search_dir`] and [`scan_paths`] load no
+/// plugin binary here: a bundle that hangs, crashes or fails in its helper is logged and skipped
+/// (see [`skipped`]), and [`instantiate`] loads only the bundle of the plugin it creates. The one
+/// exception: when the helper itself fails on SoundCraft's side, bundles the scan cache knows to
+/// load are loaded here instead (see the crate docs).
 pub fn set_scan_helper(helper: Option<ScanHelper>) {
     api::set_scan_helper(helper)
 }
@@ -418,9 +430,10 @@ pub fn scan_with_skipped(rescan: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundl
     api::scan_with_skipped(rescan)
 }
 
-/// Scans `dirs` in helper processes, whatever [`set_scan_helper`] says, without touching the cache
-/// or the remembered [`skipped`] bundles: the plugins found (first id wins, sorted by name) and the
-/// bundles skipped.
+/// Scans `dirs` in helper processes, whatever [`set_scan_helper`] says, without touching the
+/// registry (its list of plugins or its remembered [`skipped`] bundles): the plugins found (first
+/// id wins, sorted by name) and the bundles skipped. With `helper.cache` it reads and updates that
+/// scan cache file, like any helper scan.
 pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
     api::scan_paths_with(dirs, helper)
 }

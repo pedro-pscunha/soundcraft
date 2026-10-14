@@ -273,7 +273,8 @@ fn scan_unlocked(dirs: &[PathBuf], helper: Option<&ScanHelper>, known: &[Skipped
     }
 }
 
-/// Scans `dirs` (uncached), in helpers when one is set (remembering what they skip).
+/// Scans `dirs` without storing the plugins found, in helpers when one is set (remembering what they
+/// skip, and using its scan cache).
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
     let (helper, known) = {
         let r = lock();

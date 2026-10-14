@@ -12,7 +12,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "List VST3 Plugins",
         [],
         None,
-        "{rescan?: bool} → {plugins: [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}], skipped: [{path, reason, from_cache}]}. The apps scan in helper processes and cache the result per bundle; skipped lists the bundles that hung, crashed or failed (from_cache: by an earlier scan, not tried again). rescan retries every bundle, the skipped ones too, and rewrites the cache",
+        "{rescan?: bool} → {plugins: [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}], skipped: [{path, reason, from_cache, helper_failed}]}. The apps scan in helper processes and cache the result per bundle; skipped lists the bundles whose helper hung, crashed or failed to load them (from_cache: by an earlier scan, not tried again; helper_failed: not scanned because the scan helper itself failed, tried again by the next scan). Bundles that fail to load without a helper (library use) are only logged. rescan retries every bundle, the skipped ones too, and rewrites the cache",
         always,
         |_, p| {
             let rescan = p.get("rescan").and_then(Value::as_bool).unwrap_or(false);

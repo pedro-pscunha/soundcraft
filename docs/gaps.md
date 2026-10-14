@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: a helper failing on SoundCraft's side loads in-process only the bundles known to load; previously minor: skipped VST3 plugins are listed and can be rescanned from the app) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: the VST3 scan cache retries a timeout once and starts cold after an update; previously minor: a helper failing on SoundCraft's side loads in-process only the bundles known to load) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -169,11 +169,13 @@ Known risks, unmeasured:
   (`plugin-cache/vst3.v1.json`) under its fingerprint (binary size and modification time, bundle
   modification time), and later runs start helpers only for new or changed bundles. Measured on
   the dev Mac (59 bundles, five PACE plugins without the licence service among the 9 skipped):
-  30.5 s cold, 0.03 s warm; the sun-v54 bounce went from 66 s to 6 s. A bundle that timed out
-  once, for instance on a loaded machine, stays skipped until it changes or a rescan
-  (`engine.vst3_plugins {"rescan": true}`, which also lists the skipped bundles, or the VST3
-  submenu's "Rescan VST3"). The app's first scan and its rescans still run on the UI thread and
-  freeze it meanwhile.
+  30.5 s cold, 0.03 s warm; the sun-v54 bounce went from 66 s to 6 s. A timeout is provisional:
+  the next run tries the bundle once more, and only a second timeout in a row is cached as a skip
+  (so a PACE plugin without its licence service costs its 30 s on two runs). A skipped bundle
+  stays skipped until it changes, SoundCraft is updated (the cache names the scanning code), or a
+  rescan (`engine.vst3_plugins {"rescan": true}`, which also lists the skipped bundles, or
+  "Rescan VST3" in the VST3 submenu or the plugin search). The app's first scan and its rescans
+  still run on the UI thread and freeze it meanwhile.
 - When the scan helper fails on SoundCraft's side (cannot start, or is an older or newer
   SoundCraft), only the bundles the scan cache knows to load (their last outcome, for the same
   build of the bundle, is a list of plugins) are loaded in SoundCraft's own process instead. The
@@ -259,6 +261,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | G-13: a VST3 timeout is retried once on the next run before it is cached as a skip, and the scan cache starts cold after a SoundCraft update; risks updated |
 | 2026-10-14 | minor | G-13: when the scan helper fails on SoundCraft's side, only bundles the cache knows to load are loaded in-process; the rest are listed as not scanned (a rescan no longer loads known-hanging plugins in-process) |
 | 2026-10-14 | minor | G-13: skipped VST3 plugins are listed (`engine.vst3_plugins` returns them) and the VST3 submenu rescans; helper failures on SoundCraft's side load in-process instead; Windows helpers end with SoundCraft (job object); residual risks updated |
 | 2026-10-14 | minor | G-13: the VST3 scan is cached per bundle across runs (settings folder, fingerprinted), eight helpers at a time: a plugin that never answers costs 30 s once, not in every run (dev Mac: 30.5 s cold, 0.03 s warm, the sun-v54 bounce 66 s → 6 s) |
