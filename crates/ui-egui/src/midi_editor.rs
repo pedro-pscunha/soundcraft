@@ -2,10 +2,10 @@
 
 use crate::SoundApp;
 use crate::theme::{Tokens, bold, regular};
-use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align2, Color32, Rangef, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ClipContent, ClipId, Tool};
-use soundcraft_time::TICKS_PER_QUARTER;
+use soundcraft_time::{Range, SampleRate, Samples, TICKS_PER_QUARTER, TempoMap};
 
 const KEY_W: f32 = 48.0;
 const ROW_H: f32 = 9.0;
@@ -53,6 +53,21 @@ pub fn target_clip(app: &SoundApp) -> Option<ClipId> {
 
 fn is_black(p: i32) -> bool {
     matches!(p.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
+}
+
+/// The roll's x for the session position `pos`, or `None` outside the edited clip's samples
+/// `clip`, which is all the roll shows. The roll fits the clip to its width `roll`: the clip's
+/// first tick `base_tick` sits at its left edge and each tick advances `px_per_tick` (`x_of` in
+/// [`show`]). `pos` goes to ticks on the tempo map, the conversion playback uses to schedule the
+/// clip's notes, so the line meets a note as it sounds. The clip's tick span is rounded, so its
+/// edges can land a fraction of a tick off the roll: they stay on it.
+fn playhead_x(tempo: &TempoMap, sr: SampleRate, pos: Samples, clip: Range, base_tick: i64, roll: Rangef, px_per_tick: f32) -> Option<f32> {
+    if pos < clip.start || pos > clip.end {
+        return None;
+    }
+    let tick = tempo.samples_to_ticks_f(pos, sr) - base_tick as f64;
+    let x = (f64::from(roll.min) + tick * f64::from(px_per_tick)) as f32;
+    x.is_finite().then(|| x.max(roll.min).min(roll.max))
 }
 
 pub fn show(app: &mut SoundApp, ui: &mut Ui) {
@@ -374,5 +389,176 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     {
         let v = (((vel.max.y - 2.0 - p.y) / (vel.height() - 4.0)) * 127.0).round().clamp(1.0, 127.0) as i64;
         let _ = app.engine.execute_merged("midi.note_edit", &json!({"clip": cid.0, "index": i, "velocity": v}), &format!("vel:{}", cid.0));
+    }
+    // Playhead over the notes and the velocity lane, in the Edit window's stroke: the play
+    // position while playing, else where playback starts.
+    if let Some(x) = playhead_x(&s.tempo, sr, app.position(), clip.range(), base_tick, roll.x_range(), px_per_tick) {
+        let lanes = Rect::from_min_max(roll.min, pos2(roll.max.x, vel.max.y));
+        ui.painter().with_clip_rect(lanes).line_segment([pos2(x, lanes.min.y), pos2(x, lanes.max.y)], Stroke::new(1.5, t.playhead));
+        if app.is_playing() {
+            // The roll stretches one clip across its width, so the line can move much faster than
+            // the Edit window's (repainted at 30 Hz): keep it smooth at 60 Hz while it is shown.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000 / 60));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Shape;
+    use egui_kittest::Harness;
+
+    const SR: SampleRate = SampleRate::HZ_48000;
+    /// A quarter note at 120 BPM and 48 kHz.
+    const BEAT: Samples = 24_000;
+    const Q: i64 = TICKS_PER_QUARTER;
+
+    fn near(x: Option<f32>, want: f32) -> bool {
+        x.is_some_and(|x| (x - want).abs() < 0.01)
+    }
+
+    /// A one-bar clip at bar 3 (two bars of 120 BPM in), as the roll's 800 px from x = 100.
+    fn bar_three(tempo: &TempoMap, pos: Samples) -> Option<f32> {
+        let clip = Range { start: 8 * BEAT, end: tempo.tick_to_samples(12 * Q, SR) };
+        playhead_x(tempo, SR, pos, clip, 8 * Q, Rangef::new(100.0, 900.0), 800.0 / (4 * Q) as f32)
+    }
+
+    #[test]
+    fn playhead_fits_the_clip_to_the_roll() {
+        let tempo = TempoMap::default();
+        assert!(near(bar_three(&tempo, 8 * BEAT), 100.0));
+        assert!(near(bar_three(&tempo, 10 * BEAT), 500.0));
+        assert!(near(bar_three(&tempo, 12 * BEAT), 900.0));
+        // Before the clip (the session start too) and past its end, the roll has no place for it.
+        for pos in [0, 8 * BEAT - 1, 12 * BEAT + 1, Samples::MIN, Samples::MAX] {
+            assert_eq!(bar_three(&tempo, pos), None, "position {pos}");
+        }
+    }
+
+    #[test]
+    fn playhead_follows_a_tempo_change_inside_the_clip() {
+        // 60 BPM from the clip's third beat: its second half lasts twice as long.
+        let mut tempo = TempoMap::default();
+        tempo.set_tempo(10 * Q, 60.0).unwrap();
+        // Two beats at 120 BPM, then one at 60 BPM: three beats of four. Mapping samples straight
+        // onto the width would say two thirds (633 px).
+        assert!(near(bar_three(&tempo, 8 * BEAT + 2 * BEAT + 2 * BEAT), 700.0));
+        assert!(near(bar_three(&tempo, 8 * BEAT + 2 * BEAT + 4 * BEAT), 900.0));
+        assert_eq!(bar_three(&tempo, 8 * BEAT + 2 * BEAT + 4 * BEAT + 1), None);
+    }
+
+    #[test]
+    fn playhead_meets_each_note_when_playback_sounds_it() {
+        // Tempo changes before and inside a clip that starts off the tick grid, as `show` lays it
+        // out: the line reaches a note's left edge at the sample the mixer starts the note.
+        let mut tempo = TempoMap::new(93.0, 4, 4).unwrap();
+        tempo.set_tempo(3 * Q, 141.0).unwrap();
+        tempo.set_tempo(9 * Q + 17, 67.5).unwrap();
+        let clip = Range { start: 123_457, end: 1_123_460 };
+        let base = tempo.samples_to_ticks(clip.start, SR);
+        let len = tempo.samples_to_ticks(clip.end, SR) - base;
+        let roll = Rangef::new(48.0, 1282.0);
+        let ppt = roll.span() / len as f32;
+        for n in [1, Q / 3, 2 * Q + 5, 7 * Q, len - 1] {
+            let sounds = tempo.tick_to_samples(base + n, SR);
+            let x = playhead_x(&tempo, SR, sounds, clip, base, roll, ppt);
+            assert!(x.is_some_and(|x| (x - (roll.min + n as f32 * ppt)).abs() < 0.05), "note at tick {n}: {x:?}");
+        }
+    }
+
+    #[test]
+    fn playhead_keeps_the_clip_edges_on_the_roll() {
+        // A clip 10 samples (0.4 tick) wider on each side than its rounded one-bar tick span:
+        // its first and last samples would land just off the roll.
+        let tempo = TempoMap::default();
+        let clip = Range { start: 8 * BEAT - 10, end: 12 * BEAT + 10 };
+        let base = tempo.samples_to_ticks(clip.start, SR);
+        assert_eq!((base, tempo.samples_to_ticks(clip.end, SR) - base), (8 * Q, 4 * Q));
+        let x = |pos| playhead_x(&tempo, SR, pos, clip, base, Rangef::new(100.0, 900.0), 800.0 / (4 * Q) as f32);
+        assert_eq!((x(clip.start), x(clip.end)), (Some(100.0), Some(900.0)));
+        assert_eq!((x(clip.start - 1), x(clip.end + 1)), (None, None));
+    }
+
+    #[test]
+    fn playhead_fits_long_and_short_clips_and_refuses_a_broken_axis() {
+        let tempo = TempoMap::default();
+        // A thousand bars squeezed into 300 px, and a single tick (25 samples) across 1200 px.
+        let long = Range { start: 0, end: 4_000 * BEAT };
+        let x = playhead_x(&tempo, SR, 2_000 * BEAT, long, 0, Rangef::new(0.0, 300.0), 300.0 / (4_000 * Q) as f32);
+        assert!(near(x, 150.0), "{x:?}");
+        let short = Range { start: 5 * BEAT, end: 5 * BEAT + BEAT / Q };
+        let x = playhead_x(&tempo, SR, 5 * BEAT + 10, short, 5 * Q, Rangef::new(10.0, 1210.0), 1200.0);
+        assert!(near(x, 490.0), "{x:?}");
+        // A broken scale yields no line rather than a NaN or infinite one.
+        for ppt in [f32::NAN, f32::INFINITY] {
+            assert_eq!(playhead_x(&tempo, SR, 5 * BEAT + 10, short, 5 * Q, Rangef::new(10.0, 1210.0), ppt), None);
+        }
+    }
+
+    /// The demo session with the MIDI editor open on the Lead track's clip, the insertion a
+    /// quarter of the way into it. Returns the clip's samples too.
+    fn lead_in_editor() -> (Harness<'static, SoundApp>, Range) {
+        let mut engine = soundcraft_engine::demo::demo_engine();
+        let clip = engine.session().track_by_name("Lead").and_then(|t| t.clips().first()).map(|c| c.range()).unwrap();
+        let at = clip.start + (clip.end - clip.start) / 4;
+        engine.execute("edit.select", &json!({"tracks": ["Lead"], "start": at, "end": at, "exact": true})).unwrap();
+        let mut app = SoundApp::new(engine, None, crate::Services::default());
+        app.run("window.midi_front", json!({})).unwrap();
+        let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, app: &mut SoundApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.input_mut().max_texture_side = Some(8192);
+        h.run_steps(4);
+        (h, clip)
+    }
+
+    /// The playhead lines painted inside the MIDI editor's body, and that body.
+    fn editor_playheads(h: &Harness<SoundApp>) -> (Vec<[egui::Pos2; 2]>, Rect) {
+        let body = h.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new("soundcraft-midi-body"))).unwrap();
+        let lines = h
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::LineSegment { points, stroke } if stroke.color == Tokens::current().playhead && points.iter().all(|p| body.contains(*p)) => {
+                    assert_eq!(stroke.width, 1.5, "the Edit window's playhead stroke");
+                    Some(*points)
+                }
+                _ => None,
+            })
+            .collect();
+        (lines, body)
+    }
+
+    #[test]
+    fn the_editor_draws_the_playhead_over_notes_and_velocities() {
+        let (mut h, clip) = lead_in_editor();
+        let cid = h.state().engine.session().track_by_name("Lead").and_then(|t| t.clips().first()).map(|c| c.id);
+        assert_eq!(target_clip(h.state()), cid, "the editor shows the Lead clip");
+        // Stopped: at the insertion, a quarter of the way across the roll (constant tempo).
+        let (lines, body) = editor_playheads(&h);
+        let roll = Rangef::new(body.min.x + KEY_W, body.max.x - 4.0);
+        let [[top, bottom]] = lines[..] else { panic!("one playhead line in the editor, got {lines:?}") };
+        assert!((top.x - (roll.min + roll.span() / 4.0)).abs() < 1.0 && top.x == bottom.x, "{top:?} {bottom:?} on {roll:?}");
+        // From the top of the roll down through the velocity lane.
+        assert_eq!(top.y, body.min.y + 22.0);
+        assert_eq!(bottom.y, body.max.y - 2.0);
+        // Playing: at the transport position, not the insertion.
+        h.state_mut().engine.transport.playing = true;
+        h.state_mut().engine.transport.position = clip.start + (clip.end - clip.start) / 4 * 3;
+        h.run_steps(2);
+        let (lines, _) = editor_playheads(&h);
+        let [[top, _]] = lines[..] else { panic!("one playhead line in the editor, got {lines:?}") };
+        assert!((top.x - (roll.min + roll.span() * 0.75)).abs() < 1.0, "{top:?} on {roll:?}");
+        // Played past the clip: the roll shows no line.
+        h.state_mut().engine.transport.position = clip.end + 1;
+        h.run_steps(2);
+        assert_eq!(editor_playheads(&h).0, Vec::<[egui::Pos2; 2]>::new());
     }
 }
