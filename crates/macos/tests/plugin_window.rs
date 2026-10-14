@@ -110,6 +110,27 @@ mod macos {
     );
 
     define_class!(
+        // SAFETY: an NSView subclass without Drop that overrides `keyDown:` with its declared
+        // signature.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SoundCraftTestThrowingTarget"]
+        /// A key target whose own code throws an Objective-C exception.
+        struct ThrowingTarget;
+
+        impl ThrowingTarget {
+            #[unsafe(method(acceptsFirstResponder))]
+            fn accepts_first_responder(&self) -> bool {
+                true
+            }
+            #[unsafe(method(keyDown:))]
+            fn key_down(&self, _e: &NSEvent) {
+                throws_now();
+            }
+        }
+    );
+
+    define_class!(
         // SAFETY: an NSWindow subclass without instance variables, Drop or overrides.
         #[unsafe(super(NSWindow, NSResponder, NSObject))]
         #[thread_kind = MainThreadOnly]
@@ -136,11 +157,19 @@ mod macos {
         }
     );
 
-    /// Throws an Objective-C exception, as a plugin view's own code may when it is drawn.
-    fn throws(_: &NSWindow) {
+    /// Throws an Objective-C exception.
+    fn throws_now() {
         let name = NSString::from_str("SoundCraftTestException");
         NSException::new(&name, Some(&NSString::from_str("a plugin view threw")), None).expect("an exception").raise();
     }
+
+    /// An order-front that throws, as a plugin view's own code may when it is drawn.
+    fn throws(_: &NSWindow) {
+        throws_now();
+    }
+
+    /// An order-front that leaves the window hidden: `show` marks it as shown.
+    fn stays_hidden(_: &NSWindow) {}
 
     fn plugin_view(mtm: MainThreadMarker, takes_keys: bool) -> Retained<PluginView> {
         let this = PluginView::alloc(mtm).set_ivars(Cell::new(takes_keys));
@@ -289,6 +318,19 @@ mod macos {
             type_key(win, NSEventType::KeyDown, SPACE, none);
             assert_eq!(seen(), [("unhandled", "down", SPACE)]);
             passing.removeFromSuperview();
+
+            // A target whose own code throws: the exception is caught and the key counts as
+            // handed on (no beep), never left to abort the app.
+            let throwing_window = hidden_window(mtm, true);
+            // SAFETY: NSView's designated initializer on a fresh instance.
+            let thrower: Retained<ThrowingTarget> = unsafe { msg_send![super(ThrowingTarget::alloc(mtm).set_ivars(())), initWithFrame: rect] };
+            throwing_window.setContentView(Some(&thrower));
+            assert!(throwing_window.makeFirstResponder(Some(&thrower)));
+            testing::set_key_target(Some(&throwing_window));
+            assert!(win.makeFirstResponder(None));
+            type_key(win, NSEventType::KeyDown, SPACE, none);
+            assert_eq!(seen(), []);
+            throwing_window.close();
             testing::set_key_target(Some(&app_window));
         });
 
@@ -351,6 +393,17 @@ mod macos {
         autoreleasepool(|_| w.show(mtm));
         testing::set_order_front(None);
         assert_eq!(windows(mtm), (base + 2, 0), "nothing on screen");
+
+        // Shown, then hidden: closed by the user while SoundCraft is the active app, still open
+        // while SoundCraft is in the background (the window hides with it).
+        testing::set_order_front(Some(stays_hidden));
+        autoreleasepool(|_| w.show(mtm));
+        testing::set_order_front(None);
+        testing::set_app_active(Some(false));
+        assert!(!w.closed_by_user(mtm), "hidden with the app: open");
+        testing::set_app_active(Some(true));
+        assert!(w.closed_by_user(mtm), "hidden while the app is active: closed");
+        testing::set_app_active(None);
 
         w.close(mtm);
         assert_eq!(windows(mtm), (base + 1, 0), "the plugin window is gone");

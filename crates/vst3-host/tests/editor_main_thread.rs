@@ -38,6 +38,7 @@ mod macos {
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSApplication;
     use soundcraft_dsp::PluginEditor;
+    use soundcraft_macos::plugin_window::testing;
     use soundcraft_vst3_host::Vst3Plugin;
 
     /// The process's windows: (all, visible, how many are SoundCraft's plugin window).
@@ -75,11 +76,26 @@ mod macos {
 
         // An edit made in the open editor, then the editor raised (a click on its slot, the click
         // that activates SoundCraft) before the next idle: the edit is still reported. The raise
-        // runs on another thread, where the open path stops before touching the window (nothing
-        // may reach the screen here), after the point where it used to drop pending edits.
+        // takes the main-thread path (the window is open and was not closed by the user), with
+        // the window kept off screen: `show` marks it as shown without ordering it front.
+        testing::set_order_front(Some(|_| {}));
+        testing::set_app_active(Some(false));
         p.edit_as_view(7, 0.25);
-        std::thread::scope(|s| s.spawn(|| ed.open()).join()).expect("joined").expect_err("windows open on the main thread only");
+        autoreleasepool(|_| ed.open()).expect("raised");
+        testing::set_order_front(None);
+        assert_eq!(windows(mtm), (base + 1, 0, 1), "raised, not reopened, and nothing on screen");
         assert_eq!(ed.idle(), [("7".to_string(), 0.5)], "the edit made before the raise (0.25 of 0..2)");
-        assert!(ed.is_open());
+        assert!(ed.is_open(), "shown, then hidden with the app in the background: open");
+        // Hidden while SoundCraft is active: the user closed it; idle takes it down.
+        testing::set_app_active(Some(true));
+        assert!(!ed.is_open());
+        assert!(ed.idle().is_empty());
+        assert_eq!(windows(mtm), (base, 0, 0), "the window is gone");
+        testing::set_app_active(None);
+        // Left open: the plugin's drop (in `main`) closes it.
+        autoreleasepool(|_| p.open_editor_hidden()).expect("open");
+        assert_eq!(windows(mtm).2, 1);
+        // Off the main thread nothing opens.
+        std::thread::scope(|s| s.spawn(|| ed.open()).join()).expect("joined").expect_err("windows open on the main thread only");
     }
 }

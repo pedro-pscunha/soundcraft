@@ -36,8 +36,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [dev-dependencies]
 soundcraft-vst3-host = { path = ".", features = ["testing"] }
 
-# The editor test checks the process's windows (none may reach the screen).
+# The editor test checks the process's windows (none may reach the screen) and keeps the plugin
+# window off screen when it raises it (soundcraft-macos's test seams).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+soundcraft-macos = { workspace = true, features = ["testing"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
 

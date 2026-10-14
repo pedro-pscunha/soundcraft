@@ -48,5 +48,5 @@ pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, PluginWindow, content_size,
 /// Test seams (the `testing` feature, never on in the app).
 #[cfg(feature = "testing")]
 pub mod testing {
-    pub use crate::ffi::plugin_window::testing::{choose_target, set_key_target, set_order_front};
+    pub use crate::ffi::plugin_window::testing::{choose_target, set_app_active, set_key_target, set_order_front};
 }

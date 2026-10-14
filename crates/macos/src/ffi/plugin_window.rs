@@ -237,7 +237,7 @@ impl PluginWindow {
     /// (`hidesOnDeactivate`) and comes back with it, so hidden counts as closed only while the
     /// app is active; a window never shown was not closed.
     pub fn closed_by_user(&self, mtm: MainThreadMarker) -> bool {
-        self.shown && !self.window(mtm).isVisible() && NSApplication::sharedApplication(mtm).isActive()
+        self.shown && !self.window(mtm).isVisible() && app_active(mtm)
     }
 
     /// Fits the window to a content size (see [`fit_content`]).
@@ -267,6 +267,15 @@ impl Drop for PluginWindow {
     }
 }
 
+/// SoundCraft is the active app.
+fn app_active(mtm: MainThreadMarker) -> bool {
+    #[cfg(feature = "testing")]
+    if let Some(active) = testing::app_active() {
+        return active;
+    }
+    NSApplication::sharedApplication(mtm).isActive()
+}
+
 /// Puts `window` on screen and makes it key (`makeKeyAndOrderFront:`).
 fn order_front(window: &NSWindow) {
     #[cfg(feature = "testing")]
@@ -287,6 +296,17 @@ pub mod testing {
     thread_local! {
         static TARGET: RefCell<Option<Weak<NSWindow>>> = const { RefCell::new(None) };
         static ORDER_FRONT: Cell<Option<fn(&NSWindow)>> = const { Cell::new(None) };
+        static ACTIVE: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    /// Whether plugin windows take SoundCraft for the active app (`None`: ask AppKit), which
+    /// decides whether a hidden window was closed by the user or hid with the app.
+    pub fn set_app_active(active: Option<bool>) {
+        ACTIVE.with(|a| a.set(active));
+    }
+
+    pub(super) fn app_active() -> Option<bool> {
+        ACTIVE.with(Cell::get)
     }
 
     /// Runs `f` where [`PluginWindow::show`](super::PluginWindow::show) would order the window on
