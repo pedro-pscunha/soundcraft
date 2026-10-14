@@ -564,6 +564,20 @@ mod macos {
         autoreleasepool(|_| NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05)));
         assert_eq!(windows(mtm), (base + 1, 0), "gone on the main thread");
 
+        // Main-queue work whose code throws (a plugin view's, as its editor goes) or panics is
+        // stopped there, not left to abort the app; the queue goes on.
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let after = std::sync::Arc::clone(&ran);
+        soundcraft_macos::plugin_window::on_main_queue(Box::new(|_| throws_now()));
+        soundcraft_macos::plugin_window::on_main_queue(Box::new(|_| panic!("a panic in main-queue work")));
+        soundcraft_macos::plugin_window::on_main_queue(Box::new(move |_| after.store(true, std::sync::atomic::Ordering::Relaxed)));
+        // The expected panic is not printed.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        autoreleasepool(|_| NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05)));
+        std::panic::set_hook(hook);
+        assert!(ran.load(std::sync::atomic::Ordering::Relaxed), "later work still runs");
+
         testing::set_key_target(None);
         app_window.close();
         println!("plugin_window: ok");

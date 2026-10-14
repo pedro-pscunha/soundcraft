@@ -433,8 +433,9 @@ pub type MainThreadJob = Box<dyn FnOnce(MainThreadMarker) + Send>;
 
 /// Runs `job` on the main thread, from its run loop (the main dispatch queue), soon after this
 /// returns. Plugin-editor work that arrives on another thread goes this way (an instance dropped
-/// there with its editor open): AppKit objects are only touched on the main thread. A panic in
-/// `job` is stopped and logged there.
+/// there with its editor open): AppKit objects are only touched on the main thread. A panic or an
+/// Objective-C exception (a plugin's view code runs as its editor goes) in `job` is stopped and
+/// logged there.
 pub fn on_main_queue(job: MainThreadJob) {
     let context = Box::into_raw(Box::new(job));
     // SAFETY: the main queue is a process-wide static; `dispatch_async_f` hands the context to
@@ -454,8 +455,9 @@ unsafe extern "C" fn run_job(context: *mut std::ffi::c_void) {
         std::mem::forget(job);
         return;
     };
-    // A panic must not unwind into libdispatch.
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(mtm))).is_err() {
+    // Neither a panic nor an Objective-C exception may unwind into libdispatch (and
+    // `catch_unwind` aborts on an exception, so the job runs inside `exception::catch`).
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| guarded("main-queue work", || job(mtm)))).is_err() {
         log::error!("plugin window: a panic in main-queue work was stopped");
     }
 }
