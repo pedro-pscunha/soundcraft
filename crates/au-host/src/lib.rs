@@ -63,9 +63,10 @@
 //! older report, any other set is the host's own, and reports left unanswered for a second (the
 //! view went back to the value the session had sent) are forgotten. What a view changes
 //! without telling listeners at all, and settings that are no parameters, are only in the unit's
-//! `ClassInfo`, which the app reads from each live instance before it saves; a parameter value the
-//! session already holds for such a parameter is not refreshed from it, and is applied over the
-//! saved state when the session loads. An instrument's edits reach the session through its state
+//! `ClassInfo`, which the app reads from each live instance before it saves, together with the
+//! unit's values of the parameters the session holds a value for: one the unit moved away from by
+//! itself (not the value the host last knew it had) replaces the session's, so it is not applied
+//! over the saved state when the session loads. An instrument's edits reach the session through its state
 //! only: the app keeps no parameter edits for instruments.
 //!
 //! Not hosted yet: sidechain/extra buses, and parameters outside the global scope.
