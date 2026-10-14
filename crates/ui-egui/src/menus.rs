@@ -520,6 +520,10 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         "window.mix_separate" => {
             let v = toggle(&mut app.ui.mix_separate);
             app.focus_mix = app.ui.mix_separate;
+            if !app.ui.mix_separate {
+                // Its fields are gone with it (`SoundApp::wants_keyboard`).
+                app.mix_wants_keyboard = false;
+            }
             v
         }
         "window.edit" => {

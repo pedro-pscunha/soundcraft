@@ -1197,8 +1197,9 @@ impl SoundApp {
             if matches!(self.gesture, Some(Gesture::Fader { .. })) {
                 self.gesture = None;
             }
-            // Keep a running automation pass merged until playback stops.
-            if !ctx.egui_wants_keyboard_input() && self.touched.is_empty() {
+            // Keep a running automation pass merged until playback stops, and typing merged while
+            // a text field (in the main window or the separate Mix window) has the keyboard.
+            if !self.wants_keyboard(ctx) && self.touched.is_empty() {
                 self.engine.end_merge();
             }
         }
@@ -1405,6 +1406,50 @@ mod tests {
         assert!(!app.wants_keyboard(&ctx), "no field focused anywhere");
         assert!(pass(egui::ViewportId::ROOT, true));
         assert!(app.wants_keyboard(&ctx), "the main window's field counts");
+    }
+
+    /// The separate Mix window's focus stops counting once the window is gone: closed, docked
+    /// from the menu, or not shown in a frame.
+    #[test]
+    fn the_mix_windows_focus_stops_counting_when_it_closes_or_docks() {
+        let ctx = egui::Context::default();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.ui.mix_separate = true;
+        app.mix_wants_keyboard = true;
+        crate::mix_window::separate_closed(&mut app);
+        assert!(!app.wants_keyboard(&ctx), "closed");
+        app.ui.mix_separate = true;
+        app.mix_wants_keyboard = true;
+        crate::menus::run_ui_command(&mut app, "window.mix_separate", &json!({"value": false})).unwrap().unwrap();
+        assert!(!app.wants_keyboard(&ctx), "docked from the menu");
+        for _ in 0..2 {
+            app.mix_wants_keyboard = true;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+        }
+        assert!(app.fonts_ready, "the frame got as far as the windows");
+        assert!(!app.mix_wants_keyboard, "a frame without the separate Mix window");
+    }
+
+    /// Typing in a field of the separate Mix window (a track's comments) is one undo step, as in
+    /// the main window: the merge ends only when no field of either window has the keyboard.
+    #[test]
+    fn typing_in_the_separate_mix_window_is_one_undo_step() {
+        let ctx = egui::Context::default();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.engine.execute("track.new", &json!({})).unwrap();
+        let t = app.engine.session().tracks[0].id.0;
+        let steps = app.engine.undo_history().len();
+        app.mix_wants_keyboard = true; // the comments field, focused in the separate Mix window
+        for text in ["h", "he", "hel"] {
+            app.engine.execute_merged("track.comments", &json!({"track": t, "comments": text}), &format!("comments:{t}")).unwrap();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.logic(ui.ctx()));
+            out.textures_delta.clear();
+        }
+        assert_eq!(app.engine.undo_history().len(), steps + 1);
     }
 
     /// `transport.play {from}` starts at `from`, not at the edit insertion (a Locate followed by
