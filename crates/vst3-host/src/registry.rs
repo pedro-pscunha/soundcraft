@@ -134,6 +134,8 @@ struct Pending {
     path: PathBuf,
     /// Its fingerprint now (with a scan cache).
     print: Option<Fingerprint>,
+    /// Its helper timed out on the last scan too (the cache says so, for this fingerprint).
+    timed_out_before: bool,
     state: State,
 }
 
@@ -169,11 +171,17 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         .filter(|p| !known.iter().any(|s| &s.path == p))
         .map(|path| {
             let print = cache.as_ref().and_then(|_| cache::fingerprint(&path));
-            let state = match (&cache, print) {
-                (Some(c), Some(print)) if !fresh => c.lookup(&path, print).cloned().map_or(State::Todo, State::Cached),
-                _ => State::Todo,
+            let known = match (&cache, print) {
+                (Some(c), Some(print)) if !fresh => c.lookup(&path, print).cloned(),
+                _ => None,
             };
-            Pending { path, print, state }
+            let timed_out_before = matches!(known, Some(Outcome::TimedOutOnce(_)));
+            // A first timeout is tried again: only a second one in a row is a verdict.
+            let state = match known {
+                Some(Outcome::TimedOutOnce(_)) | None => State::Todo,
+                Some(outcome) => State::Cached(outcome),
+            };
+            Pending { path, print, timed_out_before, state }
         })
         .collect();
     let earlier: Vec<String> =
@@ -181,16 +189,23 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
     if !earlier.is_empty() {
         log::info!("vst3: {} bundles skipped by an earlier scan ({}); rescan to retry", earlier.len(), earlier.join(", "));
     }
+    let again: Vec<String> = pending.iter().filter(|p| p.timed_out_before).map(|p| bundle_name(&p.path)).collect();
+    if !again.is_empty() {
+        log::info!("vst3: scanning {} bundles that timed out last time once more ({})", again.len(), again.join(", "));
+    }
     let todo: Vec<PathBuf> = pending.iter().filter(|p| matches!(p.state, State::Todo)).map(|p| p.path.clone()).collect();
     // One answer per bundle to do, in the same order.
     let answers = crate::helper::scan_bundles(h, &todo);
     for (p, answer) in pending.iter_mut().filter(|p| matches!(p.state, State::Todo)).zip(answers) {
-        if let Err(Skip::Bundle(why)) = &answer {
+        if let Err(Skip::Bundle(why) | Skip::TimedOut(why)) = &answer {
             log::warn!("vst3: skipped {}: {why}", p.path.display());
         }
         let outcome = match &answer {
             Ok(ds) => Some(Outcome::Plugins(ds.clone())),
             Err(Skip::Bundle(why)) => Some(Outcome::Skipped(why.clone())),
+            // Provisional the first time; a second timeout in a row is a verdict.
+            Err(Skip::TimedOut(why)) if p.timed_out_before => Some(Outcome::Skipped(why.clone())),
+            Err(Skip::TimedOut(why)) => Some(Outcome::TimedOutOnce(why.clone())),
             Err(Skip::Host(_) | Skip::HostStuck(_)) => None,
         };
         if let (Some(c), Some(print), Some(outcome)) = (&mut cache, p.print, outcome) {
@@ -224,7 +239,9 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         match p.state {
             State::Cached(Outcome::Plugins(ds)) | State::Done(Ok(ds)) => merge(&mut out, ds),
             State::Cached(Outcome::Skipped(reason)) => skipped.push(SkippedBundle { path: p.path, reason, from_cache: true, helper_failed: false }),
-            State::Done(Err(Skip::Bundle(reason))) => skipped.push(SkippedBundle { path: p.path, reason, from_cache: false, helper_failed: false }),
+            State::Done(Err(Skip::Bundle(reason) | Skip::TimedOut(reason))) => {
+                skipped.push(SkippedBundle { path: p.path, reason, from_cache: false, helper_failed: false })
+            }
             State::Done(Err(Skip::Host(why))) if known_to_load => match load_bundle(&p.path) {
                 Ok(ds) => merge(&mut out, ds),
                 Err(e) => {
@@ -233,7 +250,7 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
                 }
             },
             State::Done(Err(Skip::Host(why) | Skip::HostStuck(why))) => skipped.push(not_scanned(p.path, &why)),
-            State::Todo => {}
+            State::Cached(Outcome::TimedOutOnce(_)) | State::Todo => {}
         }
     }
     if let Some(c) = &mut cache {

@@ -119,6 +119,7 @@ fn main() {
     #[cfg(unix)]
     a_timeout_kills_what_the_helper_started(&root.join("with-child"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
+    a_timeout_is_cached_only_when_it_happens_twice(&root.join("twice"), &root.join("twice-cache/vst3.json"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     the_registry_answers_while_helpers_scan(&root.join("busy"));
     a_rescan_during_a_scan_wins(&root.join("raced"));
@@ -353,17 +354,18 @@ fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cac
     };
     let (good, _) = install(dir, "Good", None);
     let (other, _) = install(dir, "Other", None);
-    let (stuck, stuck_hangs) = install(dir, "Stuck", Some("hang-entry"));
-    let (first, first_skipped, took) = scan();
+    // A bundle that fails to load is skipped at once and for good (timeouts: see
+    // `a_timeout_is_cached_only_when_it_happens_twice`).
+    let (stuck, stuck_fails) = install(dir, "Broken", Some("fail-entry"));
+    let (first, first_skipped, _) = scan();
     assert_eq!(first.len(), 2, "{first:?}");
     assert_eq!(first_skipped.iter().map(|s| &s.path).collect::<Vec<_>>(), vec![&stuck]);
-    assert!(took >= TIMEOUT, "{took:?}");
     assert_eq!((launches(&good), launches(&other), launches(&stuck)), (1, 1, 1));
     only_the_cache_file();
 
-    // Unchanged: no helper at all, the same plugins, and the stuck bundle still skipped with its
+    // Unchanged: no helper at all, the same plugins, and the broken bundle still skipped with its
     // reason (even once it would load: its binary and bundle are unchanged).
-    std::fs::remove_file(stuck_hangs.unwrap()).unwrap();
+    std::fs::remove_file(stuck_fails.unwrap()).unwrap();
     let (second, second_skipped, took) = scan();
     assert_eq!(second, first);
     assert!(!first_skipped[0].from_cache, "the first scan's own");
@@ -387,7 +389,7 @@ fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cac
     assert!(!std::fs::read_to_string(&cache).unwrap().contains("Other.vst3"), "dropped from the cache");
     only_the_cache_file();
 
-    // A corrupt cache is ignored (everything is scanned again; the stuck bundle loads now) and
+    // A corrupt cache is ignored (everything is scanned again; the broken bundle loads now) and
     // replaced.
     std::fs::write(&cache, b"{\"version\": 1, \"bundles\": [ garbage").unwrap();
     let (fifth, fifth_skipped, _) = scan();
@@ -398,6 +400,29 @@ fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cac
     assert_eq!(replaced["version"], 1);
     assert_eq!(replaced["bundles"].as_array().map(Vec::len), Some(2), "{replaced}");
     only_the_cache_file();
+}
+
+/// A timeout is provisional (a slow start or a busy machine can cause one): the next scan tries the
+/// bundle once more, and only a second timeout in a row is cached as a skip. A crash is cached at
+/// once.
+fn a_timeout_is_cached_only_when_it_happens_twice(dir: &Path, cache: &Path) {
+    let (twice, _) = install(dir, "Twice", Some("hang-entry"));
+    let (crashy, _) = install(dir, "Crashy", Some("crash-entry"));
+    let cached = ScanHelper { cache: Some(cache.to_path_buf()), ..helper() };
+    let run = || {
+        let (_, skipped) = soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &cached);
+        let from_cache = |b: &Path| skipped.iter().find(|s| s.path == b).unwrap_or_else(|| panic!("{skipped:?}")).from_cache;
+        (from_cache(&twice), from_cache(&crashy))
+    };
+    assert_eq!(run(), (false, false));
+    assert_eq!((launches(&twice), launches(&crashy)), (1, 1));
+    assert!(cached_outcome(cache, &twice)["timed_out_once"].is_string(), "only provisionally");
+    assert!(cached_outcome(cache, &crashy)["skipped"].is_string(), "a crash, at once");
+    assert_eq!(run(), (false, true), "the timeout is tried once more, the crash is not");
+    assert_eq!((launches(&twice), launches(&crashy)), (2, 1));
+    assert!(cached_outcome(cache, &twice)["skipped"].is_string(), "twice in a row: a skip");
+    assert_eq!(run(), (true, true));
+    assert_eq!((launches(&twice), launches(&crashy)), (2, 1), "neither is tried again");
 }
 
 fn skipped_bundles_are_remembered_until_rescan(dir: &Path, cache: &Path) {
@@ -417,7 +442,7 @@ fn skipped_bundles_are_remembered_until_rescan(dir: &Path, cache: &Path) {
     assert!(started.elapsed() < TIMEOUT, "{:?}: the skipped bundle was tried again", started.elapsed());
     assert_eq!(mine().len(), 1);
     assert_eq!((launches(&good), launches(&slow)), (1, 1));
-    assert!(cached_outcome(cache, &slow)["skipped"].as_str().is_some_and(|r| r.starts_with("timed out")), "the skip is in the cache");
+    assert!(cached_outcome(cache, &slow)["timed_out_once"].as_str().is_some_and(|r| r.starts_with("timed out")), "the timeout is in the cache");
     // `rescan` tries every bundle again, the cache notwithstanding: the stuck one loads now that it
     // no longer hangs, and the cache is rewritten.
     std::fs::remove_file(hang_file.unwrap()).unwrap();

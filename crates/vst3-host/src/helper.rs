@@ -76,9 +76,13 @@ const HOST_POLL: Duration = Duration::from_millis(250);
 /// Why a helper gave no plugins for a bundle.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Skip {
-    /// The bundle's doing: its helper timed out, crashed, or the bundle did not load. Kept in the
-    /// scan cache across runs.
+    /// The bundle's doing: its helper crashed, or the bundle did not load. Kept in the scan cache
+    /// across runs.
     Bundle(String),
+    /// The bundle's doing too, but only provisionally: its helper ran past its time limit (which
+    /// a slow start, or a busy machine, can also cause). Cached as a skip only when it happens
+    /// again on the next scan.
+    TimedOut(String),
     /// SoundCraft's side: the helper could not be started or read, or is no scan helper of this
     /// protocol, and never ran the bundle's code. Not a verdict on the bundle: never remembered or
     /// cached.
@@ -367,6 +371,7 @@ fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limit:
     };
     judge(ended, hello, why, bundle, limit, exe).map_err(|skip| match skip {
         Skip::Bundle(r) => Skip::Bundle(clean_reason(&r)),
+        Skip::TimedOut(r) => Skip::TimedOut(clean_reason(&r)),
         Skip::Host(r) => Skip::Host(clean_reason(&r)),
         Skip::HostStuck(r) => Skip::HostStuck(clean_reason(&r)),
     })
@@ -395,7 +400,7 @@ fn judge(
     match ended {
         Ended::Answered(Answer::Ok(ds)) => Ok(well_formed(ds, bundle)),
         Ended::Answered(Answer::Error(e)) => Err(Skip::Bundle(e)),
-        Ended::TimedOut => Err(Skip::Bundle(why(format!("timed out after {limit:?}")))),
+        Ended::TimedOut => Err(Skip::TimedOut(why(format!("timed out after {limit:?}")))),
         Ended::Exited(st) => Err(Skip::Bundle(why(ended_reason(st)))),
         Ended::Lost => Err(Skip::HostStuck(why("the scan helper stopped without an answer".into()))),
     }
@@ -635,7 +640,7 @@ mod tests {
             panic!()
         };
         assert!(why.chars().count() <= MAX_REASON && why.starts_with("bad  [31mred"), "{why:?}");
-        let Err(Skip::Bundle(why)) = classify(Ended::TimedOut, Some(PROTOCOL), "line one\nlast \u{7}line", bundle, Duration::from_secs(1), bundle)
+        let Err(Skip::TimedOut(why)) = classify(Ended::TimedOut, Some(PROTOCOL), "line one\nlast \u{7}line", bundle, Duration::from_secs(1), bundle)
         else {
             panic!()
         };

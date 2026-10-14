@@ -38,6 +38,9 @@ pub(crate) struct Fingerprint {
 pub(crate) enum Outcome {
     Plugins(Vec<Vst3Descriptor>),
     Skipped(String),
+    /// Its helper ran past its time limit once: scanned again next time, and skipped only if that
+    /// times out too.
+    TimedOutOnce(String),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -183,6 +186,7 @@ fn read(file: &Path) -> Result<Option<BTreeMap<PathBuf, (Fingerprint, Outcome)>>
                 let outcome = match e.outcome {
                     Outcome::Plugins(ds) => Outcome::Plugins(crate::helper::well_formed(ds, &e.path)),
                     Outcome::Skipped(why) => Outcome::Skipped(crate::helper::clean_reason(&why)),
+                    Outcome::TimedOutOnce(why) => Outcome::TimedOutOnce(crate::helper::clean_reason(&why)),
                 };
                 (e.path, (e.fingerprint, outcome))
             })
