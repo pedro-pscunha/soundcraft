@@ -451,6 +451,42 @@ pub(crate) fn kill_process_group(group: u32) {
     unsafe { killpg(group, SIGKILL) };
 }
 
+/// Puts a scan helper in a job object of this process whose processes are killed when its last
+/// handle closes. Nothing closes it before this process ends, however it ends: then its helpers,
+/// and whatever they started, end too (what the Unix helpers do by watching their parent).
+#[cfg(windows)]
+pub(crate) fn end_with_this_process(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    // The job handle, as an address (raw handles are not `Send`); `None` if it could not be made.
+    static JOB: OnceLock<Option<usize>> = OnceLock::new();
+    let job = JOB.get_or_init(|| {
+        // SAFETY: `CreateJobObjectW` with null attributes and name makes an unnamed job with the
+        // default security; it returns a handle or null.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return None;
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).ok()?;
+        // SAFETY: `job` is the job handle just made; `limits` is a valid structure of `size` bytes
+        // that outlives the call, of the class named.
+        let set = unsafe { SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size) };
+        // The handle is kept open for the life of the process (never closed here).
+        (set != 0).then_some(job as usize)
+    });
+    if let Some(job) = *job {
+        // SAFETY: `job` is the job handle above, open for the life of the process; the child's
+        // handle is valid while `child` is alive (borrowed here).
+        unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) };
+    }
+}
+
 /// Registers [`exit_modules`] to run at process exit. Exit handlers run in reverse order of
 /// registration, C++ static destructors included, so registering again after each module load
 /// puts the exits ahead of the destructors of every module loaded so far.

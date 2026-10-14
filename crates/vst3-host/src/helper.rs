@@ -136,8 +136,9 @@ fn answer_channel() -> Box<dyn Write> {
 }
 
 /// Ends this helper as soon as the host named in [`HOST_ENV`] is gone: on Unix the helper then
-/// has another parent. (The host may be gone before the helper first looks, so its parent then
-/// cannot tell it apart.) On Windows a helper whose host died runs until its bundle is scanned.
+/// has another parent. The host hands its id over because the helper cannot record its parent
+/// itself: the host may be gone before the helper first looks. (On Windows the host's job object
+/// ends its helpers instead.)
 fn end_with_host() {
     #[cfg(unix)]
     {
@@ -251,6 +252,9 @@ impl Running {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn().map_err(|e| Skip::Host(format!("cannot start the scan helper {}: {e}", helper.exe.display())))?;
+        // Killed with this process, however it ends (Unix helpers watch their parent instead).
+        #[cfg(windows)]
+        crate::ffi::end_with_this_process(&child);
         let err_tail = drain_stderr(&mut child);
         let Some(lines) = read_lines(&mut child) else {
             if !end(&mut child) {
