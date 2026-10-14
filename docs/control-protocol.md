@@ -66,6 +66,23 @@ Errors: `{"id": 1, "ok": false, "error": "bad parameters for `mix.volume`: no tr
   `"samples:48000"`.
 - Ranges: `start` + `end` (or `start` + `length`); omitted = the current edit selection.
 
+## While recording
+
+A take is placed from where recording started, so while the transport records, every command that
+would move or restart the transport, or replace the session under the take, fails with the reason
+`stop recording first` and changes nothing: `transport.locate`, `transport.rtz`,
+`transport.go_to_end`, `transport.rewind`, `transport.fast_forward`, `transport.play_selection`,
+`transport.half_speed`, `transport.play` with `from`, `edit.play_timeline`, `markers.recall`,
+`markers.next`, `markers.previous`, `edit.tab` (with `extend` it only extends the selection and
+runs), `session.new`, `session.open`, `session.close`, `session.revert` and the `app.quit`
+command. Stopping, and `transport.play` without `from`, go on. This holds headless too (the engine
+refuses them). The control channel's `app.quit` method still quits: the take is finished and kept
+in the session's autosave.
+
+In the app, `session.open` of the session that is already open does not reload it: it returns
+`{"name": …, "already_open": true}` (the headless engine has no open session to compare with and
+opens the file).
+
 ## Examples
 
 ```sh
