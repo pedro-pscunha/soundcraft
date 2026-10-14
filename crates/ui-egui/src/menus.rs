@@ -600,6 +600,10 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             app.ui.show_audio_health = false;
             app.ui.show_automation = false;
             app.ui.plugin_windows.clear();
+            if let Some(p) = &app.player {
+                // A click on a hosted plugin opens its own editor, a native window egui doesn't draw.
+                p.close_editors();
+            }
             app.ui.audiosuite = None;
             json!({})
         }
