@@ -53,6 +53,22 @@ fn main() {
         }
         std::process::exit(if launches(&bundle) == 0 { 1 } else { 0 });
     }
+    // A fresh process for `adding_a_folder_first_keeps_the_standard_ones`: its standard folders hold
+    // `standard`; `extra` is added before anything has scanned.
+    if let [mode, extra, standard] = args.as_slice()
+        && mode == "--add-dir-first"
+    {
+        // Through helpers, so the launch log shows which bundles were scanned (all fixture copies
+        // share their ids, so the list alone cannot).
+        soundcraft_vst3_host::set_scan_helper(Some(helper()));
+        let held = soundcraft_vst3_host::add_search_dir(Path::new(extra));
+        let all = soundcraft_vst3_host::scan();
+        let ok = held == 2 && all.len() == 2 && launches(Path::new(standard)) == 1;
+        if !ok {
+            eprintln!("add_search_dir: {held}; scan(): {all:?}; standard scanned {} times", launches(Path::new(standard)));
+        }
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     // Hermetic: run the tests again in a child that sees no standard plugin folder.
     if std::env::var_os("SOUNDCRAFT_VST3_DEFAULT_PATHS").is_none() {
         let none = Path::new(env!("CARGO_TARGET_TMPDIR")).join("vst3-no-default-plugins");
@@ -83,6 +99,9 @@ fn main() {
     a_timeout_kills_what_the_helper_started(&root.join("with-child"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
+    the_registry_answers_while_helpers_scan(&root.join("busy"));
+    a_rescan_during_a_scan_wins(&root.join("raced"));
+    adding_a_folder_first_keeps_the_standard_ones(&root.join("add-first"));
     #[cfg(unix)]
     a_helper_ends_when_its_host_is_gone(&root.join("orphan"));
     let _ = std::fs::remove_dir_all(&root);
@@ -322,6 +341,66 @@ fn skipped_bundles_are_remembered_until_rescan(dir: &Path, cache: &Path) {
     let elsewhere: Vec<_> = soundcraft_vst3_host::scan().into_iter().filter(|d| !d.path.starts_with(env!("CARGO_TARGET_TMPDIR"))).collect();
     assert!(elsewhere.is_empty(), "the rescan scanned installed plugins: {elsewhere:?}");
     soundcraft_vst3_host::set_scan_helper(None);
+}
+
+/// Helpers may take their time limit: the registry answers other calls meanwhile.
+fn the_registry_answers_while_helpers_scan(dir: &Path) {
+    let (busy, hangs) = install(dir, "Busy", Some("hang-entry"));
+    soundcraft_vst3_host::set_scan_helper(Some(helper()));
+    let folder = dir.to_path_buf();
+    let scanning = std::thread::spawn(move || soundcraft_vst3_host::add_search_dir(&folder));
+    let started = Instant::now();
+    while launches(&busy) == 0 && started.elapsed() < TIMEOUT {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let asked = Instant::now();
+    let _ = (soundcraft_vst3_host::cached(), soundcraft_vst3_host::skipped());
+    let waited = asked.elapsed();
+    assert_eq!(scanning.join().unwrap(), 0);
+    assert!(waited < Duration::from_millis(500), "{waited:?}: the registry was locked while a helper ran");
+    // Later rescans in this process may load it.
+    std::fs::remove_file(hangs.unwrap()).unwrap();
+    soundcraft_vst3_host::set_scan_helper(None);
+}
+
+/// A rescan asked for while a scan runs is not answered with that scan's (older) result: it waits
+/// for it to end, then scans again.
+fn a_rescan_during_a_scan_wins(dir: &Path) {
+    let (raced, _) = install(dir, "Raced", None);
+    soundcraft_vst3_host::set_scan_helper(Some(helper()));
+    assert_eq!(soundcraft_vst3_host::add_search_dir(dir), 2);
+    let hang = common::install_fixture(dir, "Raced").join("hang-entry");
+    std::fs::write(&hang, b"").unwrap();
+    let before = launches(&raced);
+    let first = std::thread::spawn(soundcraft_vst3_host::rescan);
+    let started = Instant::now();
+    while launches(&raced) == before && started.elapsed() < TIMEOUT {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The first rescan is stuck on the bundle; it is fixed, and a second rescan is asked for.
+    std::fs::remove_file(&hang).unwrap();
+    soundcraft_vst3_host::rescan();
+    first.join().unwrap();
+    let skipped: Vec<_> = soundcraft_vst3_host::skipped().into_iter().filter(|s| s.path == raced).collect();
+    assert!(skipped.is_empty(), "the first scan's result won: {skipped:?}");
+    assert_eq!(launches(&raced), before + 2, "scanned again after the first scan");
+    soundcraft_vst3_host::set_scan_helper(None);
+}
+
+/// A folder added before anything has scanned does not stand in for the standard folders: the
+/// first scan covers both. (In a fresh process, whose standard folders hold a fixture.)
+fn adding_a_folder_first_keeps_the_standard_ones(dir: &Path) {
+    let (standard, _) = install(&dir.join("standard"), "Standard", None);
+    let extra = dir.join("extra");
+    install(&extra, "Extra", None);
+    let child = Command::new(std::env::current_exe().unwrap())
+        .arg("--add-dir-first")
+        .arg(&extra)
+        .arg(&standard)
+        .env("SOUNDCRAFT_VST3_DEFAULT_PATHS", dir.join("standard"))
+        .output()
+        .unwrap();
+    assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stderr));
 }
 
 /// A timeout kills the helper and whatever its plugin started: a child of the plugin that keeps

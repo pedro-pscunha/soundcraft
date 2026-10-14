@@ -57,6 +57,11 @@ pub fn fixture_dir() -> &'static Path {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("vst3-fixture-install-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         install_fixture(&dir.join("vendor"), "Fixture");
+        // Scans see the fixture, not the installed plugins (unless the installed-plugin smoke test
+        // asked for them).
+        if std::env::var_os("SOUNDCRAFT_VST3_SMOKE").is_none() {
+            soundcraft_vst3_host::set_default_search_paths(Some(Vec::new()));
+        }
         assert_eq!(soundcraft_vst3_host::add_search_dir(&dir), 2);
         dir
     })

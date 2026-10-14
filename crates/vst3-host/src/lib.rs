@@ -99,6 +99,14 @@ pub use plugin::Vst3Plugin;
 #[cfg(all(not(target_arch = "wasm32"), feature = "testing"))]
 pub use ffi::instances_awaiting_main_thread;
 
+/// Test seam: scans use these folders instead of the standard ones (`None`: the standard ones
+/// again), so a test process never loads the installed plugins. Other processes get the same
+/// from `SOUNDCRAFT_VST3_DEFAULT_PATHS` (see [`scan::default_search_paths`]).
+#[cfg(all(not(target_arch = "wasm32"), feature = "testing"))]
+pub fn set_default_search_paths(paths: Option<Vec<PathBuf>>) {
+    registry::set_default_search_paths(paths)
+}
+
 use soundcraft_dsp::{Category, Plugin, PluginInfo};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
