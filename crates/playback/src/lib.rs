@@ -29,7 +29,7 @@ pub use devices::AudioConfig;
 
 use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
-use soundcraft_model::{Insert, Session, TrackId};
+use soundcraft_model::{AutoParam, Insert, Session, Track, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
@@ -52,8 +52,21 @@ pub struct MeterSnapshot {
     pub main: StripMeter,
 }
 
-/// Plugin states read from the live instances: `(track, slot or INSTRUMENT_SLOT, state)`.
-pub type PluginStates = Vec<(TrackId, usize, Vec<u8>)>;
+/// A live third-party plugin's state, read for saving ([`Player::capture_states`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedState {
+    pub track: TrackId,
+    /// The insert slot, or [`soundcraft_mix::INSTRUMENT_SLOT`].
+    pub slot: usize,
+    pub state: Vec<u8>,
+    /// The insert's parameter overrides the plugin has changed by itself, without telling the
+    /// host per parameter (a preset loaded in its own editor), with their new values. Stored with
+    /// the state, so the old values are not applied over it when the session is loaded.
+    pub params: Vec<(String, f32)>,
+}
+
+/// Plugin states read from the live instances.
+pub type PluginStates = Vec<CapturedState>;
 
 /// A parameter edit made in a plugin's own editor: `(track, slot, param id, value)`.
 pub type EditorEdit = (TrackId, usize, String, f32);
@@ -742,8 +755,9 @@ impl Player {
     }
 
     /// Reads the state of every live third-party plugin, for saving `s` (the current session):
-    /// store each on its insert with [`Insert::store_live_state`]. Slots `s` changed since the last
-    /// [`update_session`](Self::update_session) are left out (their new insert wins).
+    /// store each on its insert with [`Insert::store_live_state`], and its
+    /// [`params`](CapturedState::params) over the insert's overrides. Slots `s` changed since the
+    /// last [`update_session`](Self::update_session) are left out (their new insert wins).
     pub fn capture_states(&self, s: &Session) -> PluginStates {
         self.side().capture_states(s)
     }
@@ -873,14 +887,26 @@ impl Player {
     /// [`update_session`](Self::update_session) with that plugin keeps it. Returns false, changing
     /// nothing, when `s` holds no hosted plugin there.
     pub fn adopt_editor(&self, s: &Session, track: TrackId, slot: usize, editor: Box<dyn PluginEditor>) -> bool {
-        let key = (track, slot);
-        let Some(spec) = soundcraft_mix::instance_specs(s).into_iter().find(|x| (x.track, x.slot) == key) else { return false };
+        self.adopt_slot(s, (track, slot)).map(|mut side| side.editors.insert((track, slot), editor)).is_some()
+    }
+
+    /// Makes `reader` the state reader of the hosted plugin `s` holds in `slot`, as if the player
+    /// had made its instance (like [`adopt_editor`](Self::adopt_editor), which it replaces):
+    /// [`capture_states`](Self::capture_states) reads it. Returns false, changing nothing, when
+    /// `s` holds no hosted plugin there.
+    pub fn adopt_state_reader(&self, s: &Session, track: TrackId, slot: usize, reader: Box<dyn PluginStateReader>) -> bool {
+        self.adopt_slot(s, (track, slot)).map(|mut side| side.states.insert((track, slot), reader)).is_some()
+    }
+
+    /// Records a made instance of the hosted plugin `s` holds at `key`, forgetting the slot's
+    /// previous one; `None` when `s` holds no hosted plugin there.
+    fn adopt_slot(&self, s: &Session, key: (TrackId, usize)) -> Option<std::sync::MutexGuard<'_, Side>> {
+        let spec = soundcraft_mix::instance_specs(s).into_iter().find(|x| (x.track, x.slot) == key)?;
         let epoch = insert_at(s, key).map_or(0, Insert::state_epoch);
         let mut side = self.side();
         side.forget(key);
         side.shadow.insert(key, Live { id: spec.id, ch: spec.ch, created: true, epoch });
-        side.editors.insert(key, editor);
-        true
+        Some(side)
     }
 }
 
@@ -959,7 +985,11 @@ impl Side {
         self.states
             .iter_mut()
             .filter(|(k, _)| !self.refused.contains(*k) && current(k))
-            .filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?)))
+            .filter_map(|(&(t, slot), r)| {
+                let state = r.save_state()?;
+                let params = s.track(t).zip(insert_at(s, (t, slot))).map_or_else(Vec::new, |(tr, ins)| moved_params(tr, slot, ins, r.as_mut()));
+                Some(CapturedState { track: t, slot, state, params })
+            })
             .collect()
     }
 
@@ -1030,6 +1060,37 @@ impl Side {
         }
         out
     }
+}
+
+/// The overrides of `ins`, in `slot` of `t`, that its live instance has moved away from by itself:
+/// read now, the value differs from the override and from the value the host last knew the
+/// instance had. That leaves out an override the instance has not received yet (the mixer sends
+/// overrides only while it renders: it still has the value the host knew), and a parameter an
+/// automation lane drives (the lane decides its value during playback, not the override).
+fn moved_params(t: &Track, slot: usize, ins: &Insert, r: &mut dyn PluginStateReader) -> Vec<(String, f32)> {
+    let lane_slot = u8::try_from(slot).ok();
+    let automated = |id: &str| {
+        lane_slot.is_some_and(|n| {
+            t.automation.iter().any(|l| !l.points.is_empty() && matches!(&l.param, AutoParam::Plugin { slot, param } if *slot == n && param == id))
+        })
+    };
+    let ids: Vec<&str> = ins.params.keys().map(String::as_str).filter(|id| !automated(id)).collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    ids.iter()
+        .zip(r.param_values(&ids))
+        .filter_map(|(id, read)| {
+            let read = read?;
+            let stored = *ins.params.get(*id)?;
+            (read.live.is_finite() && !same_value(read.live, stored) && !same_value(read.live, read.host)).then(|| (id.to_string(), read.live))
+        })
+        .collect()
+}
+
+/// Equal but for float noise (a value converted to a plugin's own units and back).
+fn same_value(a: f32, b: f32) -> bool {
+    (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
 }
 
 /// The insert in `slot` (or the instrument, [`soundcraft_mix::INSTRUMENT_SLOT`]) of a track.
@@ -1364,7 +1425,8 @@ mod tests {
         side.states.insert((a, soundcraft_mix::INSTRUMENT_SLOT), live(b"synth"));
         side.states.insert((a, 3), live(b"a3"));
         side.states.insert((a, 4), Box::new(|| None));
-        let want = vec![(a, 3, b"a3".to_vec()), (a, soundcraft_mix::INSTRUMENT_SLOT, b"synth".to_vec()), (b, 0, b"b0".to_vec())];
+        let captured = |track, slot, state: &[u8]| CapturedState { track, slot, state: state.to_vec(), params: Vec::new() };
+        let want = vec![captured(a, 3, b"a3"), captured(a, soundcraft_mix::INSTRUMENT_SLOT, b"synth"), captured(b, 0, b"b0")];
         assert_eq!(side.capture_states(&s), want);
         side.forget((a, 3));
         assert_eq!(side.capture_states(&s), want[1..]);
@@ -1473,7 +1535,7 @@ mod tests {
         side.refused.insert(k);
         assert!(side.capture_states(&s).is_empty());
         side.open_editor(k).unwrap();
-        assert_eq!(side.capture_states(&s), vec![(k.0, 0, b"defaults".to_vec())]);
+        assert_eq!(side.capture_states(&s), vec![CapturedState { track: k.0, slot: 0, state: b"defaults".to_vec(), params: Vec::new() }]);
     }
 
     #[test]
@@ -1502,7 +1564,7 @@ mod tests {
         let (mut side, mut s, k) = hosted_slot();
         // What the UI does before a save or bounce: read the live state and store it on the insert.
         let captured = side.capture_states(&s);
-        insert_mut(&mut s, k).store_live_state(&captured[0].2);
+        insert_mut(&mut s, k).store_live_state(&captured[0].state);
         side.prepare(&s);
         assert!(side.states.contains_key(&k), "storing the live instance's own state made it again");
         insert_mut(&mut s, k).set_state_bytes(b"another state");
@@ -1531,7 +1593,7 @@ mod tests {
         side.prepare(&s);
         // A save captures the live state and stores it on the insert.
         let captured = side.capture_states(&s);
-        insert_mut(&mut s, k).store_live_state(&captured[0].2);
+        insert_mut(&mut s, k).store_live_state(&captured[0].state);
         side.prepare(&s);
         side.prepare(&before_fader);
         assert!(side.states.contains_key(&k), "Undo rebuilt the plugin from the state its undo step holds");
@@ -1582,6 +1644,53 @@ mod tests {
         assert!(side.capture_states(&s).is_empty(), "the old plugin's state would go to the new one");
         s.track_mut(k.0).unwrap().mixer.inserts[0] = None;
         assert!(side.capture_states(&s).is_empty(), "the insert was removed");
+    }
+
+    /// A reader whose parameters read as listed: `(id, live, host)`.
+    struct Reads(Vec<(&'static str, f32, f32)>);
+
+    impl PluginStateReader for Reads {
+        fn save_state(&mut self) -> Option<Vec<u8>> {
+            Some(b"live".to_vec())
+        }
+        fn param_values(&mut self, ids: &[&str]) -> Vec<Option<soundcraft_dsp::ParamReading>> {
+            ids.iter().map(|id| self.0.iter().find(|r| r.0 == *id).map(|&(_, live, host)| soundcraft_dsp::ParamReading { live, host })).collect()
+        }
+    }
+
+    /// A plugin that changes parameters by itself (a preset loaded in its own editor, which VST3
+    /// announces only as "values changed") has the new values in its state, but the insert's
+    /// overrides of those parameters kept the old ones, and a loaded session applies them on top
+    /// of the state: the preset came back half reverted. A capture returns the overrides the
+    /// plugin moved away from, and only those: not one a lane drives, not one set by a command the
+    /// instance has not received yet (the mixer sends overrides only while it renders), not one
+    /// its editor reported already, not float noise.
+    #[test]
+    fn a_capture_returns_the_overrides_the_plugin_changed_by_itself() {
+        let (mut side, mut s, k) = hosted_slot();
+        let ins = insert_mut(&mut s, k);
+        let overrides =
+            [("preset", 1.0), ("kept", 2.0), ("automated", 3.0), ("not sent yet", 4.0), ("reported", 5.0), ("noise", 500.0), ("unread", 6.0)];
+        for (id, v) in overrides {
+            ins.params.insert(id.into(), v);
+        }
+        let t = s.track_mut(k.0).unwrap();
+        t.lane_mut(&AutoParam::Plugin { slot: 0, param: "automated".into() }).set_point(0, 0.25);
+        // A lane with no points drives nothing.
+        let _ = t.lane_mut(&AutoParam::Plugin { slot: 0, param: "preset".into() });
+        side.states.insert(
+            k,
+            Box::new(Reads(vec![
+                ("preset", 7.0, 1.0),
+                ("kept", 2.0, 2.0),
+                ("automated", 0.25, 3.0),
+                ("not sent yet", 0.5, 0.5),
+                ("reported", 5.0, 0.75),
+                ("noise", 500.001, 500.0),
+            ])),
+        );
+        let want = CapturedState { track: k.0, slot: 0, state: b"live".to_vec(), params: vec![("preset".into(), 7.0)] };
+        assert_eq!(side.capture_states(&s), vec![want]);
     }
 
     /// An opened session's inserts are new, even where track ids and plugins match the old one's,

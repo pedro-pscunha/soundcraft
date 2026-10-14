@@ -624,13 +624,18 @@ impl SoundApp {
     }
 
     /// Reads every live third-party plugin's state and stores it on its insert
-    /// (`mix.insert_state`, `live`: the instance keeps playing), so saves and bounces include it.
+    /// (`mix.insert_state`, `live`: the instance keeps playing), so saves and bounces include it,
+    /// together with the insert's overrides the plugin has changed by itself (`params`).
     pub fn capture_plugin_states(&mut self) {
         let Some(p) = &self.player else { return };
-        for (t, slot, data) in p.capture_states(self.engine.session()) {
-            let slot = if slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
-            let state = soundcraft_model::b64::encode(&data);
-            if let Err(e) = self.engine.execute("mix.insert_state", &json!({"track": t.0, "slot": slot, "state": state, "live": true})) {
+        for c in p.capture_states(self.engine.session()) {
+            let slot = if c.slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(c.slot) };
+            let state = soundcraft_model::b64::encode(&c.state);
+            let mut params = json!({"track": c.track.0, "slot": slot, "state": state, "live": true});
+            if !c.params.is_empty() {
+                params["params"] = c.params.into_iter().map(|(id, v)| (id, json!(v))).collect::<serde_json::Map<_, _>>().into();
+            }
+            if let Err(e) = self.engine.execute("mix.insert_state", &params) {
                 log::warn!("storing plugin state: {e}");
             }
         }
