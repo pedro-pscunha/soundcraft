@@ -1949,9 +1949,10 @@ mod window {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE,
-        GetWindowLongPtrW, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
+        AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GW_OWNER, GWL_EXSTYLE, GWL_STYLE,
+        GetWindow, GetWindowLongPtrW, IDC_ARROW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOW,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN,
+        WS_OVERLAPPED, WS_SYSMENU,
     };
 
     pub const PLATFORM_TYPE: Option<*const c_char> = Some(vst3::Steinberg::kPlatformTypeHWND);
@@ -2088,9 +2089,17 @@ mod window {
             self.live().is_some_and(|h| unsafe { IsWindowVisible(h) } != 0)
         }
 
-        /// The user closed (hid) the window: owned windows are not hidden with their owner.
+        /// The user closed the window (closing only hides it). An owned window also hides while
+        /// its owner, the app's window, is minimized, and comes back with it: hidden counts as
+        /// closed only while the owner is not minimized.
         pub fn closed_by_user(&self) -> bool {
-            !self.is_visible()
+            if self.is_visible() {
+                return false;
+            }
+            // SAFETY: `GetWindow` and `IsIconic` accept any handle; a null or dead owner is not
+            // minimized.
+            let owner_minimized = self.live().is_some_and(|h| unsafe { IsIconic(GetWindow(h, GW_OWNER)) } != 0);
+            !owner_minimized
         }
 
         pub fn close(self) {
