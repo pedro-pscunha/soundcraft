@@ -201,6 +201,8 @@ fn main() {
     adding_a_folder_first_keeps_the_standard_ones(&root.join("add-first"));
     #[cfg(unix)]
     a_helper_ends_when_its_host_is_gone(&root.join("orphan"));
+    #[cfg(unix)]
+    a_helper_started_by_hand_ends_alone(&root.join("by-hand"));
     let _ = std::fs::remove_dir_all(&root);
     println!("scan_helper: ok");
 }
@@ -794,6 +796,27 @@ fn a_process_the_plugin_leaves_running_does_not_hold_the_answer(dir: &Path) {
     processes::end(pid_in(&mode.unwrap().with_file_name("child-pid")));
     assert!(skipped.is_empty() && found.len() == 2, "{skipped:?}");
     assert!(took < Duration::from_millis(1500), "{took:?}: the answer was held open by the plugin's process");
+}
+
+/// A helper started by hand, by a script in the script's process group, that is handed a host id
+/// that is not its parent's ends alone: not the script with it.
+#[cfg(unix)]
+fn a_helper_started_by_hand_ends_alone(dir: &Path) {
+    use std::os::unix::process::CommandExt;
+    let (bundle, _) = install(dir, "ByHand", None);
+    // The script leads a group of its own (so the helper is not a group leader, and, without the
+    // check, its SIGKILL to the group stays in this one), runs the helper, then says it lived on.
+    let script = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#""$0" --soundcraft-scan-vst3 "$1" >/dev/null; echo "helper ended: $?""#)
+        .arg(std::env::current_exe().unwrap())
+        .arg(&bundle)
+        .env("SOUNDCRAFT_SCAN_HOST_PID", "1")
+        .process_group(0)
+        .output()
+        .unwrap();
+    assert!(script.status.success(), "the script ended with its helper: {script:?}");
+    assert_eq!(String::from_utf8_lossy(&script.stdout), "helper ended: 3\n");
 }
 
 /// A host killed mid-scan must not leave its helper stuck in a plugin's module entry for good, nor

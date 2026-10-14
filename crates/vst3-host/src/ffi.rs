@@ -376,12 +376,20 @@ pub(crate) fn exit_now(code: c_int) -> ! {
 }
 
 /// Ends this process's whole process group at once: a scan helper (the leader of a group of its
-/// own) and whatever its plugin started. Falls back to ending this process alone.
+/// own) and whatever its plugin started. A helper that does not lead its group (started by hand,
+/// from a script, in the script's group) ends alone: that group is not its to end. Falls back to
+/// ending this process alone.
 #[cfg(unix)]
 pub(crate) fn end_own_process_group() -> ! {
-    // SAFETY: kill(2) with pid 0 sends SIGKILL to every process of the caller's group, this one
-    // included; a scan helper leads a group of its own, so nothing else is in it.
-    unsafe { libc::kill(0, libc::SIGKILL) };
+    // SAFETY: getpgrp(2) and getpid(2) take nothing and cannot fail. kill(2) with pid 0 sends
+    // SIGKILL to every process of the caller's group, this one included. It is sent only when this
+    // process leads that group, as SoundCraft starts its helpers: then the group holds this helper
+    // and what its plugin started, never processes of whoever started it.
+    unsafe {
+        if libc::getpgrp() == libc::getpid() {
+            libc::kill(0, libc::SIGKILL);
+        }
+    }
     exit_now(3)
 }
 
