@@ -72,7 +72,13 @@ fn the_cli_scans_vst3_plugins_in_helpers() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "engine.vst3_plugins: []", "no installed plugin scanned");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let found: serde_json::Value = serde_json::from_str(stdout.trim().strip_prefix("engine.vst3_plugins: ").unwrap()).unwrap();
+    assert_eq!(found["plugins"], serde_json::json!([]), "no installed plugin scanned");
+    assert_eq!(found["skipped"].as_array().map(Vec::len), Some(1), "{found}");
+    assert_eq!(found["skipped"][0]["path"], bundle.to_str().unwrap());
+    assert_eq!(found["skipped"][0]["from_cache"], false);
+    assert!(found["skipped"][0]["reason"].as_str().unwrap().starts_with("cannot load VST3 plugin"), "{found}");
     let skipped = format!("vst3: skipped {}: cannot load VST3 plugin", bundle.display());
     assert!(stderr.contains(&skipped), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -102,17 +108,21 @@ fn the_cli_caches_vst3_scans_in_its_settings_folder() {
         }
         let out = cmd.args(["run", "--cmd", "engine.vst3_plugins"]).output().unwrap();
         assert!(out.status.success(), "{out:?}");
-        String::from_utf8_lossy(&out.stderr).into_owned()
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let found: serde_json::Value = serde_json::from_str(stdout.trim().strip_prefix("engine.vst3_plugins: ").unwrap()).unwrap();
+        (String::from_utf8_lossy(&out.stderr).into_owned(), found["skipped"][0]["from_cache"].as_bool())
     };
     let skipped = format!("vst3: skipped {}", bundle.display());
-    let first = run(false);
+    let (first, first_cached) = run(false);
     assert!(first.contains(&skipped), "{first}");
+    assert_eq!(first_cached, Some(false));
     assert!(std::fs::read_to_string(&cache).unwrap().contains("garbage.vst3"));
-    let second = run(false);
+    let (second, second_cached) = run(false);
     assert!(!second.contains(&skipped), "not tried again: {second}");
+    assert_eq!(second_cached, Some(true), "listed as skipped by an earlier scan");
     assert!(second.contains("bundles skipped by an earlier scan (") && second.contains("garbage") && second.contains("rescan to retry"), "{second}");
     std::fs::remove_dir_all(&config).unwrap();
-    let without = run(true);
+    let (without, _) = run(true);
     assert!(without.contains(&skipped), "{without}");
     assert!(!cache.exists(), "no cache without preferences");
     let _ = std::fs::remove_dir_all(&dir);

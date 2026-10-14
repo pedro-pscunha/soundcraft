@@ -849,6 +849,27 @@ fn menu_row(ui: &mut Ui, selected: bool, text: &str) -> bool {
     ui.add(egui::Button::selectable(selected, text).min_size(vec2(0.0, ui.spacing().interact_size.y))).clicked()
 }
 
+/// The end of the VST3 submenu: how many plugins the scan skipped (hung, crashed or failed to load;
+/// the tooltip says which and why) and a rescan that tries every plugin again. The rescan runs
+/// here, on the UI thread, so the app waits until it is done.
+fn vst3_scan_items(ui: &mut Ui) {
+    ui.separator();
+    let skipped = soundcraft_vst3_host::skipped();
+    if !skipped.is_empty() {
+        let why: Vec<String> =
+            skipped.iter().map(|s| format!("{}: {}{}", s.path.display(), s.reason, if s.from_cache { " (an earlier scan)" } else { "" })).collect();
+        let n = skipped.len();
+        ui.weak(format!("{n} plugin{} skipped", if n == 1 { "" } else { "s" })).on_hover_text(why.join("\n"));
+    }
+    if ui
+        .button("Rescan VST3 (may take a minute)")
+        .on_hover_text("Scans every VST3 plugin again, the skipped ones too. SoundCraft waits until it is done.")
+        .clicked()
+    {
+        soundcraft_vst3_host::rescan();
+    }
+}
+
 /// A hosted plugin as the plugin menus list it.
 struct MenuPlugin {
     id: String,
@@ -871,6 +892,7 @@ fn hosted_menus(ui: &mut Ui, instruments: bool) -> Option<String> {
         if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No VST3 plugins found") {
             picked = Some(p);
         }
+        vst3_scan_items(ui);
     });
     if cfg!(target_os = "macos") {
         ui.menu_button("Audio Units", |ui| {

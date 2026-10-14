@@ -279,7 +279,9 @@ fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cac
     // reason (even once it would load: its binary and bundle are unchanged).
     std::fs::remove_file(stuck_hangs.unwrap()).unwrap();
     let (second, second_skipped, took) = scan();
-    assert_eq!((second, second_skipped), (first.clone(), first_skipped.clone()));
+    assert_eq!(second, first);
+    assert!(!first_skipped[0].from_cache, "the first scan's own");
+    assert_eq!(second_skipped, vec![SkippedBundle { from_cache: true, ..first_skipped[0].clone() }], "the same, from the cache");
     assert_eq!((launches(&good), launches(&other), launches(&stuck)), (1, 1, 1), "no helper started");
     assert!(took < TIMEOUT, "{took:?}");
 

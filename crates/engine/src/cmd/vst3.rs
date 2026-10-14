@@ -12,7 +12,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "List VST3 Plugins",
         [],
         None,
-        "{rescan?: bool} → [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}]. The apps scan in helper processes and cache the result per bundle: rescan retries every bundle (the ones skipped as hung, crashed or broken too) and rewrites the cache",
+        "{rescan?: bool} → {plugins: [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}], skipped: [{path, reason, from_cache}]}. The apps scan in helper processes and cache the result per bundle; skipped lists the bundles that hung, crashed or failed (from_cache: by an earlier scan, not tried again). rescan retries every bundle, the skipped ones too, and rewrites the cache",
         always,
         |_, p| {
             let list = if p.get("rescan").and_then(Value::as_bool).unwrap_or(false) {
@@ -20,7 +20,7 @@ pub fn specs() -> Vec<CommandSpec> {
             } else {
                 soundcraft_vst3_host::scan()
             };
-            Ok(json!(list))
+            Ok(json!({"plugins": list, "skipped": soundcraft_vst3_host::skipped()}))
         }
     )]
 }
@@ -31,10 +31,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn vst3_plugins_query_returns_a_list() {
+    fn vst3_plugins_query_returns_the_plugins_and_the_skipped_bundles() {
         let mut e = Engine::default();
         let v = e.execute("engine.vst3_plugins", &json!({})).unwrap();
-        assert!(v.is_array());
+        assert!(v["plugins"].is_array() && v["skipped"].is_array(), "{v}");
     }
 
     #[test]

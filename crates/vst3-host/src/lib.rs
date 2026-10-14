@@ -211,6 +211,8 @@ pub struct SkippedBundle {
     pub path: PathBuf,
     /// Why: the helper timed out, crashed, or the bundle failed to load.
     pub reason: String,
+    /// Skipped by an earlier scan, kept in the scan cache (not tried again in this one).
+    pub from_cache: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

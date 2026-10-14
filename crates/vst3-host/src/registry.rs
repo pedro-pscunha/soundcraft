@@ -143,6 +143,7 @@ fn scan_in_helpers(bundles: Vec<PathBuf>, h: &ScanHelper, skipped: &mut Vec<Skip
             _ => None,
         })
         .collect();
+    let cached: Vec<bool> = found.iter().map(Option::is_some).collect();
     let earlier: Vec<String> = bundles
         .iter()
         .zip(&found)
@@ -182,10 +183,10 @@ fn scan_in_helpers(bundles: Vec<PathBuf>, h: &ScanHelper, skipped: &mut Vec<Skip
     if let Some(why) = failed.first() {
         log::warn!("vst3: the scan helper failed ({why}); scanning {} bundles in this process instead", failed.len());
     }
-    for (path, f) in bundles.iter().zip(found) {
+    for ((path, f), from_cache) in bundles.iter().zip(found).zip(cached) {
         match f {
             Some(Ok(ds)) => merge(&mut out, ds),
-            Some(Err(Skip::Bundle(why))) => skipped.push(SkippedBundle { path: path.clone(), reason: why }),
+            Some(Err(Skip::Bundle(why))) => skipped.push(SkippedBundle { path: path.clone(), reason: why, from_cache }),
             Some(Err(Skip::Host(_))) => match load_bundle(path) {
                 Ok(ds) => merge(&mut out, ds),
                 Err(e) => log::warn!("{e}"),
