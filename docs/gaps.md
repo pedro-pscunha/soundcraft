@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (G-05: plugin entitlements in the signed macOS build; G-13: hosting risks) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (G-13: a VST3 instrument with no stored state can stay silent) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -160,6 +160,10 @@ Known risks, unmeasured:
   plugin at its default, and the mixer sends those over the plugin's own state on load (a sampler
   can play silence). `mix.insert_params` with `factory: true` (the `<factory default>` preset)
   clears them, together with the plugin's state; nothing clears them and keeps the state.
+- A VST3 instrument inserted without a stored state may never get one: Keyscape starts its sound
+  engine only in `setState`, so a fresh insert plays silence until a patch is picked in its editor
+  or a state is stored (`mix.insert_state`). Pedalboard (JUCE) makes it sound at once; which call
+  makes the difference is not known.
 
 ### G-14. Platforms and CI
 
@@ -211,6 +215,7 @@ missing. Out of scope unless the owner decides otherwise.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-13 | minor | G-05 shrunk: plugin entitlements in the signed macOS build. G-13: bounce stalls and old sessions' hosted-plugin defaults noted as risks |
+| 2026-10-13 | minor | G-13: a VST3 instrument with no stored state can stay silent (Keyscape) |
 | 2026-10-12 | minor | G-01 shrunk: audio device, rate and buffer choice; opt-in ASIO |
 | 2026-10-10 | minor | Marked the alpha blockers (G-01, G-02, G-03; parts of G-05 and G-06) from the core-workflow gate |
 | 2026-10-10 | major | Created from the full re-measure against Pro Tools Ultimate 2026.4.1: 22 ranked gaps with evidence and estimates |
