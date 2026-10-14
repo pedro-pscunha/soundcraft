@@ -614,6 +614,28 @@ mod tests {
         assert_eq!(p.inst.get_param(time_id), Some(0.25), "reaches the unit");
     }
 
+    /// A view that moves a value away and back within one audio block at a large buffer size (a
+    /// switch clicked twice, a knob dragged and returned) reports each value, and the session
+    /// sends back only the latest, which equals the first report too. It answers every report: a
+    /// later set of the value in between (an Undo, the plugin panel, a command) is the host's own
+    /// and reaches the unit. AUDelay ships with macOS; skipped where missing.
+    #[test]
+    fn the_latest_echo_answers_every_report_before_it() {
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let mut ed = p.editor().expect("every unit has an editor");
+        let Some(time) = p.info.params.get(1) else { panic!("AUDelay has parameters") };
+        let Some(&time_id) = p.ids.get(1) else { panic!("ids") };
+        p.inst.link().listen(&p.ids, &p.edits);
+        for v in [0.75, 1.0, 0.75] {
+            assert!(p.inst.set_as_view(time_id, v));
+            assert_eq!(ed.idle(), vec![(time.id.to_string(), v)]);
+        }
+        assert!(p.set_param(time.id, 0.75), "the session sends the latest back");
+        assert_eq!(p.inst.get_param(time_id), Some(0.75));
+        assert!(p.set_param(time.id, 1.0), "an Undo");
+        assert_eq!(p.inst.get_param(time_id), Some(1.0), "reaches the unit");
+    }
+
     /// The mode reaches a unit that has one (AURoundTripAAC reports its `OfflineRender`
     /// property); AUDelay has none, so there is nothing it could refuse (and nothing to log). Both
     /// ship with macOS; skipped where missing.

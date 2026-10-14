@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (a CLAP value set just before a save is no longer saved as the plugin's old one; previously minor: VST3 editors show the values the session sets, and a preset loaded in one over the session's overrides is saved whole) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (an Audio Unit gets a value set from SoundCraft after its view moved that parameter away and back; previously trivial: a CLAP value set just before a save is no longer saved as the plugin's old one) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | Editors: an Audio Unit view that moves a parameter away and back within one audio block no longer makes a later set of the value in between (Undo, the plugin panel, a command) look like its own edit coming back, which was never applied |
 | 2026-10-14 | trivial | Hosting: a CLAP parameter set just before a save (before the plugin had processed it) is no longer taken for one the plugin set back by itself and saved with its old value |
 | 2026-10-14 | minor | Hosting: a VST3 edit controller gets the values the session sets on the next UI frame, not at the next save, so its editor shows them and a preset loaded in it afterwards is no longer half reverted by the save |
 | 2026-10-14 | trivial | The macOS hardened-runtime entitlement row: in since 2026-10-13 (#153), as gaps.md G-05 already said |

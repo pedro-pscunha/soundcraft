@@ -57,7 +57,11 @@
 //! any parameter may have changed, which reaches the editor's listener as one call per parameter
 //! with its current value, the unchanged ones too: [`PluginEditor::idle`] reports only values that
 //! differ from the last the host knew of each parameter (set, shown, read after a state load or
-//! reported), so the session gets what the preset changed and nothing else. What a view changes
+//! reported), so the session gets what the preset changed and nothing else. The session sends a
+//! reported edit back as a host set with a later audio block; that echo is not applied (a drag may
+//! have moved the unit on): a set equal to the newest report of its value answers it and every
+//! older report, any other set is the host's own, and reports left unanswered for a second (the
+//! view went back to the value the session had sent) are forgotten. What a view changes
 //! without telling listeners at all, and settings that are no parameters, are only in the unit's
 //! `ClassInfo`, which the app reads from each live instance before it saves; a parameter value the
 //! session already holds for such a parameter is not refreshed from it, and is applied over the

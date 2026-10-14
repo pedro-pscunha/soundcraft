@@ -14,6 +14,7 @@ use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::time::Instant;
 
 type OSStatus = i32;
 type AudioComponent = *mut c_void;
@@ -500,6 +501,9 @@ pub struct Edits {
     /// By index: the last [`ECHOES`] values reported as edits whose echo has not come, each as its
     /// report's number (high 32 bits; 0: an empty slot) and the value's bits (see `take_echo`).
     reported: Vec<[AtomicU64; ECHOES]>,
+    /// By index: when the newest report was made, in milliseconds since `epoch`.
+    newest: Vec<AtomicU64>,
+    epoch: Instant,
     /// The number of the last report (wrapping, never 0).
     reports: AtomicU32,
 }
@@ -510,6 +514,10 @@ const PENDING: u64 = 1 << 32;
 /// session sends the first of them back (it applies new values once per audio block, and a block
 /// at a large buffer size spans several UI frames).
 const ECHOES: usize = 4;
+
+/// How long reports wait for their echo, in milliseconds: it comes within a UI frame and an audio
+/// block, far less even at the largest buffer size.
+const ECHO_WINDOW_MS: u64 = 1000;
 
 impl Edits {
     /// Edits of the parameters `ids`, reported by their index in `ids`; `values` are what the host
@@ -523,14 +531,27 @@ impl Edits {
             any: AtomicBool::new(false),
             known: (0..ids.len()).map(|i| AtomicU32::new(values.get(i).copied().unwrap_or(f32::NAN).to_bits())).collect(),
             reported: ids.iter().map(|_| std::array::from_fn(|_| AtomicU64::new(0))).collect(),
+            newest: ids.iter().map(|_| AtomicU64::new(0)).collect(),
+            epoch: Instant::now(),
             reports: AtomicU32::new(0),
         }
+    }
+
+    /// Milliseconds since `epoch` (reading the clock neither blocks nor allocates).
+    fn now(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Notes that `value` was reported as an edit of parameter `i`: the session will send it back.
     /// It takes the place of the oldest report remembered (main thread).
     pub fn reported(&self, i: usize, value: f32) {
-        let Some(slots) = self.reported.get(i) else { return };
+        self.reported_at(i, value, self.now());
+    }
+
+    fn reported_at(&self, i: usize, value: f32, now: u64) {
+        let (Some(slots), Some(newest)) = (self.reported.get(i), self.newest.get(i)) else { return };
+        // Before the report: a `take_echo` that sees the report sees this time too.
+        newest.store(now, Ordering::Release);
         let number = loop {
             let n = self.reports.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
             if n != 0 {
@@ -543,17 +564,27 @@ impl Edits {
     }
 
     /// True when the host's set of `value` for parameter `i` is the session sending a reported
-    /// edit back: `value` is one of the reports whose echo has not come. The session sends them
-    /// back in order, or only the latest, so that report and every older one are answered and
-    /// forgotten. A set that matches none is the host's own: every report is forgotten, and no
-    /// later set can be an echo of one (lock-free: the audio thread calls it).
+    /// edit back: `value` is one of the reports whose echo has not come. The session sends back
+    /// the latest value it has when an audio block starts: one report at a time, or only the
+    /// newest of those made within the last block. So the newest report of `value` and every older
+    /// one are answered and forgotten (answering the oldest would leave the newer reports of a
+    /// value moved away and back waiting, and a later set of the value in between would be taken
+    /// for an echo and never reach the unit). A set that matches none is the host's own: every
+    /// report is forgotten, and no later set can be an echo of one. Nor can one once the newest
+    /// report is [`ECHO_WINDOW_MS`] old: the session went back to the value it had sent and sent
+    /// nothing (lock-free and allocation-free: the audio thread calls it).
     pub fn take_echo(&self, i: usize, value: f32) -> bool {
-        let Some(slots) = self.reported.get(i) else { return false };
+        self.take_echo_at(i, value, self.now())
+    }
+
+    fn take_echo_at(&self, i: usize, value: f32, now: u64) -> bool {
+        let (Some(slots), Some(newest)) = (self.reported.get(i), self.newest.get(i)) else { return false };
         let bits = u64::from(value.to_bits());
         let seen = slots.each_ref().map(|r| r.load(Ordering::Acquire));
+        let expired = now.saturating_sub(newest.load(Ordering::Acquire)) > ECHO_WINDOW_MS;
         let number = |r: u64| r >> 32;
-        // The oldest report of this value.
-        let echo = seen.iter().filter(|&&r| number(r) != 0 && r & u64::from(u32::MAX) == bits).map(|&r| number(r)).min();
+        // The newest report of this value.
+        let echo = seen.iter().filter(|&&r| !expired && number(r) != 0 && r & u64::from(u32::MAX) == bits).map(|&r| number(r)).max();
         let answered = echo.unwrap_or(u64::MAX);
         for (slot, &r) in slots.iter().zip(&seen) {
             if number(r) != 0 && number(r) <= answered {
@@ -1990,6 +2021,25 @@ unsafe extern "C" fn retire_on_main(context: *mut c_void) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The latest echo answers every report before it, the newest of its value included. A report
+    /// whose echo never comes (the view moved a value away and back within one audio block, so the
+    /// session ends where it was and sends nothing) is no echo once it is older than the window.
+    #[test]
+    fn reports_are_answered_by_the_newest_match_and_expire() {
+        let e = Edits::new(&[5], &[0.0]);
+        for (v, t) in [(1.0, 10), (2.0, 11), (1.0, 12)] {
+            e.reported_at(0, v, t);
+        }
+        assert!(e.take_echo_at(0, 1.0, 13));
+        assert!(!e.take_echo_at(0, 2.0, 13), "the value in between is the host's own");
+        e.reported_at(0, 1.0, 20);
+        e.reported_at(0, 0.0, 21);
+        assert!(!e.take_echo_at(0, 1.0, 21 + ECHO_WINDOW_MS + 1), "too old to be an echo");
+        assert!(!e.take_echo_at(0, 0.0, 21), "and forgotten");
+        e.reported_at(0, 1.0, 5000);
+        assert!(e.take_echo_at(0, 1.0, 5000 + ECHO_WINDOW_MS), "within the window");
+    }
 
     /// Counts notifications into the `AtomicU32` behind `user`.
     unsafe extern "C" fn count(user: *mut c_void, _object: *mut c_void, _parameter: *const AudioUnitParameter, _value: f32) {
