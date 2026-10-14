@@ -578,9 +578,13 @@ pub type MainThreadJob = Box<dyn FnOnce(MainThreadMarker) + Send>;
 
 /// Runs `job` on the main thread, from its run loop (the main dispatch queue), soon after this
 /// returns. Plugin-editor work that arrives on another thread goes this way (an instance dropped
-/// there with its editor open): AppKit objects are only touched on the main thread. A panic or an
-/// Objective-C exception (a plugin's view code runs as its editor goes) in `job` is stopped and
-/// logged there.
+/// there with its editor open): AppKit objects are only touched on the main thread. A panic in
+/// `job` is stopped and logged there, and so is an Objective-C exception thrown in an AppKit call
+/// it makes (taking a window off screen, closing or releasing it, which runs the window's
+/// observers, a plugin view among them). An exception raised inside a plugin's own entry points
+/// (a VST3 view's `removed`, a VST3 `terminate`, a CLAP plugin's functions: non-unwinding C ABI
+/// calls) cannot be caught: unwinding out of one is undefined behaviour, in practice an abort, as
+/// in every other call into a plugin.
 pub fn on_main_queue(job: MainThreadJob) {
     let context = Box::into_raw(Box::new(job));
     // SAFETY: the main queue is a process-wide static; `dispatch_async_f` hands the context to
@@ -600,8 +604,10 @@ unsafe extern "C" fn run_job(context: *mut std::ffi::c_void) {
         std::mem::forget(job);
         return;
     };
-    // Neither a panic nor an Objective-C exception may unwind into libdispatch (and
-    // `catch_unwind` aborts on an exception, so the job runs inside `exception::catch`).
+    // Neither a panic nor an Objective-C exception from the AppKit calls the job makes may unwind
+    // into libdispatch (and `catch_unwind` aborts on an exception, so the job runs inside
+    // `exception::catch`). This cannot catch one raised inside a plugin's own C ABI entry points
+    // (see `on_main_queue`).
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| guarded("main-queue work", || job(mtm)))).is_err() {
         log::error!("plugin window: a panic in main-queue work was stopped");
     }

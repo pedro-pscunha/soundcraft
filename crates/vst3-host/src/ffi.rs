@@ -1578,7 +1578,10 @@ pub fn instances_awaiting_main_thread() -> usize {
 /// `removed`, its frame detached, the window closed), disconnect the component from the controller,
 /// detach the component handler and terminate the controller, release the processor, terminate
 /// the component. Run where the instance goes, or on the main thread when it goes elsewhere with
-/// its editor open (see [`EditorLink::kill`]).
+/// its editor open (see [`EditorLink::kill`]). There the main queue's guard catches an Objective-C
+/// exception thrown in the AppKit calls that close the editor's window, not one raised inside the
+/// plugin's own methods here (`removed`, `terminate`: non-unwinding COM calls; unwinding out of
+/// one is undefined behaviour, in practice an abort, as out of any VST3 call).
 struct Retire {
     /// An editor still open (only when the instance went off the main thread).
     editor: Option<OpenEditor>,
