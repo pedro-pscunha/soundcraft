@@ -24,7 +24,7 @@ mod macos {
         NSPasteboardTypeString, NSResponder, NSText, NSTextView, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     };
     use objc2_foundation::{NSDate, NSException, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSString};
-    use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
+    use soundcraft_macos::plugin_window::{PluginWindow, check_app_windows, content_size, testing};
     use std::cell::{Cell, RefCell};
 
     /// Space, W, Tab and left Shift (virtual key codes).
@@ -408,6 +408,9 @@ mod macos {
         let _app = NSApplication::sharedApplication(mtm);
         let (base, visible) = windows(mtm);
         assert_eq!(visible, 0);
+        // No window of SoundCraft's yet (a winit that renamed its window class looks the same): the
+        // start-up check reports it (an error naming the class is logged).
+        assert!(!check_app_windows(mtm), "no window of winit's class");
 
         // SoundCraft's window, hidden, with its view as first responder.
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 100.0));
@@ -417,6 +420,7 @@ mod macos {
         app_window.setContentView(Some(&target));
         assert!(app_window.makeFirstResponder(Some(&target)));
         testing::set_key_target(Some(&app_window));
+        assert!(check_app_windows(mtm), "SoundCraft's window (winit's class) is recognised");
 
         // Each step in its own pool, as each run-loop turn has one: AppKit keeps windows in
         // autoreleased references until the pool drains.

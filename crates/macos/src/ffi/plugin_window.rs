@@ -376,12 +376,34 @@ fn choose_target(
     main.filter(|w| is_app_window(w)).or_else(|| ordered.into_iter().find(|w| is_app_window(w) && visible(w) && w.canBecomeKeyWindow()))
 }
 
-/// The class of winit's windows: SoundCraft's own (every egui viewport is one).
+/// The class of winit's windows: SoundCraft's own (every egui viewport is one). The name is winit's
+/// (0.30.13: `src/platform_impl/macos/window.rs`), not an API: a unit test fails when Cargo.lock
+/// moves winit on, and [`check_app_windows`] logs an error at start-up if no window has it.
 const APP_WINDOW_CLASS: &std::ffi::CStr = c"WinitWindow";
 
 /// One of SoundCraft's own windows.
 fn is_app_window(w: &NSWindow) -> bool {
     AnyClass::get(APP_WINDOW_CLASS).is_some_and(|c| w.isKindOfClass(c))
+}
+
+/// Whether plugin windows recognise one of the app's windows as SoundCraft's own (by winit's window
+/// class), logging an error naming that class when none is: plugin windows would then hand no key
+/// on to SoundCraft, and AppKit would beep at each one instead (a winit upgrade that renamed its
+/// class would do that silently). The app calls it once its first window exists.
+pub fn check_app_windows(mtm: MainThreadMarker) -> bool {
+    autoreleasepool(|_| {
+        let windows = NSApplication::sharedApplication(mtm).windows();
+        if windows.iter().any(|w| is_app_window(&w)) {
+            return true;
+        }
+        let classes: Vec<String> = windows.iter().map(|w| w.class().name().to_string_lossy().into_owned()).collect();
+        let class = if AnyClass::get(APP_WINDOW_CLASS).is_some() { "exists" } else { "does not exist" };
+        log::error!(
+            "plugin window: none of SoundCraft's windows ({classes:?}) is of class {APP_WINDOW_CLASS:?} (winit's window class; it {class}), so \
+             plugin editors will pass no key on to SoundCraft. If winit was upgraded, update APP_WINDOW_CLASS in soundcraft-macos."
+        );
+        false
+    })
 }
 
 /// The content size a plugin window gives a view of size `s`: rounded, each side at most 16 384
@@ -643,5 +665,32 @@ pub mod testing {
     /// own windows are winit's (class `WinitWindow`).
     pub fn choose_target(main: Option<&NSWindow>, ordered: &[&NSWindow], visible: impl Fn(&NSWindow) -> bool) -> Option<Retained<NSWindow>> {
         super::choose_target(main.map(objc2::Message::retain), ordered.iter().map(|w| objc2::Message::retain(*w)), visible)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The winit whose macOS window class was checked to be [`super::APP_WINDOW_CLASS`]
+    /// (`src/platform_impl/macos/window.rs`, `const NAME`).
+    const CHECKED_WINIT: &str = "0.30.13";
+
+    /// Plugin windows know SoundCraft's windows by winit's class name, which winit may change in
+    /// any release: moving winit on in Cargo.lock fails here until the name is checked again.
+    #[test]
+    fn the_window_class_was_checked_against_the_winit_in_use() {
+        assert_eq!(super::APP_WINDOW_CLASS, c"WinitWindow");
+        let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")).expect("the workspace's Cargo.lock");
+        let winit: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|p| p.lines().any(|l| l.trim() == "name = \"winit\""))
+            .filter_map(|p| p.lines().find_map(|l| l.trim().strip_prefix("version = \"")?.strip_suffix('"')))
+            .collect();
+        assert_eq!(
+            winit,
+            [CHECKED_WINIT],
+            "winit moved on: check that its macOS window class is still named {:?} (winit's src/platform_impl/macos/window.rs), update \
+             APP_WINDOW_CLASS if it is not, then CHECKED_WINIT",
+            super::APP_WINDOW_CLASS
+        );
     }
 }

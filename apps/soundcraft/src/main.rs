@@ -285,6 +285,12 @@ fn main() -> eframe::Result {
             opener.open(&mut app, files);
             let ctx = cc.egui_ctx.clone();
             soundcraft_macos::open_documents::set_waker(move || ctx.request_repaint());
+            // Plugin editors hand the keys their plugin does not take to SoundCraft's windows, which
+            // they know by winit's window class: report it now if they would know none.
+            #[cfg(target_os = "macos")]
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                soundcraft_macos::plugin_window::check_app_windows(mtm);
+            }
             // If the system menu bar cannot be built, keep the egui menu bar rather than fail to start.
             #[cfg(target_os = "macos")]
             let menu = match native_menu::NativeMenu::new(&app, &cc.egui_ctx) {

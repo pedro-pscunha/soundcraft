@@ -23,7 +23,12 @@
 //!   SoundCraft's, the frontmost of SoundCraft's visible windows that can be key. SoundCraft's
 //!   windows are winit's (class `WinitWindow`): a window a plugin opened itself (a CLAP plugin's
 //!   floating window, a plugin's own panel) never gets the keys, even when it is main or in front.
-//!   With no such window, AppKit's own handling runs (a beep, as before).
+//!   With no such window, AppKit's own handling runs (a beep, as before). The class name is
+//!   winit's (0.30.13), not an API: a unit test fails when Cargo.lock moves winit on, and the app
+//!   calls [`check_app_windows`] once its first window exists, which logs an error naming the class
+//!   when none of the app's windows has it. SoundCraft does not register its windows instead:
+//!   eframe gives the app a window handle for its main window only, not for the separate Mix
+//!   window (an egui viewport of its own), so the class would still decide for that one.
 //! - Keys still held when the window stops being key or closes: their key-ups and modifier
 //!   changes go elsewhere then, so the window lets go of them itself, handing on a key-up for each
 //!   key-down it handed on and the modifier state as it is now. SoundCraft never sees a key stuck
@@ -82,7 +87,9 @@
 //!    Space with the latter key: playback starts (the key never goes to the CLAP window).
 //! 9. Switch to another app and back: the editor hides and comes back, still open.
 
-pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, MainThreadJob, PluginWindow, content_size, fit_content, on_main_queue, set_app_wants_keyboard};
+pub use crate::ffi::plugin_window::{
+    DEFAULT_CONTENT, MainThreadJob, PluginWindow, check_app_windows, content_size, fit_content, on_main_queue, set_app_wants_keyboard,
+};
 
 /// Test seams (the `testing` feature, never on in the app).
 #[cfg(feature = "testing")]
