@@ -332,11 +332,10 @@ struct AuEditor {
 }
 
 impl PluginEditor for AuEditor {
+    /// The same path as [`Plugin::open_editor`]. Edits not yet taken are kept: the listener only
+    /// exists while a window is open, so they were made in the last one (in the frame it closed)
+    /// and are no less real; values the host already knows are left out at `idle`.
     fn open(&mut self) -> Result<(), String> {
-        if !self.link.editor_open() {
-            // Edits left from an earlier window are stale.
-            let _ = self.edits.take();
-        }
         self.link.open_editor(self.info.name, &self.ids, &self.edits, true)
     }
 
@@ -473,6 +472,23 @@ mod tests {
         p.inst.notify_any();
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(ed.idle().is_empty());
+    }
+
+    /// Edits made in the view's last frame are reported after the window closed, also when the
+    /// editor is opened again before the next idle (that open used to drop them as stale).
+    /// AUDelay ships with macOS; skipped where missing.
+    #[test]
+    fn the_last_edits_of_a_closed_view_survive_opening_it_again() {
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let mut ed = p.editor().expect("every unit has an editor");
+        let Some(time) = p.info.params.get(1) else { panic!("AUDelay has parameters") };
+        let Some(&time_id) = p.ids.get(1) else { panic!("ids") };
+        p.inst.link().listen(&p.ids, &p.edits);
+        assert!(p.inst.set_as_view(time_id, 0.75), "an edit in the window's last frame");
+        ed.close();
+        // Off the main thread no window opens, but the open path runs up to that point.
+        assert!(ed.open().is_err());
+        assert_eq!(ed.idle(), vec![(time.id.to_string(), 0.75)]);
     }
 
     /// A view's edit comes back as the host's `set_param` once the session holds it (the mixer

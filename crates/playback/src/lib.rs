@@ -446,11 +446,24 @@ struct Side {
     refused: HashSet<(TrackId, usize)>,
     garbage: Receiver<Vec<Box<dyn Plugin>>>,
     old_sessions: Option<Receiver<Arc<Session>>>,
+    /// Edits a forgotten editor still held, with the plugin id and state epoch they were made for:
+    /// reported once the slot is made again for the same plugin and state (a new sample rate or
+    /// channel count), dropped when it holds another plugin or state, or nothing.
+    orphaned: Vec<(String, u64, EditorEdit)>,
 }
 
 impl Side {
     fn new(rate: f32, garbage: Receiver<Vec<Box<dyn Plugin>>>) -> Side {
-        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), states: BTreeMap::new(), refused: HashSet::new(), garbage, old_sessions: None }
+        Side {
+            shadow: HashMap::new(),
+            rate,
+            editors: HashMap::new(),
+            states: BTreeMap::new(),
+            refused: HashSet::new(),
+            garbage,
+            old_sessions: None,
+            orphaned: Vec::new(),
+        }
     }
 
     /// Drops retired instances (closing their editors first, inside the plugin's drop) and
@@ -474,10 +487,14 @@ impl Side {
     }
 
     fn forget(&mut self, key: (TrackId, usize)) {
-        self.shadow.remove(&key);
+        let live = self.shadow.remove(&key);
         self.states.remove(&key);
         self.refused.remove(&key);
         if let Some(mut e) = self.editors.remove(&key) {
+            // Edits made in the editor's last frame (see `orphaned`).
+            if let Some(l) = live {
+                self.orphaned.extend(e.idle().into_iter().map(|(id, v)| (l.id.clone(), l.epoch, (key.0, key.1, id, v))));
+            }
             e.close();
         }
     }
@@ -725,7 +742,7 @@ impl Player {
     pub fn idle(&self) -> Vec<EditorEdit> {
         let mut side = self.side();
         side.collect_garbage();
-        let mut out = Vec::new();
+        let mut out: Vec<EditorEdit> = side.orphaned.drain(..).map(|(_, _, e)| e).collect();
         for (&(t, slot), e) in side.editors.iter_mut() {
             for (id, v) in e.idle() {
                 out.push((t, slot, id, v));
@@ -1000,6 +1017,8 @@ impl Side {
                 out.push(PreparedInstance { track: spec.track, slot: spec.slot, id: spec.id, ch: spec.ch, plugin });
             }
         }
+        let shadow = &self.shadow;
+        self.orphaned.retain(|(id, epoch, (t, slot, ..))| shadow.get(&(*t, *slot)).is_some_and(|l| l.id == *id && l.epoch == *epoch));
         out
     }
 }
@@ -1355,6 +1374,40 @@ mod tests {
         fn idle(&mut self) -> Vec<(String, f32)> {
             Vec::new()
         }
+    }
+
+    /// An editor holding the edits made in its last frame.
+    struct Edited(Vec<(String, f32)>);
+
+    impl PluginEditor for Edited {
+        fn open(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn close(&mut self) {}
+        fn is_open(&self) -> bool {
+            true
+        }
+        fn idle(&mut self) -> Vec<(String, f32)> {
+            std::mem::take(&mut self.0)
+        }
+    }
+
+    /// Edits made in a plugin's editor in the frame its instance is made again for the same plugin
+    /// and state (here a new sample rate) still reach the session; edits for a slot that now holds
+    /// another plugin are dropped, never written onto it.
+    #[test]
+    fn a_forgotten_editors_last_edits_reach_the_session_for_the_same_plugin_only() {
+        let (mut side, mut s, k) = hosted_slot();
+        side.editors.insert(k, Box::new(Edited(vec![("7".into(), 0.5)])));
+        s.sample_rate = soundcraft_time::SampleRate::new(96_000).unwrap();
+        side.prepare(&s);
+        let edits: Vec<EditorEdit> = side.orphaned.drain(..).map(|(_, _, e)| e).collect();
+        assert_eq!(edits, vec![(k.0, k.1, "7".to_string(), 0.5)]);
+
+        side.editors.insert(k, Box::new(Edited(vec![("7".into(), 0.25)])));
+        *insert_mut(&mut s, k) = Insert::new("clap:another.plugin");
+        side.prepare(&s);
+        assert!(side.orphaned.is_empty(), "another plugin got the old one's edits");
     }
 
     #[test]
