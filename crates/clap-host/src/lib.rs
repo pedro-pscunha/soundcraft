@@ -10,6 +10,11 @@
 //! `Result`/`Option` and never panics. Limits of in-process hosting: a plugin that itself crashes
 //! (segfault) takes the process down with it; we cannot sandbox native code.
 //!
+//! Scans are in-process too: unlike `soundcraft-vst3-host`, which scans each bundle in a helper
+//! process with a time limit, a CLAP plugin that hangs or crashes in `clap_entry.init` or its
+//! factory while it is scanned hangs or ends SoundCraft. (CLAP asks `init` to be quick and to
+//! leave real work to plugin creation; no CLAP plugin seen so far blocks there.)
+//!
 //! `PluginInfo` must be `&'static`: the registry leaks exactly one `PluginInfo` (with its param
 //! table) per plugin *type* the first time that type is instantiated, and caches it. The leak is
 //! bounded by the number of distinct installed plugins actually used. Loaded binaries likewise

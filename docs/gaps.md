@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (G-05: passing unused keys back to SoundCraft is macOS-only; previously minor: G-13, offline renders wait only for hosted instruments) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: VST3 plugins are scanned in helper processes, so a plugin that hangs or crashes while scanned is skipped; CLAP and Audio Unit scans stay in-process) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -155,10 +155,20 @@ SDKs are licensed, so we'd write our own ADM and object renderer.
 ### G-13. Plugin ecosystem depth
 
 No sidechain (key input) buses for any host; no ARA (Melodyne-style editing is a menu in Pro
-Tools); plugins run in-process, so a crashing plugin can take the session down. ≈ 30–50 h. AAX
+Tools); plugins run in-process, so a crashing plugin can take the session down. VST3 scans run in
+helper processes (the app's own executable, one per bundle, four at a time, 30 s each): a VST3
+that hangs (a PACE/iLok-protected plugin without its licence service) or crashes while it is
+scanned is logged and skipped, not the end of SoundCraft. CLAP and Audio Unit scans, and every
+plugin once it is created, still run in SoundCraft's process. ≈ 30–50 h. AAX
 cannot be hosted (#109): Avid's AAX SDK licence and PACE signing; owner decision, likely never.
 
 Known risks, unmeasured:
+- A VST3 that never answers its scan helper costs the 30 s time limit, four helpers at a time,
+  once per process (remembered until a rescan, not across runs): about 60 s on the dev Mac,
+  which has five PACE plugins without the licence service (measured). The CLI pays it on every
+  run that creates or lists a VST3 plugin; the app on its first insert menu, which scans on the
+  UI thread and freezes meanwhile. On Windows a helper whose SoundCraft was killed mid-scan runs
+  until its bundle answers (on Unix it ends at once).
 - Bounce Mix renders on the UI thread (`crates/ui-egui/src/bounce.rs` steps
   `crates/engine/src/io.rs` in 30 ms slices), and hosted plugins are told the render is offline.
   A plugin that then waits for its data (a sampler streaming from disk) can hold one block for
@@ -234,6 +244,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | G-13: VST3 scans run in helper processes: a VST3 that hangs or crashes while scanned (Gullfoss without its iLok service) is skipped instead of hanging the app and every CLI bounce; the cost of plugins that never answer is a risk; CLAP and Audio Unit scans stay in-process |
 | 2026-10-14 | trivial | G-05: passing unused keys back to SoundCraft is macOS-only (editor windows on Windows and CLAP's own floating windows keep every key) |
 | 2026-10-14 | minor | G-13: offline renders wait only for hosted instruments (Bounce Mix stores every insert's state first, so effects with a state made every bounce wait); effects that load their data late are a residual |
 | 2026-10-14 | trivial | G-05 wording: embedded CLAP editors are missing on macOS and Linux (on Windows they are in), as in plugin-parity.md and ROADMAP.md |
