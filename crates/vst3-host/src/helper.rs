@@ -24,6 +24,12 @@ use std::time::{Duration, Instant};
 
 /// Starts the answer line.
 const MARKER: &str = "soundcraft-vst3-scan: ";
+/// Starts the greeting a helper prints before it loads anything, followed by [`PROTOCOL`].
+const HELLO: &str = "soundcraft-vst3-scan-protocol: ";
+/// The version of this protocol. A helper that does not greet with it (an older or newer
+/// SoundCraft, or a program that is no scan helper at all) is SoundCraft's failure, not the
+/// bundle's.
+const PROTOCOL: &str = "1";
 /// Most of a helper's standard output read for the answer (the rest is drained unread).
 const MAX_STDOUT: u64 = 8 << 20;
 /// How much of the end of a helper's standard error is kept.
@@ -50,16 +56,9 @@ pub(crate) enum Skip {
     /// The bundle's doing: its helper timed out, crashed, or the bundle did not load. Kept in the
     /// scan cache across runs.
     Bundle(String),
-    /// SoundCraft's side: the helper could not be started or read. Not kept across runs.
+    /// SoundCraft's side: the helper could not be started or read, or is no scan helper of this
+    /// protocol. Not a verdict on the bundle: never remembered or cached.
     Host(String),
-}
-
-impl Skip {
-    pub(crate) fn reason(&self) -> &str {
-        match self {
-            Skip::Bundle(r) | Skip::Host(r) => r,
-        }
-    }
 }
 
 /// What a helper prints after [`MARKER`].
@@ -101,6 +100,14 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
         return None;
     }
     end_with_host();
+    // Before any plugin code runs: proof that this is a scan helper speaking this protocol.
+    let greeted = {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{HELLO}{PROTOCOL}").and_then(|()| out.flush()).is_ok()
+    };
+    if !greeted {
+        return Some(2);
+    }
     let (line, ok) = match args.next() {
         Some(path) => answer(Path::new(&path)),
         None => (error_line("no bundle given"), false),
@@ -138,14 +145,24 @@ fn end_with_host() {
 
 /// The host side: scans each bundle in its own helper, at most `helper.parallel` at a time. One
 /// result per bundle, in order: its plugins (with `path` set to the bundle) or why it was skipped.
+///
+/// A failure on SoundCraft's side ([`Skip::Host`]) stops the scan: no further helper is started, and
+/// the bundles left are answered with that failure too.
 pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Result<Vec<Vst3Descriptor>, Skip>> {
     let slots: Vec<Mutex<Option<Result<Vec<Vst3Descriptor>, Skip>>>> = bundles.iter().map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
+    let broken: Mutex<Option<String>> = Mutex::new(None);
     let work = || {
         loop {
+            if broken.lock().unwrap_or_else(PoisonError::into_inner).is_some() {
+                break;
+            }
             let i = next.fetch_add(1, Ordering::Relaxed);
             let (Some(path), Some(slot)) = (bundles.get(i), slots.get(i)) else { break };
             let r = scan_one(helper, path);
+            if let Err(Skip::Host(why)) = &r {
+                broken.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| why.clone());
+            }
             *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
         }
     };
@@ -161,22 +178,20 @@ pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Resu
             work();
         }
     });
-    slots
-        .into_iter()
-        .map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner).unwrap_or_else(|| Err(Skip::Host("not scanned".into()))))
-        .collect()
+    let why = broken.into_inner().unwrap_or_else(PoisonError::into_inner).unwrap_or_else(|| "not scanned".into());
+    slots.into_iter().map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner).unwrap_or_else(|| Err(Skip::Host(why.clone())))).collect()
 }
 
 /// Runs one helper on `bundle` and waits for its answer, at most `helper.timeout`.
 fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, Skip> {
     let limit = helper.timeout.min(MAX_TIMEOUT);
     let mut running = Running::spawn(helper, bundle)?;
-    let ended = running.await_answer(limit);
+    let (ended, hello) = running.await_answer(limit);
     let tail = running.stderr_tail();
     if !tail.trim().is_empty() {
         log::debug!("vst3 scan helper for {}: {}", bundle.display(), tail.trim_end());
     }
-    classify(ended, &tail, bundle, limit)
+    classify(ended, hello.as_deref(), &tail, bundle, limit, &helper.exe)
 }
 
 /// How a helper's run ended, before it is judged.
@@ -195,7 +210,7 @@ enum Ended {
 /// A helper process and the threads reading its output.
 struct Running {
     child: Child,
-    answers: mpsc::Receiver<String>,
+    lines: mpsc::Receiver<Line>,
     err_tail: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -217,41 +232,64 @@ impl Running {
         }
         let mut child = cmd.spawn().map_err(|e| Skip::Host(format!("cannot start the scan helper {}: {e}", helper.exe.display())))?;
         let err_tail = drain_stderr(&mut child);
-        let Some(answers) = read_answers(&mut child) else {
+        let Some(lines) = read_lines(&mut child) else {
             end(&mut child);
             return Err(Skip::Host("cannot read the scan helper's output".into()));
         };
-        Ok(Running { child, answers, err_tail })
+        Ok(Running { child, lines, err_tail })
     }
 
     /// Waits for the answer, at most `limit`; once it is in, the helper has [`EXIT_GRACE`] to exit
-    /// before it is killed (the answer counts either way).
-    fn await_answer(&mut self, limit: Duration) -> Ended {
+    /// before it is killed (the answer counts either way). Also returns the protocol the helper
+    /// greeted with, if it did.
+    fn await_answer(&mut self, limit: Duration) -> (Ended, Option<String>) {
         let mut deadline = Instant::now() + limit;
         let mut answer: Option<String> = None;
+        let mut hello: Option<String> = None;
         loop {
-            if answer.is_none()
-                && let Ok(a) = self.answers.try_recv()
+            while answer.is_none()
+                && let Ok(line) = self.lines.try_recv()
             {
-                answer = Some(a);
-                deadline = deadline.min(Instant::now() + EXIT_GRACE);
+                match line {
+                    Line::Hello(v) => hello = Some(v),
+                    Line::Answer(a) => {
+                        answer = Some(a);
+                        deadline = deadline.min(Instant::now() + EXIT_GRACE);
+                    }
+                }
             }
             match self.child.try_wait() {
-                // A helper that has just exited may still have its answer in the pipe (the reader
-                // stops waiting at the end of the output).
-                Ok(Some(st)) => return answer.or_else(|| self.answers.recv_timeout(EXIT_GRACE).ok()).map_or(Ended::Exited(st), Ended::Answered),
+                // A helper that has just exited may still have lines in the pipe (the reader stops
+                // waiting at the end of the output).
+                Ok(Some(st)) => {
+                    let answer = answer.or_else(|| self.rest(&mut hello));
+                    return (answer.map_or(Ended::Exited(st), Ended::Answered), hello);
+                }
                 Ok(None) => {}
                 Err(_) => {
                     end(&mut self.child);
-                    return answer.map_or(Ended::Lost, Ended::Answered);
+                    return (answer.map_or(Ended::Lost, Ended::Answered), hello);
                 }
             }
             if Instant::now() >= deadline {
                 end(&mut self.child);
                 // An answer that came in since the look above still counts.
-                return answer.or_else(|| self.answers.recv_timeout(EXIT_GRACE).ok()).map_or(Ended::TimedOut, Ended::Answered);
+                let answer = answer.or_else(|| self.rest(&mut hello));
+                return (answer.map_or(Ended::TimedOut, Ended::Answered), hello);
             }
             std::thread::sleep(POLL);
+        }
+    }
+
+    /// The lines still to come from a helper that has ended: its answer, if any.
+    fn rest(&self, hello: &mut Option<String>) -> Option<String> {
+        let until = Instant::now() + EXIT_GRACE;
+        loop {
+            match self.lines.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok(Line::Hello(v)) => *hello = Some(v),
+                Ok(Line::Answer(a)) => return Some(a),
+                Err(_) => return None,
+            }
         }
     }
 
@@ -260,12 +298,24 @@ impl Running {
     }
 }
 
-/// The plugins of a helper's run, or why there are none. `tail` is the end of its standard error.
-fn classify(ended: Ended, tail: &str, bundle: &Path, limit: Duration) -> Result<Vec<Vst3Descriptor>, Skip> {
+/// The plugins of a helper's run, or why there are none. `hello` is the protocol it greeted with,
+/// `tail` the end of its standard error. A run without this protocol's greeting is SoundCraft's
+/// failure ([`Skip::Host`]): an older or newer SoundCraft, or a program that is no scan helper.
+fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limit: Duration, exe: &Path) -> Result<Vec<Vst3Descriptor>, Skip> {
     let why = |what: String| match last_line(tail) {
         Some(l) => format!("{what}; its last output: {l}"),
         None => what,
     };
+    if hello != Some(PROTOCOL) {
+        let how = match &ended {
+            Ended::Answered(_) => "answered".to_string(),
+            Ended::TimedOut => format!("timed out after {limit:?}"),
+            Ended::Exited(st) => format!("exited ({st})"),
+            Ended::Lost => "stopped".to_string(),
+        };
+        let greeting = hello.map_or_else(|| "no greeting".to_string(), |v| format!("protocol {v}"));
+        return Err(Skip::Host(why(format!("{} is not a scan helper of protocol {PROTOCOL} ({greeting}; it {how})", exe.display()))));
+    }
     match ended {
         Ended::Answered(a) => {
             parse_answer(&a).map(|ds| ds.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()).map_err(Skip::Bundle)
@@ -310,9 +360,18 @@ fn end(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Reads the helper's standard output on a thread; answers (the text after [`MARKER`]) come out of
-/// the receiver, which disconnects at the end of the output.
-fn read_answers(child: &mut Child) -> Option<mpsc::Receiver<String>> {
+/// A protocol line of a helper.
+#[derive(Debug)]
+enum Line {
+    /// Its greeting: the protocol version.
+    Hello(String),
+    /// Its answer: the text after [`MARKER`].
+    Answer(String),
+}
+
+/// Reads the helper's standard output on a thread; its protocol lines come out of the receiver,
+/// which disconnects at the end of the output.
+fn read_lines(child: &mut Child) -> Option<mpsc::Receiver<Line>> {
     let out = child.stdout.take()?;
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -329,8 +388,11 @@ fn read_answers(child: &mut Child) -> Option<mpsc::Receiver<String>> {
                     Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
-                if let Some((_, json)) = String::from_utf8_lossy(&line).split_once(MARKER) {
-                    let _ = tx.send(json.trim_end().to_string());
+                let text = String::from_utf8_lossy(&line);
+                if let Some(v) = text.strip_prefix(HELLO) {
+                    let _ = tx.send(Line::Hello(v.trim_end().to_string()));
+                } else if let Some((_, json)) = text.split_once(MARKER) {
+                    let _ = tx.send(Line::Answer(json.trim_end().to_string()));
                 }
             }
             // Keep the pipe flowing, so the helper never blocks on a full one.
@@ -416,10 +478,10 @@ mod tests {
 
     #[test]
     fn a_huge_time_limit_does_not_overflow() {
-        // This test binary as the helper: it rejects the flag and exits without an answer.
+        // This test binary as the helper: it rejects the flag and exits without a greeting.
         let helper = ScanHelper { timeout: Duration::MAX, ..ScanHelper::new(std::env::current_exe().unwrap()) };
         let r = scan_bundles(&helper, &[PathBuf::from("/x.vst3")]);
-        assert!(matches!(r.as_slice(), [Err(Skip::Bundle(e))] if e.contains("without an answer")), "{r:?}");
+        assert!(matches!(r.as_slice(), [Err(Skip::Host(e))] if e.contains("no greeting")), "{r:?}");
     }
 
     #[test]

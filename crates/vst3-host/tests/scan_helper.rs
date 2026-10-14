@@ -31,6 +31,11 @@ fn main() {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(Path::new(bundle).with_extension("launches"));
         let _ = log.and_then(|mut f| writeln!(f, "{}", std::process::id()));
     }
+    // A program that is no scan helper of this protocol, as an older SoundCraft answers.
+    if std::env::current_exe().is_ok_and(|e| e.file_stem().is_some_and(|n| n == "not-a-scan-helper")) {
+        eprintln!("soundcraft-cli: unknown subcommand `{}`", SCAN_HELPER_FLAG);
+        std::process::exit(1);
+    }
     if let Some(code) = soundcraft_vst3_host::run_scan_helper(args.clone()) {
         std::process::exit(code);
     }
@@ -71,6 +76,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
     hanging_crashing_and_failing_bundles_are_skipped(&root.join("mixed"));
     eight_stuck_helpers_cost_one_time_limit(&root.join("eight"));
+    failures_on_soundcrafts_side_are_no_plugin_skips(&root.join("host-failures"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     #[cfg(unix)]
@@ -150,6 +156,25 @@ fn eight_stuck_helpers_cost_one_time_limit(dir: &Path) {
     let took = started.elapsed();
     assert!(found.is_empty() && skipped.len() == 8, "{skipped:?}");
     assert!(took >= TIMEOUT && took < TIMEOUT * 2, "{took:?}: not all eight ran at once");
+}
+
+/// A helper that cannot start, or a program that is no scan helper of this protocol (an older
+/// SoundCraft after an update in place), says nothing about the plugins: no helper is started after
+/// the first failure, nothing is skipped or cached, and the bundles are loaded in this process.
+fn failures_on_soundcrafts_side_are_no_plugin_skips(dir: &Path) {
+    let goods = [install(dir, "A", None).0, install(dir, "B", None).0, install(dir, "C", None).0];
+    let impostor = dir.join(format!("not-a-scan-helper{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(std::env::current_exe().unwrap(), &impostor).unwrap();
+    let cache = dir.join("cache/vst3.json");
+    // Helpers started so far, in all: one impostor, then none that could start.
+    for (exe, launched) in [(impostor, 1), (dir.join("no-such-helper"), 1)] {
+        let failing = ScanHelper { exe, parallel: 1, cache: Some(cache.clone()), ..helper() };
+        let (found, skipped) = soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &failing);
+        assert_eq!(found.len(), 2, "loaded in this process instead: {found:?}");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(goods.iter().map(|g| launches(g)).sum::<usize>(), launched, "no helper after the first failure");
+        assert!(!cache.exists(), "nothing cached");
+    }
 }
 
 fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cache_dir: &Path) {

@@ -202,9 +202,10 @@ fn app_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result {
-    // Internal: this executable started as a plugin scan helper by another SoundCraft process.
-    // Answered before logging, windows, the application object or audio exist.
-    if let Some(code) = soundcraft_engine::run_plugin_scan_helper(std::env::args_os().skip(1)) {
+    // A plugin scan helper started by another SoundCraft process answers before logging, windows,
+    // the application object or audio exist; otherwise this executable becomes the scan helper
+    // (the same signed executable, so it has the same entitlements).
+    if let Some(code) = soundcraft_engine::plugin_scan_startup() {
         std::process::exit(code);
     }
     // First, so every start-up record (and the engine's panic hook, installed with the first
@@ -246,13 +247,6 @@ fn main() -> eframe::Result {
                 log::warn!("no log file: no settings directory (profile override is empty or platform configuration is unavailable)");
             }
         }
-    }
-
-    // A plugin that hangs or crashes while it is scanned is skipped instead of freezing or ending
-    // the app (the scan helper is this same signed executable, so it has the same entitlements).
-    match std::env::current_exe() {
-        Ok(exe) => soundcraft_engine::scan_plugins_in_helpers(exe, soundcraft_engine::settings::vst3_scan_cache()),
-        Err(e) => log::warn!("plugins are scanned in this process: cannot find this executable: {e}"),
     }
 
     let engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };

@@ -93,7 +93,9 @@ fn scan_in_process(bundles: Vec<PathBuf>) -> Vec<Vst3Descriptor> {
 
 /// Scans bundles in helpers. Bundles in `skipped` are left out, and a bundle its helper cannot scan
 /// is logged and added to `skipped`. With a scan cache, unchanged bundles come from the cache unless
-/// `fresh` (a rescan), and what the helpers find is written back to it.
+/// `fresh` (a rescan), and what the helpers find is written back to it. When the helpers fail on
+/// SoundCraft's side (cannot start, no scan helper of this protocol), the bundles they had not
+/// scanned are loaded here instead, as without a helper: logged once, nothing remembered.
 fn scan_in_helpers(bundles: Vec<PathBuf>, h: &ScanHelper, skipped: &mut Vec<SkippedBundle>, fresh: bool) -> Vec<Vst3Descriptor> {
     let mut out = Vec::new();
     let bundles: Vec<PathBuf> = bundles.into_iter().filter(|p| !skipped.iter().any(|s| &s.path == p)).collect();
@@ -124,8 +126,8 @@ fn scan_in_helpers(bundles: Vec<PathBuf>, h: &ScanHelper, skipped: &mut Vec<Skip
             continue;
         }
         let Some(answer) = answers.next() else { break };
-        if let Err(skip) = &answer {
-            log::warn!("vst3: skipped {}: {}", path.display(), skip.reason());
+        if let Err(Skip::Bundle(why)) = &answer {
+            log::warn!("vst3: skipped {}: {why}", path.display());
         }
         let outcome = match &answer {
             Ok(ds) => Some(Outcome::Plugins(ds.clone())),
@@ -140,10 +142,24 @@ fn scan_in_helpers(bundles: Vec<PathBuf>, h: &ScanHelper, skipped: &mut Vec<Skip
     if !earlier.is_empty() {
         log::info!("vst3: {} bundles skipped by an earlier scan ({}); rescan to retry", earlier.len(), earlier.join(", "));
     }
+    let failed: Vec<&str> = found
+        .iter()
+        .filter_map(|f| match f {
+            Some(Err(Skip::Host(why))) => Some(why.as_str()),
+            _ => None,
+        })
+        .collect();
+    if let Some(why) = failed.first() {
+        log::warn!("vst3: the scan helper failed ({why}); scanning {} bundles in this process instead", failed.len());
+    }
     for (path, f) in bundles.iter().zip(found) {
         match f {
             Some(Ok(ds)) => merge(&mut out, ds),
-            Some(Err(skip)) => skipped.push(SkippedBundle { path: path.clone(), reason: skip.reason().to_string() }),
+            Some(Err(Skip::Bundle(why))) => skipped.push(SkippedBundle { path: path.clone(), reason: why }),
+            Some(Err(Skip::Host(_))) => match load_bundle(path) {
+                Ok(ds) => merge(&mut out, ds),
+                Err(e) => log::warn!("{e}"),
+            },
             None => {}
         }
     }

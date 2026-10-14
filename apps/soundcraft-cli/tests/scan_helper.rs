@@ -29,14 +29,18 @@ fn no_standard_folders(dir: &std::path::Path) -> PathBuf {
 }
 
 #[test]
-fn the_helper_answers_one_line_and_nothing_else() {
+fn the_helper_greets_answers_and_prints_nothing_else() {
     let dir = tmpdir("answer");
     let bundle = dir.join("garbage.vst3");
     std::fs::write(&bundle, b"not a plugin").unwrap();
     let out = bin().arg("--soundcraft-scan-vst3").arg(&bundle).output().unwrap();
     assert_eq!(out.status.code(), Some(2), "a bundle that does not load: {out:?}");
+    // The protocol greeting, then the answer, and nothing else.
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let line = stdout.strip_prefix("\nsoundcraft-vst3-scan: ").and_then(|l| l.strip_suffix('\n')).unwrap_or_else(|| panic!("{stdout:?}"));
+    let line = stdout
+        .strip_prefix("soundcraft-vst3-scan-protocol: 1\n\nsoundcraft-vst3-scan: ")
+        .and_then(|l| l.strip_suffix('\n'))
+        .unwrap_or_else(|| panic!("{stdout:?}"));
     let answer: serde_json::Value = serde_json::from_str(line).unwrap();
     let why = answer["error"].as_str().unwrap();
     assert!(why.contains("garbage.vst3"), "{why}");

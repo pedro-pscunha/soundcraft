@@ -34,22 +34,34 @@ pub fn shutdown_plugin_hosts() {
     soundcraft_vst3_host::shutdown();
 }
 
-/// Answers a plugin scan request when this process was started as a scan helper (by
-/// [`scan_plugins_in_helpers`]): returns the exit status for `std::process::exit`, or `None` for a
-/// normal start. Apps call it first thing in `main`, before logging, windows or audio, with the
-/// arguments after the executable.
-pub fn run_plugin_scan_helper(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<i32> {
-    soundcraft_vst3_host::run_scan_helper(args)
-}
-
-/// Scans VST3 plugins in helper processes started from `exe` (the running app, which answers
-/// through [`run_plugin_scan_helper`]): a plugin that hangs or crashes while it is scanned is
-/// skipped instead of hanging or ending the app. With a `cache` file (the apps pass
-/// [`settings::vst3_scan_cache`]), later runs scan only new or changed bundles; bundles skipped
-/// once stay skipped until they change or `engine.vst3_plugins {"rescan": true}`. CLAP plugins are
-/// still scanned in-process.
-pub fn scan_plugins_in_helpers(exe: std::path::PathBuf, cache: Option<std::path::PathBuf>) {
-    soundcraft_vst3_host::set_scan_helper(Some(soundcraft_vst3_host::ScanHelper { cache, ..soundcraft_vst3_host::ScanHelper::new(exe) }));
+/// Plugin scanning for an app, first thing in its `main` (before logging, windows, the application
+/// object or audio). When this process was started as a VST3 scan helper
+/// (`<exe> --soundcraft-scan-vst3 <bundle>`, internal), it answers and returns the exit status for
+/// `std::process::exit`. Otherwise it makes this executable the VST3 scan helper, with the scan
+/// cache in the settings folder ([`settings::vst3_scan_cache`]), and returns `None`: a VST3 that
+/// hangs or crashes while it is scanned is then skipped instead of hanging or ending the app, and
+/// later runs scan only new or changed bundles. CLAP plugins are still scanned in-process.
+///
+/// One call does both, so an executable that scans through itself always answers as a helper.
+pub fn plugin_scan_startup() -> Option<i32> {
+    if let Some(code) = soundcraft_vst3_host::run_scan_helper(std::env::args_os().skip(1)) {
+        return Some(code);
+    }
+    // On Linux the running program stays reachable there even after a package upgrade has
+    // replaced or deleted its file.
+    let exe = if cfg!(target_os = "linux") { Ok(std::path::PathBuf::from("/proc/self/exe")) } else { std::env::current_exe() };
+    match exe {
+        Ok(exe) => {
+            let helper = soundcraft_vst3_host::ScanHelper { cache: settings::vst3_scan_cache(), ..soundcraft_vst3_host::ScanHelper::new(exe) };
+            soundcraft_vst3_host::set_scan_helper(Some(helper));
+        }
+        // No logger exists yet: standard error is the only place to say so.
+        Err(e) => {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "soundcraft: VST3 plugins are scanned in this process: cannot find this executable ({e})");
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
