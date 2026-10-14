@@ -5,8 +5,8 @@
 //! comes back with it, stays out of the Window menu and window cycling, and fits itself to its
 //! plugin view ([`PluginWindow::fit`], keeping its top-left corner). [`PluginWindow::closed_by_user`]
 //! counts a window hidden while the app is inactive as open. Everything runs on the main thread:
-//! every method takes a `MainThreadMarker`, and a window dropped elsewhere is leaked rather than
-//! touched off the main thread.
+//! every method takes a `MainThreadMarker`, and a window dropped elsewhere is handed to the main
+//! queue ([`on_main_queue`]), which takes it off screen and releases it there.
 //!
 //! # Keys
 //!
@@ -55,7 +55,7 @@
 //!    modifier state it would see with its own window key.
 //! 4. Switch to another app and back: the editor hides and comes back, still open.
 
-pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, PluginWindow, content_size, fit_content, set_app_wants_keyboard};
+pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, MainThreadJob, PluginWindow, content_size, fit_content, on_main_queue, set_app_wants_keyboard};
 
 /// Test seams (the `testing` feature, never on in the app).
 #[cfg(feature = "testing")]

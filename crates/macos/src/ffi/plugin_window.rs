@@ -311,8 +311,8 @@ pub struct PluginWindow {
 }
 
 // SAFETY: the window is only touched on the main thread: every method takes a `MainThreadMarker`,
-// and `Drop` releases it only there (elsewhere the retain is leaked). The struct merely carries
-// the retain between threads' locks.
+// and `Drop` releases it there (dropped elsewhere, it hands the retain to the main queue). The
+// struct merely carries the retain between threads' locks.
 unsafe impl Send for PluginWindow {}
 
 impl PluginWindow {
@@ -387,18 +387,76 @@ impl PluginWindow {
 }
 
 impl Drop for PluginWindow {
+    /// Takes the window off screen, closes and releases it; dropped off the main thread, on the
+    /// main thread soon after (AppKit windows are only touched there).
     fn drop(&mut self) {
-        if MainThreadMarker::new().is_none() {
-            log::warn!("plugin window: dropped off the main thread; the window is leaked");
-            return;
+        let window = Retain(self.window);
+        match MainThreadMarker::new() {
+            Some(mtm) => window.close(mtm),
+            None => on_main_queue(Box::new(move |mtm| window.close(mtm))),
         }
+    }
+}
+
+/// The retain a [`PluginWindow`] holds, on its way to being released.
+struct Retain(*mut NSWindow);
+
+// SAFETY: carried to the main thread, the only place it is used (`close` takes the marker).
+unsafe impl Send for Retain {}
+
+impl Retain {
+    /// Takes the window off screen, closes and releases it. Closing tells the window's observers,
+    /// a plugin's view among them.
+    fn close(self, _mtm: MainThreadMarker) {
         autoreleasepool(|_| {
-            // SAFETY: the retain taken in `new`, released exactly once here; main thread.
-            if let Some(w) = unsafe { Retained::from_raw(self.window) } {
-                w.orderOut(None);
-                w.close();
+            // SAFETY: the retain a `PluginWindow` took in `new`, released exactly once here (`self`
+            // is consumed); main thread (the marker).
+            if let Some(w) = unsafe { Retained::from_raw(self.0) } {
+                guarded("closing it", || {
+                    w.orderOut(None);
+                    w.close();
+                });
             }
         });
+    }
+}
+
+// libdispatch (in libSystem): work handed to the main queue runs on the main thread, from its run
+// loop.
+unsafe extern "C" {
+    static _dispatch_main_q: u8;
+    fn dispatch_async_f(queue: *const std::ffi::c_void, context: *mut std::ffi::c_void, work: unsafe extern "C" fn(*mut std::ffi::c_void));
+}
+
+/// Work for the main thread, handed over from another (see [`on_main_queue`]).
+pub type MainThreadJob = Box<dyn FnOnce(MainThreadMarker) + Send>;
+
+/// Runs `job` on the main thread, from its run loop (the main dispatch queue), soon after this
+/// returns. Plugin-editor work that arrives on another thread goes this way (an instance dropped
+/// there with its editor open): AppKit objects are only touched on the main thread. A panic in
+/// `job` is stopped and logged there.
+pub fn on_main_queue(job: MainThreadJob) {
+    let context = Box::into_raw(Box::new(job));
+    // SAFETY: the main queue is a process-wide static; `dispatch_async_f` hands the context to
+    // `run_job` once, which takes the box back.
+    unsafe { dispatch_async_f((&raw const _dispatch_main_q).cast(), context.cast(), run_job) };
+}
+
+unsafe extern "C" fn run_job(context: *mut std::ffi::c_void) {
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: the box `on_main_queue` handed over, taken back once.
+    let job = unsafe { Box::from_raw(context.cast::<MainThreadJob>()) };
+    // The main queue runs on the main thread.
+    let Some(mtm) = MainThreadMarker::new() else {
+        log::error!("plugin window: main-queue work ran off the main thread; it is dropped undone");
+        std::mem::forget(job);
+        return;
+    };
+    // A panic must not unwind into libdispatch.
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(mtm))).is_err() {
+        log::error!("plugin window: a panic in main-queue work was stopped");
     }
 }
 

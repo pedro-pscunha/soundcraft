@@ -38,8 +38,11 @@
 //! main thread while the instance processes on the audio thread (VST3's own threading model:
 //! the controller and its views live on the UI thread). Parameter edits made in the editor
 //! (`IComponentHandler::performEdit`) are reported by the handle's `idle` so the host can write
-//! them into the session. Linux (X11) editor windows are not hosted yet: opening reports
-//! "unsupported".
+//! them into the session. An instance dropped off the main thread with its editor open (the audio
+//! thread drops a torn-down mixer's instances) is not touched there: its view is removed, its
+//! window closed and the plugin terminated on the main thread (macOS: the main dispatch queue;
+//! Windows: a message to the editor window). Linux (X11) editor windows are not hosted yet:
+//! opening reports "unsupported".
 //!
 //! Not hosted yet: `IMessage`/`IAttributeList` creation through the host (plugins that need it
 //! for processor ↔ controller messaging may lose those messages), sidechain (aux buses are kept
@@ -59,6 +62,9 @@ mod registry;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use plugin::Vst3Plugin;
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "testing"))]
+pub use ffi::instances_awaiting_main_thread;
 
 use soundcraft_dsp::{Category, Plugin, PluginInfo};
 use std::path::{Path, PathBuf};

@@ -118,9 +118,6 @@ pub(crate) struct Bundle {
     exit: Option<ModuleExit>,
     /// The thread that ran the module entry, and so must run the exit.
     entered_on: EntryThread,
-    /// Set when plugin objects were leaked on purpose (see [`EditorLink::kill`]): the module exit
-    /// must not run while any of its objects are alive.
-    leaked: AtomicBool,
     // Never closed: code stays mapped for the process lifetime, even after the module exit.
     _lib: ManuallyDrop<libloading::Library>,
 }
@@ -326,8 +323,9 @@ fn open_library(bundle: &Path, exe: &Path) -> Result<(libloading::Library, Optio
 /// Runs the module exits at process exit, newest module first, each on the thread that ran its
 /// entry. VST3 modules expect their exit before their static destructors run, and some crash in
 /// those destructors without it (seen with Steinberg's HALion Sonic, after a plain scan). A module
-/// with a live instance or leaked objects keeps running and is not exited, and so is one entered
-/// on the main thread when the process exits from another thread. Runs once; later loads are
+/// with a live instance keeps running and is not exited (an instance whose teardown waits for the
+/// main thread counts, see `Retire`, and so does one whose teardown never ran), and so is one
+/// entered on the main thread when the process exits from another thread. Runs once; later loads are
 /// refused.
 pub(crate) fn exit_modules() {
     if MODULES_EXITED.swap(true, Ordering::AcqRel) {
@@ -342,7 +340,7 @@ pub(crate) fn exit_modules() {
     let main = MAIN_OS_THREAD.load(Ordering::Acquire) == os_thread();
     let (mut kept, mut here, mut there) = (Vec::new(), Vec::new(), Vec::new());
     while let Some((path, b)) = cache.pop() {
-        if b.leaked.load(Ordering::Acquire) || (b.entered_on == EntryThread::Main && !main) {
+        if b.entered_on == EntryThread::Main && !main {
             kept.push((path, b));
             continue;
         }
@@ -427,7 +425,7 @@ impl Bundle {
         // SAFETY: a non-null result is a factory pointer with one reference owned by the caller
         // (VST3 contract), which the `ComPtr` takes over.
         let factory = unsafe { ComPtr::from_raw(raw) }.ok_or_else(|| fail("GetPluginFactory returned null".into()))?;
-        Ok(Bundle { factory, exit, entered_on, leaked: AtomicBool::new(false), _lib: ManuallyDrop::new(lib) })
+        Ok(Bundle { factory, exit, entered_on, _lib: ManuallyDrop::new(lib) })
     }
 
     /// Releases the factory, then runs the module exit, as the VST3 SDK's own host does.
@@ -440,11 +438,6 @@ impl Bundle {
             // bundle) and the factory released. The code stays mapped (`_lib` is never closed).
             unsafe { f() };
         }
-    }
-
-    /// Plugin objects of this module were leaked on purpose: never run its module exit.
-    pub fn mark_leaked(&self) {
-        self.leaked.store(true, Ordering::Release);
     }
 
     /// The vendor from the factory info (fallback for classes without one).
@@ -1542,31 +1535,93 @@ impl Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        // Close any editor and cut its handles off before the controller goes away.
-        if self.editor.kill() {
-            self.bundle.mark_leaked();
-        }
+        // Cut the editor's handles off and close it before the controller goes away; off the main
+        // thread an open editor comes back, to be closed there.
+        let editor = self.editor.kill();
         self.shutdown();
-        if let Some((a, b)) = self.connections.take() {
+        let retire = Retire {
+            editor,
+            connections: self.connections.take(),
+            controller: self.controller.take().map(|c| (c, self.controller_initialized)),
+            processor: self.processor.take(),
+            component: std::mem::take(&mut self.component_initialized).then(|| self.component.clone()),
+            _bundle: Arc::clone(&self.bundle),
+        };
+        if retire.editor.is_none() {
+            return retire.run();
+        }
+        // The view and window are only touched on the main thread, and the plugin is terminated
+        // only once its view is gone: all of it goes there.
+        let target = retire.editor.as_ref().and_then(|e| e.window.as_ref()).map_or(std::ptr::null_mut(), window::HostWindow::raw);
+        RETIRING.fetch_add(1, Ordering::Relaxed);
+        window::defer(
+            target,
+            Box::new(move || {
+                retire.run();
+                RETIRING.fetch_sub(1, Ordering::Relaxed);
+            }),
+        );
+    }
+}
+
+/// Instances whose teardown waits for the main thread (see [`Retire`]).
+static RETIRING: AtomicUsize = AtomicUsize::new(0);
+
+/// Instances dropped off the main thread with their editor open whose teardown has not run on the
+/// main thread yet. For tests (the `testing` feature).
+#[cfg(feature = "testing")]
+pub fn instances_awaiting_main_thread() -> usize {
+    RETIRING.load(Ordering::Relaxed)
+}
+
+/// What terminating an instance leaves to do, in this order: close its editor (the view is
+/// `removed`, its frame detached, the window closed), disconnect the component from the controller,
+/// detach the component handler and terminate the controller, release the processor, terminate
+/// the component. Run where the instance goes, or on the main thread when it goes elsewhere with
+/// its editor open (see [`EditorLink::kill`]).
+struct Retire {
+    /// An editor still open (only when the instance went off the main thread).
+    editor: Option<OpenEditor>,
+    connections: Option<(ComPtr<sv::IConnectionPoint>, ComPtr<sv::IConnectionPoint>)>,
+    /// The controller, and whether it was initialised separately (then it is terminated here).
+    controller: Option<(ComPtr<sv::IEditController>, bool)>,
+    processor: Option<ComPtr<sv::IAudioProcessor>>,
+    /// The component, when it was initialised (it is terminated here).
+    component: Option<ComPtr<sv::IComponent>>,
+    /// Keeps the module loaded and its exit from running until this is done.
+    _bundle: Arc<Bundle>,
+}
+
+// SAFETY: moved once, from the thread the instance goes on to the main thread, and used only
+// there. The editor link no longer reaches these objects; the instance's own references to the
+// component and host context are only released where it goes (reference counts, which VST3
+// objects keep thread-safe), as they always were.
+unsafe impl Send for Retire {}
+
+impl Retire {
+    fn run(self) {
+        if let Some(e) = self.editor {
+            e.close();
+        }
+        if let Some((a, b)) = self.connections {
             // SAFETY: the pair was connected in `instantiate`; disconnect before terminating.
             unsafe {
                 a.disconnect(b.as_ptr());
                 b.disconnect(a.as_ptr());
             }
         }
-        if let Some(c) = self.controller.take() {
+        if let Some((c, initialized)) = self.controller {
             // SAFETY: valid controller; detach our handler before it goes away.
             unsafe { c.setComponentHandler(std::ptr::null_mut()) };
-            if self.controller_initialized {
+            if initialized {
                 // SAFETY: separately created controller, initialised once; terminated once.
                 unsafe { c.terminate() };
             }
         }
-        self.processor = None;
-        if self.component_initialized {
-            // SAFETY: valid component, inactive; terminated exactly once.
-            unsafe { self.component.terminate() };
-            self.component_initialized = false;
+        drop(self.processor);
+        if let Some(c) = self.component {
+            // SAFETY: valid component, inactive (the instance shut it down); terminated exactly once.
+            unsafe { c.terminate() };
         }
     }
 }
@@ -1733,18 +1788,7 @@ impl EditorLink {
     }
 
     fn teardown(g: &mut EditorInner) {
-        if let Some(view) = g.view.take() {
-            // SAFETY: valid, attached view; main thread (callers check). `removed` before the
-            // window goes, and the frame is detached before it is released.
-            unsafe {
-                view.removed();
-                view.setFrame(std::ptr::null_mut());
-            }
-        }
-        g.frame = None;
-        if let Some(w) = g.window.take() {
-            w.close();
-        }
+        OpenEditor::take(g).close();
     }
 
     /// Hands a host-set value to the controller before a state save (`setParamNormalized`,
@@ -1852,31 +1896,57 @@ impl EditorLink {
         }
     }
 
-    /// Called by the instance before it terminates: closes the editor and cuts the handles off.
-    /// Returns whether plugin objects had to be leaked.
-    fn kill(&self) -> bool {
+    /// Called by the instance before it terminates: cuts the handles off and closes the editor.
+    /// Off the main thread an open editor cannot be closed (its view and window are main-thread
+    /// only): it is handed back, for the instance to close on the main thread before it
+    /// terminates the plugin.
+    fn kill(&self) -> Option<OpenEditor> {
         let mut g = self.lock();
-        let mut leaked = false;
-        if g.view.is_some() || g.window.is_some() {
-            if window::on_main_thread() {
-                EditorLink::teardown(&mut g);
-            } else {
-                // Window calls are main-thread only; leak the view and window rather than crash.
-                log::warn!("vst3: editor still open while its plugin is destroyed off the main thread");
-                if let Some(v) = g.view.take() {
-                    std::mem::forget(v);
-                    leaked = true;
-                }
-                // A `HostWindow` dropped off the main thread leaks its window, never touching it.
-                g.window = None;
-                if let Some(f) = g.frame.take() {
-                    std::mem::forget(f);
-                }
-            }
-        }
         g.component = None;
         g.controller = None;
-        leaked
+        let open = OpenEditor::take(&mut g);
+        if !open.is_open() {
+            return None;
+        }
+        if window::on_main_thread() {
+            open.close();
+            return None;
+        }
+        log::warn!("vst3: an editor is open while its plugin goes off the main thread; it is closed, and the plugin terminated, on the main thread");
+        Some(open)
+    }
+}
+
+/// An editor's view, frame and window, taken out of its link to be closed.
+struct OpenEditor {
+    view: Option<ComPtr<sb::IPlugView>>,
+    frame: Option<ComWrapper<PlugFrame>>,
+    window: Option<window::HostWindow>,
+}
+
+impl OpenEditor {
+    fn take(g: &mut EditorInner) -> OpenEditor {
+        OpenEditor { view: g.view.take(), frame: g.frame.take(), window: g.window.take() }
+    }
+
+    fn is_open(&self) -> bool {
+        self.view.is_some() || self.window.is_some()
+    }
+
+    /// Detaches the view (`removed` before the window goes, the frame detached before it is
+    /// released), then closes the window. Main thread only.
+    fn close(self) {
+        if let Some(view) = self.view {
+            // SAFETY: valid, attached view; main thread (callers check).
+            unsafe {
+                view.removed();
+                view.setFrame(std::ptr::null_mut());
+            }
+        }
+        drop(self.frame);
+        if let Some(w) = self.window {
+            w.close();
+        }
     }
 }
 
@@ -1898,7 +1968,8 @@ mod window {
         MainThreadMarker::new().is_some()
     }
 
-    /// The editor's window; main thread only (a window dropped elsewhere is leaked).
+    /// The editor's window; main thread only (a window dropped elsewhere is handed to the main
+    /// queue, see `PluginWindow`).
     pub struct HostWindow(PluginWindow);
 
     impl HostWindow {
@@ -1934,6 +2005,15 @@ mod window {
         }
     }
 
+    /// Work for the main thread.
+    pub type Job = Box<dyn FnOnce() + Send>;
+
+    /// Runs `job` on the main thread, from its run loop (the main dispatch queue). `_window` (the
+    /// editor's) is not needed here.
+    pub fn defer(_window: *mut c_void, job: Job) {
+        soundcraft_macos::plugin_window::on_main_queue(Box::new(move |_| job()));
+    }
+
     /// Fits a host window to its view's new size (`window` from [`HostWindow::raw`]), keeping its
     /// top-left corner; main thread only.
     pub fn resize(window: *mut c_void, w: f64, h: f64) {
@@ -1960,9 +2040,9 @@ mod window {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GW_OWNER, GWL_EXSTYLE, GWL_STYLE,
-        GetWindow, GetWindowLongPtrW, IDC_ARROW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOW,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN,
-        WS_OVERLAPPED, WS_SYSMENU,
+        GetWindow, GetWindowLongPtrW, IDC_ARROW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_APP, WM_CLOSE, WNDCLASSEXW, WS_CAPTION,
+        WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
     };
 
     pub const PLATFORM_TYPE: Option<*const c_char> = Some(vst3::Steinberg::kPlatformTypeHWND);
@@ -1978,10 +2058,27 @@ mod window {
 
     const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 
+    /// Work for the main thread.
+    pub type Job = Box<dyn FnOnce() + Send>;
+
+    /// Posted by SoundCraft to its own editor windows: run the job in `lparam` (see [`defer`]).
+    const WM_RUN_JOB: u32 = WM_APP + 0x5C;
+
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if msg == WM_CLOSE {
             // SAFETY: `hwnd` is the window this procedure was called for.
             unsafe { ShowWindow(hwnd, SW_HIDE) };
+            return 0;
+        }
+        if msg == WM_RUN_JOB {
+            if lparam != 0 {
+                // SAFETY: the box `defer` posted with this message, taken back once.
+                let job = unsafe { Box::from_raw(lparam as *mut Job) };
+                // A panic must not unwind into the message loop.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                    log::error!("vst3: a panic in work for the main thread was stopped");
+                }
+            }
             return 0;
         }
         // SAFETY: default handling of a message for the window it was sent to.
@@ -2120,6 +2217,19 @@ mod window {
         }
     }
 
+    /// Runs `job` on the main thread, from the app's message loop, by posting it to `window` (an
+    /// editor window, which belongs to the main thread). If the window takes no message (it is
+    /// gone), the job is never run, rather than run off the main thread: its plugin stays alive
+    /// and its module is never exited.
+    pub fn defer(window: *mut c_void, job: Job) {
+        let job = Box::into_raw(Box::new(job));
+        // SAFETY: `PostMessageW` accepts any handle and only queues the message; the box goes with
+        // it and `wndproc` takes it back once.
+        if window.is_null() || unsafe { PostMessageW(window, WM_RUN_JOB, 0, job as LPARAM) } == 0 {
+            log::error!("vst3: an editor window took no message; its plugin is left alive rather than terminated off the main thread");
+        }
+    }
+
     /// Resizes a host window's client area (`window` from [`HostWindow::raw`]); main thread only.
     pub fn resize(window: *mut c_void, w: f64, h: f64) {
         // SAFETY: `IsWindow` accepts any value.
@@ -2168,6 +2278,14 @@ mod window {
     }
 
     pub fn resize(_window: *mut c_void, _w: f64, _h: f64) {}
+
+    /// Work for the main thread.
+    pub type Job = Box<dyn FnOnce() + Send>;
+
+    /// Runs `job` at once: with no editor windows, every thread counts as the main thread here.
+    pub fn defer(_window: *mut c_void, job: Job) {
+        job();
+    }
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ mod macos {
         NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSResponder, NSView, NSWindow,
         NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     };
-    use objc2_foundation::{NSException, NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{NSDate, NSException, NSPoint, NSRect, NSRunLoop, NSSize, NSString};
     use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
     use std::cell::{Cell, RefCell};
 
@@ -556,10 +556,13 @@ mod macos {
         assert_eq!(seen(), [("soundcraft", "up", SPACE), ("soundcraft", "flags", 0)], "closed with Space held");
         assert_eq!(windows(mtm), (base + 1, 0), "the plugin window is gone");
 
-        // Dropped on another thread it is leaked, never touched there.
-        let leaked = autoreleasepool(|_| PluginWindow::new(mtm, "Leaked", NSSize::new(10.0, 10.0)));
-        std::thread::spawn(move || drop(leaked)).join().expect("drop elsewhere");
-        assert_eq!(windows(mtm), (base + 2, 0), "leaked");
+        // Dropped on another thread it is not touched there: the main queue takes it off screen
+        // and releases it on the main thread, at the run loop's next turn.
+        let elsewhere = autoreleasepool(|_| PluginWindow::new(mtm, "Dropped elsewhere", NSSize::new(10.0, 10.0)));
+        std::thread::spawn(move || drop(elsewhere)).join().expect("drop elsewhere");
+        assert_eq!(windows(mtm), (base + 2, 0), "not touched off the main thread");
+        autoreleasepool(|_| NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05)));
+        assert_eq!(windows(mtm), (base + 1, 0), "gone on the main thread");
 
         testing::set_key_target(None);
         app_window.close();

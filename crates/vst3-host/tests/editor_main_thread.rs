@@ -26,6 +26,8 @@ fn main() {
     assert!(ed.idle().is_empty(), "set_param is not reported back as an edit");
     #[cfg(target_os = "macos")]
     macos::shared_window(&mut p, ed.as_mut());
+    #[cfg(target_os = "macos")]
+    macos::dropped_elsewhere(&gain);
     drop(p);
     assert!(!ed.is_open());
     assert!(ed.open().is_err(), "the plugin is gone");
@@ -37,6 +39,7 @@ mod macos {
     use objc2::MainThreadMarker;
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSApplication;
+    use objc2_foundation::{NSDate, NSRunLoop};
     use soundcraft_dsp::PluginEditor;
     use soundcraft_macos::plugin_window::testing;
     use soundcraft_vst3_host::Vst3Plugin;
@@ -97,5 +100,28 @@ mod macos {
         assert_eq!(windows(mtm).2, 1);
         // Off the main thread nothing opens.
         std::thread::scope(|s| s.spawn(|| ed.open()).join()).expect("joined").expect_err("windows open on the main thread only");
+    }
+
+    /// Dropped on another thread with its editor open (the audio thread drops instances when the
+    /// mixer is torn down): nothing is touched there; on the main thread the view is removed, the
+    /// window closed and the plugin terminated, and nothing of it is left. At process exit the
+    /// fixture checks that none of its objects is alive when its module exit runs.
+    pub fn dropped_elsewhere(id: &str) {
+        let mtm = MainThreadMarker::new().expect("the main thread");
+        let (base, _, plugins) = windows(mtm);
+        let mut p = soundcraft_vst3_host::instantiate_plugin(id).expect("instantiate");
+        let ed = soundcraft_dsp::Plugin::editor(&mut p).expect("editor handle");
+        autoreleasepool(|_| p.open_editor_hidden()).expect("open");
+        assert_eq!(windows(mtm), (base + 1, 0, plugins + 1));
+        std::thread::spawn(move || drop(p)).join().expect("dropped on another thread");
+        assert_eq!(soundcraft_vst3_host::instances_awaiting_main_thread(), 1, "waits for the main thread");
+        assert_eq!(windows(mtm), (base + 1, 0, plugins + 1), "not touched off the main thread");
+        let start = std::time::Instant::now();
+        while soundcraft_vst3_host::instances_awaiting_main_thread() > 0 && start.elapsed().as_secs() < 5 {
+            autoreleasepool(|_| NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01)));
+        }
+        assert_eq!(soundcraft_vst3_host::instances_awaiting_main_thread(), 0, "torn down on the main thread");
+        assert_eq!(windows(mtm), (base, 0, plugins), "the window is gone");
+        assert!(!ed.is_open());
     }
 }
