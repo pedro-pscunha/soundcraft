@@ -773,6 +773,10 @@ fn plugin_search(ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<
             }
         });
     }
+    // Once VST3 has been scanned: what it skipped, and a rescan (as at the end of its submenu).
+    if vst3.is_some() {
+        vst3_scan_items(ui);
+    }
     picked.map(|i| built_in.get(i).map_or_else(|| hosted[i - built_in.len()].0.id.clone(), |p| p.id.to_string()))
 }
 
@@ -856,10 +860,8 @@ fn vst3_scan_items(ui: &mut Ui) {
     ui.separator();
     let skipped = soundcraft_vst3_host::skipped();
     if !skipped.is_empty() {
-        let why: Vec<String> =
-            skipped.iter().map(|s| format!("{}: {}{}", s.path.display(), s.reason, if s.from_cache { " (an earlier scan)" } else { "" })).collect();
         let n = skipped.len();
-        ui.weak(format!("{n} plugin{} skipped", if n == 1 { "" } else { "s" })).on_hover_text(why.join("\n"));
+        ui.weak(format!("{n} plugin{} skipped", if n == 1 { "" } else { "s" })).on_hover_text(skipped_tooltip(&skipped));
     }
     if ui
         .button("Rescan VST3 (may take a minute)")
@@ -868,6 +870,23 @@ fn vst3_scan_items(ui: &mut Ui) {
     {
         soundcraft_vst3_host::rescan();
     }
+}
+
+/// Most skipped plugins the tooltip lists one by one.
+const SKIPPED_SHOWN: usize = 10;
+
+/// Which plugins were skipped and why, one line each, the first [`SKIPPED_SHOWN`] and then how many
+/// more.
+fn skipped_tooltip(skipped: &[soundcraft_vst3_host::SkippedBundle]) -> String {
+    let mut lines: Vec<String> = skipped
+        .iter()
+        .take(SKIPPED_SHOWN)
+        .map(|s| format!("{}: {}{}", s.path.display(), s.reason, if s.from_cache { " (an earlier scan)" } else { "" }))
+        .collect();
+    if skipped.len() > SKIPPED_SHOWN {
+        lines.push(format!("+{} more", skipped.len() - SKIPPED_SHOWN));
+    }
+    lines.join("\n")
 }
 
 /// A hosted plugin as the plugin menus list it.
@@ -1351,6 +1370,24 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 mod tests {
     use super::{dragged_send_db, editable_readout, parse_db, parse_pan};
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+
+    #[test]
+    fn the_skipped_tooltip_lists_ten_then_how_many_more() {
+        let skipped: Vec<soundcraft_vst3_host::SkippedBundle> = (0..13)
+            .map(|i| soundcraft_vst3_host::SkippedBundle {
+                path: format!("/p/P{i}.vst3").into(),
+                reason: "timed out after 30s".into(),
+                from_cache: i == 0,
+                helper_failed: false,
+            })
+            .collect();
+        let tip = super::skipped_tooltip(&skipped);
+        let lines: Vec<&str> = tip.lines().collect();
+        assert_eq!(lines.len(), 11, "{tip}");
+        assert_eq!(lines[0], "/p/P0.vst3: timed out after 30s (an earlier scan)");
+        assert_eq!(lines[10], "+3 more");
+        assert_eq!(super::skipped_tooltip(&skipped[..2]).lines().count(), 2, "no \"more\" line when all fit");
+    }
 
     #[test]
     fn typed_db_accepts_console_notation_and_clamps() {
