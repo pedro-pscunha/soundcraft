@@ -392,10 +392,11 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     }
     // Over the notes and the velocity lane, as in the Edit window: the playhead (1.5, red) at the
     // play position while playing; when stopped, the insertion line (1.0, light) where playback
-    // starts, for an insertion point only (a selected range has none), blinking with the Edit
-    // window's.
+    // starts, for an insertion point only (a selected range has none) on a selected track (the
+    // Edit window draws it across those alone), blinking with the Edit window's.
     let (playing, sel) = (app.is_playing(), s.edit.selection);
-    if (playing || sel.is_empty())
+    let insertion = sel.is_empty() && s.edit.selected_tracks.contains(&track);
+    if (playing || insertion)
         && let Some(x) = playhead_x(&s.tempo, sr, app.position(), clip.range(), base_tick, roll.x_range(), px_per_tick)
     {
         let lanes = Rect::from_min_max(roll.min, pos2(roll.max.x, vel.max.y));
@@ -647,6 +648,31 @@ mod tests {
             h.step();
             assert_eq!(editor_insertions(&h).0, Vec::<[egui::Pos2; 2]>::new(), "Play starts at the range, but no line marks it");
         }
+    }
+
+    /// The Edit window draws the insertion line across the selected tracks only: so does the
+    /// editor, for a clip it shows because the clip is selected while its track is not.
+    #[test]
+    fn the_insertion_line_shows_only_while_the_clips_track_is_selected() {
+        let (mut h, _) = lead_in_editor();
+        let s = h.state().engine.session();
+        let lead = s.track_by_name("Lead").unwrap();
+        let (lead, cid) = (lead.id, lead.clips().first().unwrap().id);
+        let other = s.tracks.iter().find(|t| t.id != lead).unwrap().id;
+        let edit = &mut h.state_mut().engine.session_mut().edit;
+        edit.selected_clips = vec![cid];
+        edit.selected_tracks = vec![other];
+        for _ in 0..40 {
+            h.step();
+            assert_eq!(target_clip(h.state()), Some(cid), "the editor still shows the Lead clip");
+            assert_eq!(editor_insertions(&h).0, Vec::<[egui::Pos2; 2]>::new(), "Lead is not selected");
+        }
+        h.state_mut().engine.session_mut().edit.selected_tracks = vec![lead];
+        let shown = (0..40).any(|_| {
+            h.step();
+            editor_insertions(&h).0.len() == 1
+        });
+        assert!(shown, "Lead selected again: the line is back");
     }
 
     #[test]
