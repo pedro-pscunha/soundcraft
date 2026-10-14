@@ -498,6 +498,17 @@ impl Side {
             e.close();
         }
     }
+
+    /// The orphaned edits whose slot holds the same plugin and state again (see `orphaned`);
+    /// the others are dropped.
+    fn take_orphaned(&mut self) -> Vec<EditorEdit> {
+        let shadow = &self.shadow;
+        self.orphaned
+            .drain(..)
+            .filter(|(id, epoch, (t, slot, ..))| shadow.get(&(*t, *slot)).is_some_and(|l| l.id == *id && l.epoch == *epoch))
+            .map(|(_, _, e)| e)
+            .collect()
+    }
 }
 
 /// The transport and audio device.
@@ -742,7 +753,7 @@ impl Player {
     pub fn idle(&self) -> Vec<EditorEdit> {
         let mut side = self.side();
         side.collect_garbage();
-        let mut out: Vec<EditorEdit> = side.orphaned.drain(..).map(|(_, _, e)| e).collect();
+        let mut out = side.take_orphaned();
         for (&(t, slot), e) in side.editors.iter_mut() {
             for (id, v) in e.idle() {
                 out.push((t, slot, id, v));
@@ -1017,8 +1028,6 @@ impl Side {
                 out.push(PreparedInstance { track: spec.track, slot: spec.slot, id: spec.id, ch: spec.ch, plugin });
             }
         }
-        let shadow = &self.shadow;
-        self.orphaned.retain(|(id, epoch, (t, slot, ..))| shadow.get(&(*t, *slot)).is_some_and(|l| l.id == *id && l.epoch == *epoch));
         out
     }
 }
@@ -1401,13 +1410,13 @@ mod tests {
         side.editors.insert(k, Box::new(Edited(vec![("7".into(), 0.5)])));
         s.sample_rate = soundcraft_time::SampleRate::new(96_000).unwrap();
         side.prepare(&s);
-        let edits: Vec<EditorEdit> = side.orphaned.drain(..).map(|(_, _, e)| e).collect();
-        assert_eq!(edits, vec![(k.0, k.1, "7".to_string(), 0.5)]);
+        assert_eq!(side.take_orphaned(), vec![(k.0, k.1, "7".to_string(), 0.5)]);
+        assert!(side.take_orphaned().is_empty(), "reported once");
 
         side.editors.insert(k, Box::new(Edited(vec![("7".into(), 0.25)])));
         *insert_mut(&mut s, k) = Insert::new("clap:another.plugin");
         side.prepare(&s);
-        assert!(side.orphaned.is_empty(), "another plugin got the old one's edits");
+        assert!(side.take_orphaned().is_empty(), "another plugin got the old one's edits");
     }
 
     #[test]
