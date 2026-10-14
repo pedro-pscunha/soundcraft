@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (VST3 plugins are scanned in helper processes, so a plugin that hangs or crashes while scanned is skipped; previously trivial: an Audio Unit gets a value set from SoundCraft after its view moved that parameter away and back) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (the VST3 scan is cached per bundle across runs, so a plugin that never answers costs its time limit once; previously minor: VST3 plugins are scanned in helper processes) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -39,7 +39,7 @@ User report #152: a saved instrument level does not reach the bounce.
 |---|---|---|---|
 | Plugin format | AAX only (Native and DSP) | CLAP, VST3, Audio Units (macOS) | Users' libraries mostly ship VST3/AU too. AAX (#109) needs Avid's SDK licence and PACE signing: owner decision, likely never |
 | VST2, LV2, LADSPA | — | ❌ (#30) | Beyond Pro Tools; VST2 SDK is no longer licensable |
-| Scan, vendor menus, instrument picker | ✅ | ✅ | #23. VST3 bundles are scanned in helper processes (four at a time, 30 s each): one that hangs (a PACE/iLok-protected plugin without its licence service) or crashes is logged and skipped. CLAP and AU scans are in-process |
+| Scan, vendor menus, instrument picker | ✅ | ✅ | #23. VST3 bundles are scanned in helper processes (eight at a time, 30 s each): one that hangs (a PACE/iLok-protected plugin without its licence service) or crashes is logged and skipped. The outcome is cached per bundle across runs, so later runs scan only new or changed bundles and a skipped one costs its time limit once, until it changes or a rescan. CLAP and AU scans are in-process |
 | Audio, parameters, automation, latency (PDC) | ✅ | ✅ | |
 | Notes / MIDI to instruments | ✅ | ✅ | But no live MIDI input (G-02) |
 | State saved in sessions, presets | ✅ | ✅ | A preset loaded in a plugin's own editor is saved whole: before each save or bounce, session overrides the plugin changed by itself take its values (VST3, CLAP, AU), except automated ones |
@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Hosting: the VST3 scan is cached per bundle across runs in the settings folder, and eight helpers run at once: later runs scan only new or changed bundles (dev Mac: 30.5 s cold, 0.03 s warm) |
 | 2026-10-14 | minor | Hosting: VST3 scans run in helper processes (the app's own executable, one per bundle), so a VST3 that hangs or crashes while scanned (Gullfoss without its iLok service) is skipped instead of hanging the app and every CLI bounce; CLAP and AU scans stay in-process |
 | 2026-10-14 | trivial | Hosting: a CLAP plugin torn down off the main thread with its editor open is deactivated on the main thread after its GUI is destroyed, not on the audio thread while the GUI still runs |
 | 2026-10-14 | trivial | Editors: dragging a VST3 insert's control in the plugin panel no longer makes the plugin's own editor knob jump back to the previous value for a frame at large buffer sizes |

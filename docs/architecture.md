@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (the apps scan VST3 plugins in helper processes, their own executable run with `--soundcraft-scan-vst3`; previously trivial: macos also runs the hosts' main-queue jobs, the CLAP host's too, and records app activation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (the VST3 scan is cached per bundle across runs, in the settings folder the engine now resolves for both apps; previously minor: the apps scan VST3 plugins in helper processes, their own executable run with `--soundcraft-scan-vst3`; previously trivial: macos also runs the hosts' main-queue jobs, the CLAP host's too, and records app activation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a Cargo workspace of small crates with enforced layering (`cargo xtask layers`).
 Nothing below the UI knows about egui, so the interface can be replaced.
@@ -70,10 +70,13 @@ VST3 scans run out of process in the desktop app and the CLI. Each answers
 `<its executable> --soundcraft-scan-vst3 <bundle>` first thing in `main`, before logging, windows
 or audio (`soundcraft_engine::run_plugin_scan_helper`), and registers its own executable as the
 scan helper (`scan_plugins_in_helpers`). `vst3-host` then loads each bundle in a helper of its
-own, four at a time, and reads back the plugins as one JSON line. A helper still running after
+own, eight at a time, and reads back the plugins as one JSON line. A helper still running after
 30 s is killed, and its bundle, like one whose helper crashed or failed, is logged, skipped and
 not tried again until a rescan. SoundCraft's own process loads only the bundles of the plugins it
-creates. CLAP and Audio Unit scans still load every plugin binary in-process.
+creates. Each bundle's outcome is cached across runs in the settings folder
+(`soundcraft_engine::settings`, shared by both apps: `plugin-cache/vst3.json`) under a
+fingerprint of the bundle, so later runs start helpers only for new or changed bundles. CLAP and
+Audio Unit scans still load every plugin binary in-process.
 
 The cpal callbacks mark their thread (`soundcraft_playback::mark_audio_thread`). Code that may run
 there can ask `on_audio_thread()` before doing anything that blocks; the desktop app's logger does,
@@ -91,6 +94,7 @@ app as an MCP server. See `control-protocol.md` and `mcp.md`.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | The VST3 scan is cached per bundle across runs; the settings folder rule moved into the engine (`settings`) so the CLI uses it too |
 | 2026-10-14 | minor | The apps scan VST3 plugins in helper processes (their own executable with `--soundcraft-scan-vst3`), so a plugin that hangs or crashes while scanned is skipped |
 | 2026-10-14 | trivial | macos also runs the main-queue jobs the plugin hosts (CLAP too) use to tear down editors dropped off the main thread, and records app activation |
 | 2026-10-14 | minor | macos holds the plugin editor window the VST3 and AU hosts share (they depend on it, L1 on L0) |
