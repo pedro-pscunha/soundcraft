@@ -4,10 +4,10 @@
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, NSObject, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenuItem, NSResponder, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenuItem, NSResponder, NSText, NSView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
 use std::cell::{Cell, RefCell};
@@ -71,15 +71,10 @@ define_class!(
                     return;
                 }
             }
-            // While SoundCraft has a text field focused, a key handed on would type into it unseen.
-            if APP_WANTS_KEYBOARD.load(Ordering::Relaxed) || !forward(self.mtm(), event, Key::Down) {
+            if !self.hand_on(event) {
                 // SAFETY: NSWindow's own `keyDown:`, with the event AppKit passed in.
                 let () = unsafe { msg_send![super(self), keyDown: event] };
-                return;
             }
-            let mut down = self.ivars().down.borrow_mut();
-            down.retain(|d| d.keyCode() != event.keyCode());
-            down.push(event.retain());
         }
 
         #[unsafe(method(keyUp:))]
@@ -103,7 +98,8 @@ define_class!(
         }
 
         /// A ⌘-key, before it arrives as `keyDown:`: the plugin's views first (NSWindow's own
-        /// handling), then the Edit keys for the plugin's focused control (see `perform_edit`).
+        /// handling), then the Edit keys for the plugin's focused control (see `perform_edit`),
+        /// then the other ⌘-keys a focused text view would keep (see `command_key_from_text`).
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             let taken = guarded("offering a ⌘-key to the plugin", || {
@@ -112,7 +108,7 @@ define_class!(
                 taken
             });
             // A plugin's code threw: the key counts as taken, so none of its code runs again for it.
-            taken.unwrap_or(true) || self.perform_edit(event)
+            taken.unwrap_or(true) || self.perform_edit(event) || self.command_key_from_text(event)
         }
 
         /// No longer key: the key-ups and modifier changes of the keys still held go elsewhere.
@@ -168,6 +164,49 @@ impl HostWindow {
         });
     }
 
+    /// Hands a key-down on to SoundCraft's window (see [`forward`]) and remembers it, to let go of it
+    /// later. False (nothing handed on) while SoundCraft has a text field focused, where it would
+    /// type into that field out of sight, or when no window of SoundCraft's takes it.
+    fn hand_on(&self, event: &NSEvent) -> bool {
+        if APP_WANTS_KEYBOARD.load(Ordering::Relaxed) || !forward(self.mtm(), event, Key::Down) {
+            return false;
+        }
+        let mut down = self.ivars().down.borrow_mut();
+        down.retain(|d| d.keyCode() != event.keyCode());
+        down.push(event.retain());
+        true
+    }
+
+    /// A ⌘-key on a character key (⌘S, ⌘N, ⌘Q, ⌘-digits, ⌘Space) that no plugin view took and that
+    /// is not an Edit key, while a text view (`NSText`: a field editor, a plain Cocoa text field's)
+    /// is first responder. Such a view keeps a ⌘-key it has no use for in its `keyDown:` and beeps,
+    /// so the key would never reach SoundCraft: it is handled here as `keyDown:` handles a key no
+    /// view took (⌘W closes this window, the rest is handed on). True when taken. False for other
+    /// keys (⌘ with an arrow, Delete or another function key: text views bind many, ⌘← moving to
+    /// the line's start), while the text view is composing with an input method, for a key aimed
+    /// at another window, with another first responder (a plugin's own view may take ⌘-keys in its
+    /// `keyDown:`), and when nothing is handed on (`hand_on`): the text view gets the key then.
+    fn command_key_from_text(&self, event: &NSEvent) -> bool {
+        if !is_command_character(event) || edit_action(event).is_some() || event.windowNumber() != self.windowNumber() {
+            return false;
+        }
+        // The text view's own code may run (`hasMarkedText`); if it throws, the key is left to it.
+        let in_text = guarded("asking the focused text view about a ⌘-key", || {
+            self.firstResponder().is_some_and(|r| {
+                // SAFETY: `hasMarkedText` (NSTextInputClient) takes nothing and returns a BOOL.
+                r.isKindOfClass(NSText::class()) && !(r.respondsToSelector(sel!(hasMarkedText)) && unsafe { msg_send![&*r, hasMarkedText] })
+            })
+        });
+        if in_text != Some(true) {
+            return false;
+        }
+        if is_close_window(event) {
+            guarded("closing it with ⌘W", || self.performClose(None));
+            return true;
+        }
+        self.hand_on(event)
+    }
+
     /// The view Tab (⇧Tab: `back`) would move the focus to: the focused view's next (previous)
     /// valid key view, when it has one other than itself. `None` with no view focused (the window
     /// itself is first responder) or a view outside any key-view loop (a plugin's root view
@@ -210,6 +249,19 @@ impl HostWindow {
         // A plugin's code threw: the key counts as taken, as in `performKeyEquivalent:`.
         .unwrap_or(true)
     }
+}
+
+/// A key-down with ⌘ held on a character key: a letter, digit, punctuation or Space, by the
+/// character it types. Not an arrow, Delete, Return, Escape, Home, a function key or the like
+/// (control characters, and AppKit's function-key range U+F700 to U+F8FF).
+fn is_command_character(event: &NSEvent) -> bool {
+    if event.r#type() != NSEventType::KeyDown || !event.modifierFlags().contains(NSEventModifierFlags::Command) {
+        return false;
+    }
+    let Some(chars) = event.charactersIgnoringModifiers() else { return false };
+    let chars = chars.to_string();
+    let mut it = chars.chars();
+    matches!((it.next(), it.next()), (Some(c), None) if !c.is_control() && !('\u{F700}'..='\u{F8FF}').contains(&c))
 }
 
 /// The Edit menu's action for a ⌘-key down: ⌘C `copy:`, ⌘V `paste:`, ⌘X `cut:`, ⌘Z `undo:`,

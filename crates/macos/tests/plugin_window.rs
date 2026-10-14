@@ -39,6 +39,8 @@ mod macos {
     const X: u16 = 7;
     const C: u16 = 8;
     const V: u16 = 9;
+    /// The right arrow (virtual key code).
+    const RIGHT: u16 = 124;
 
     thread_local! {
         /// Key events seen: (who, what, key code).
@@ -323,6 +325,7 @@ mod macos {
             X => "x",
             C => "c",
             V => "v",
+            RIGHT => "\u{F703}",
             _ => "",
         });
         NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
@@ -752,6 +755,12 @@ mod macos {
             press(win, C, cmd);
             press(win, Z, cmd);
             assert_eq!(seen(), downs(&[C, Z]), "nothing takes them: handed on");
+            // Another ⌘-key is not taken as a key equivalent with a view that is not a text view
+            // focused (a plugin's own view may take ⌘-keys in its `keyDown:`): it goes on to
+            // `keyDown:`, which hands it on as before.
+            assert!(!autoreleasepool(|_| win.performKeyEquivalent(&key(win, NSEventType::KeyDown, S, cmd))), "not a key equivalent");
+            press(win, S, cmd);
+            assert_eq!(seen(), downs(&[S]), "handed on by keyDown:");
             passing.removeFromSuperview();
 
             let text = focused_text(mtm, &edit, "hello");
@@ -771,6 +780,27 @@ mod macos {
             assert_eq!(text.string().to_string(), "hello", "⌘X cuts");
             assert_eq!(clipboard_text().as_deref(), Some("hello"));
             assert_eq!(seen(), [], "none of them reached SoundCraft");
+
+            // Other ⌘-keys on character keys: a text view keeps them and beeps, so they are handed
+            // on before they reach it (⌘S saves), and the text is untouched.
+            text.setSelectedRange(NSRange::new(0, 5));
+            press(win, S, cmd);
+            press(win, S, cmd | NSEventModifierFlags::Shift);
+            assert_eq!(seen(), downs(&[S, S]), "⌘S and ⇧⌘S are handed on");
+            assert_eq!(text.string().to_string(), "hello", "the text is untouched");
+            assert_eq!(text.selectedRange(), NSRange::new(0, 5), "and so is its selection");
+            press(win, A, cmd);
+            assert_eq!(seen(), [], "⌘A is still the text view's");
+            // Not while SoundCraft has a text field focused: the text view gets the key (a beep).
+            soundcraft_macos::plugin_window::set_app_wants_keyboard(true);
+            press(win, S, cmd);
+            assert_eq!(seen(), [], "SoundCraft is typing: not handed on");
+            soundcraft_macos::plugin_window::set_app_wants_keyboard(false);
+            // ⌘ with an arrow stays with the text view, which binds it: ⌘→ moves to the end.
+            text.setSelectedRange(NSRange::new(0, 0));
+            press(win, RIGHT, cmd | NSEventModifierFlags::Function);
+            assert_eq!(seen(), [], "⌘→ is the text view's");
+            assert_eq!(text.selectedRange(), NSRange::new(5, 0), "⌘→ moved to the end");
             text.removeFromSuperview();
 
             // A control whose own `copy:` throws: caught, and the key counts as taken (it is not
@@ -783,7 +813,13 @@ mod macos {
             assert_eq!(seen(), [], "taken");
             thrower.removeFromSuperview();
 
-            // Closing lets go of the keys handed on above (their key-ups); not under test here.
+            // ⌘W from a text view closes the editor, as from anywhere else in it: it is not handed
+            // on, and the window lets go of the keys handed on above as it closes.
+            let _bye = focused_text(mtm, &edit, "bye");
+            press(win, W, cmd);
+            let closing = seen();
+            assert!(!closing.contains(&("soundcraft", "down", W)), "⌘W is not handed on: {closing:?}");
+            assert_eq!(closing.last(), Some(&("soundcraft", "flags", 0)), "the window closed: {closing:?}");
             drop(edit);
             let _ = seen();
         });
