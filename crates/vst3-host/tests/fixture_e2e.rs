@@ -419,6 +419,9 @@ fn a_preset_loaded_after_the_overrides_reached_the_controller_is_read_whole() {
 fn the_editors_own_edits_coming_back_are_not_handed_to_its_controller() {
     use soundcraft_dsp::{ParamReading, Plugin};
     let mut p = soundcraft_vst3_host::instantiate_plugin(&id_of("Fixture Gain")).unwrap();
+    // The report waits for its echo across a real plugin call (the preset load): a machine that
+    // stalls for over the usual second must not expire it.
+    p.set_echo_window(std::time::Duration::from_secs(3600));
     let mut ed = Plugin::editor(&mut p).expect("editor handle");
     let mut reader = p.state_reader().expect("every VST3 component has a state");
     // The fixture "edits" Gain to 0.9 (normalized) when it gets the component handler.

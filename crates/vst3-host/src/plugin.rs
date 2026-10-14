@@ -193,6 +193,14 @@ impl Vst3Plugin {
         self.inst.host().edit_as_view(id, normalized);
     }
 
+    /// Lets this instance's editor reports wait `window` for their echo instead of a second: a
+    /// test whose steps are real plugin calls, which a loaded machine may stall for longer. For
+    /// tests (the `testing` feature); other instances keep theirs.
+    #[cfg(feature = "testing")]
+    pub fn set_echo_window(&self, window: Duration) {
+        self.echoes.lock().unwrap_or_else(PoisonError::into_inner).window = window;
+    }
+
     /// Re-reads every parameter value from the controller (after a state load) and drops
     /// changes still queued from before it.
     fn refresh_values(&mut self) {
@@ -209,7 +217,7 @@ impl Vst3Plugin {
             u.store(SYNCED, Ordering::Relaxed);
         }
         // Nothing the session sends from now on is an echo of an edit made before the load.
-        self.echoes.lock().unwrap_or_else(PoisonError::into_inner).0.clear();
+        self.echoes.lock().unwrap_or_else(PoisonError::into_inner).reports.clear();
     }
 
     /// Inserts keeping the queue time-sorted; drops the event when the queue is full (never
@@ -493,29 +501,40 @@ impl Plugin for Vst3Plugin {
 /// ago, and a preset loaded in the editor meanwhile back to the edit. Each report is `(VST3 id,
 /// normalized bits, when)`, the normalized value as `set_param` makes it from the plain value the
 /// session sends. Main thread only.
-#[derive(Default)]
-struct Echoes(Vec<(u32, u64, Instant)>);
+struct Echoes {
+    reports: Vec<(u32, u64, Instant)>,
+    /// How long a report waits for its echo: [`ECHO_WINDOW`] (a test whose steps may stall for
+    /// longer sets more, for its own instance only).
+    window: Duration,
+}
+
+impl Default for Echoes {
+    fn default() -> Self {
+        Echoes { reports: Vec::new(), window: ECHO_WINDOW }
+    }
+}
 
 impl Echoes {
     /// Notes that the editor reported `n` for `id` at `now`.
     fn reported(&mut self, id: u32, n: f64, now: Instant) {
-        if self.0.len() >= ECHO_CAP {
-            self.0.remove(0);
+        if self.reports.len() >= ECHO_CAP {
+            self.reports.remove(0);
         }
-        self.0.push((id, n.to_bits(), now));
+        self.reports.push((id, n.to_bits(), now));
     }
 
     /// True when the host's value `n` for `id`, handed over at `now`, is the session sending a
     /// report back. The session sends the latest value it has, so the newest report of `n` and
     /// every older report of `id` are answered and forgotten. A value that matches none is the
-    /// host's own, and every report of `id` is forgotten. Reports older than [`ECHO_WINDOW`] are
-    /// forgotten first: their echo would have come by then, so the session went back to the value
-    /// it had sent and sent nothing.
+    /// host's own, and every report of `id` is forgotten. Reports older than the window
+    /// ([`ECHO_WINDOW`]) are forgotten first: their echo would have come by then, so the session
+    /// went back to the value it had sent and sent nothing.
     fn take(&mut self, id: u32, n: f64, now: Instant) -> bool {
-        self.0.retain(|r| now.saturating_duration_since(r.2) <= ECHO_WINDOW);
-        let echo = self.0.iter().rposition(|r| r.0 == id && r.1 == n.to_bits());
+        let window = self.window;
+        self.reports.retain(|r| now.saturating_duration_since(r.2) <= window);
+        let echo = self.reports.iter().rposition(|r| r.0 == id && r.1 == n.to_bits());
         let mut k = 0usize;
-        self.0.retain(|r| {
+        self.reports.retain(|r| {
             let keep = r.0 != id || echo.is_some_and(|e| k > e);
             k += 1;
             keep
@@ -730,13 +749,13 @@ mod tests {
         e.reported(3, 0.0, t);
         let later = t.checked_add(ECHO_WINDOW + Duration::from_millis(1)).unwrap();
         assert!(!e.take(3, 1.0, later));
-        assert!(e.0.is_empty());
+        assert!(e.reports.is_empty());
         e.reported(3, 1.0, t);
         assert!(e.take(3, 1.0, t.checked_add(ECHO_WINDOW).unwrap()), "within the window");
         for k in 0..=ECHO_CAP {
             e.reported(9, k as f64, t);
         }
-        assert_eq!(e.0.len(), ECHO_CAP, "bounded, oldest first out");
+        assert_eq!(e.reports.len(), ECHO_CAP, "bounded, oldest first out");
         assert!(!e.take(9, 0.0, t));
     }
 }
