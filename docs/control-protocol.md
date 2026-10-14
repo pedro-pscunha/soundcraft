@@ -105,3 +105,16 @@ A center `move` can include `before` (panel ID or null to append) for tab order.
 The equivalent `{"action": ...}` form accepts a serialized shared docking action;
 this is also the form emitted by the renderer. Protected-canvas and app-specific panel
 rules apply equally to both forms.
+
+## Plugin windows
+
+`window.plugin {track, slot, view?, value?}` opens and closes a plugin's windows, as a click on its
+insert or instrument slot does. `slot` is an insert (`0`..`9` or `"a"`..`"j"`) or `"instrument"`.
+`view` is `"editor"` (the default: a CLAP, VST3 or Audio Unit plugin's own editor; a built-in
+plugin's parameter window) or `"parameters"` (SoundCraft's parameter window). `value: true` opens
+(and raises an open editor), `false` closes, and omitting it toggles, except that a built-in's
+parameter window stays open. The result says what is open: `{"view": "editor", "open": true}`.
+When a plugin's own editor can't open (audio is off, the plugin did not load, it has no editor), the
+status line says why and an insert's parameter window opens instead, with that `reason` in the
+result; a hosted instrument (its sounds live in its own editor) and a plugin SoundCraft knows
+nothing of open nothing, and the command returns the reason as its error.

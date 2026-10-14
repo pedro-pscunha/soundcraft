@@ -470,20 +470,18 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         ui.menu_button("Presets ▾", |ui| preset_menu(app, ui, tid, slot, info, &ins));
                     }
                     if soundcraft_mix::is_third_party(&ins.plugin) {
-                        let open = app.player.as_ref().is_some_and(|p| p.editor_open(tid, slot));
-                        let available = app.player.as_ref().is_some_and(|p| p.has_editor(tid, slot));
+                        let editor = app.player.as_ref().map(|p| p.editor_state(tid, slot));
+                        let open = editor == Some(soundcraft_playback::EditorState::Open);
+                        let why = crate::plugin_window::editor_unavailable(editor);
                         let label = if open { "Close Plugin Editor" } else { "Open Plugin Editor" };
-                        let resp = ui.add_enabled(available, egui::Button::new(label));
-                        let resp =
-                            if available { resp } else { resp.on_disabled_hover_text("This plugin has no editor of its own, or it is not loaded") };
-                        if resp.clicked()
-                            && let Some(p) = &app.player
-                        {
-                            if open {
-                                p.close_editor(tid, slot);
-                            } else if let Err(e) = p.open_editor(tid, slot) {
-                                app.ui.status = format!("{}: {e}", info.name);
-                            }
+                        let resp = ui.add_enabled(why.is_none(), egui::Button::new(label));
+                        let resp = match why {
+                            Some(why) => resp.on_disabled_hover_text(format!("This plugin {why}")),
+                            None => resp,
+                        };
+                        if resp.clicked() {
+                            let p = json!({"track": tid.0, "slot": crate::plugin_window::slot_value(slot), "value": !open});
+                            let _ = app.run("window.plugin", p);
                         }
                     }
                 });

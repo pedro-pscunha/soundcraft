@@ -9,7 +9,7 @@ use crate::widgets::{
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ChannelFormat, Route, SurroundPan, Track, TrackId, TrackKind};
-use soundcraft_playback::MeterSnapshot;
+use soundcraft_playback::{EditorState, MeterSnapshot};
 
 pub fn strip_width(narrow: bool) -> f32 {
     if narrow { 64.0 } else { 98.0 }
@@ -489,7 +489,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
 }
 
 /// An instrument track's INSTRUMENT row: click opens or closes a hosted instrument's own editor
-/// ([`slot_click`]), right-click (or click, when none is set) picks another instrument. A
+/// ([`click_slot`]), right-click (or click, when none is set) picks another instrument. A
 /// built-in's parameters open from that menu. Dropping an audio file on it loads the sampler.
 pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let t = Tokens::current();
@@ -503,11 +503,8 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
         None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
     }
     let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
-    if resp.clicked()
-        && hosted
-        && let Some(i) = ins
-    {
-        click_slot(app, id, slot, &i.plugin);
+    if resp.clicked() && hosted {
+        click_slot(app, id, slot);
     }
     let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
@@ -602,13 +599,11 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
             used_slot(ui.painter(), r, faces, Mark::Dot, name, color, None);
         }
     }
-    if resp.clicked()
-        && let Some(insert) = &ins
-    {
+    if resp.clicked() && ins.is_some() {
         if ui.input(|i| i.modifiers.command) {
             let _ = app.run("mix.insert_bypass", json!({"track": id.0, "slot": slot}));
         } else {
-            click_slot(app, id, slot, &insert.plugin);
+            click_slot(app, id, slot);
         }
     }
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
@@ -616,90 +611,20 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text(tip) };
     let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| plugin_menu(app, ui, id, slot, ins.is_some()));
+    popup.show(|ui| plugin_menu(app, ui, id, slot, ins.as_ref()));
 }
 
-/// Where a hosted plugin's own editor stands in the live player.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LiveEditor {
-    /// No player (audio is off), so no instance and no editor.
-    NotLoaded,
-    /// The instance has no editor of its own, or it could not be made.
-    Missing,
-    Closed,
-    Open,
-}
-
-impl LiveEditor {
-    fn of(player: Option<&soundcraft_playback::Player>, track: TrackId, slot: usize) -> Self {
-        match player {
-            None => Self::NotLoaded,
-            Some(p) if !p.has_editor(track, slot) => Self::Missing,
-            Some(p) if p.editor_open(track, slot) => Self::Open,
-            Some(_) => Self::Closed,
-        }
-    }
-}
-
-/// What a click on a used plugin slot (an insert or the instrument) does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SlotClick {
-    OpenEditor,
-    /// As a Pro Tools insert button does with its plug-in window, a second click closes the
-    /// editor (it floats above the app's windows, so it never needs raising).
-    CloseEditor,
-    /// SoundCraft's parameter window; for a hosted plugin, with why its own editor can't open.
-    Parameters(Option<&'static str>),
-}
-
-/// A hosted (CLAP, VST3, Audio Unit) plugin opens its own editor when its live instance has one,
-/// and closes it when open; otherwise, and for built-in plugins, the parameter window opens.
-fn slot_click(hosted: bool, editor: LiveEditor) -> SlotClick {
-    match (hosted, editor) {
-        (false, _) => SlotClick::Parameters(None),
-        (true, LiveEditor::Closed) => SlotClick::OpenEditor,
-        (true, LiveEditor::Open) => SlotClick::CloseEditor,
-        (true, LiveEditor::NotLoaded) => SlotClick::Parameters(Some("is not loaded while audio is off, so its own editor can't open")),
-        (true, LiveEditor::Missing) => SlotClick::Parameters(Some("has no editor of its own, or it did not load")),
-    }
-}
-
-/// A click on the used plugin slot `slot` (an insert, or the instrument), as [`slot_click`] says.
-/// An editor that fails to open leaves its parameter window open instead, with the error.
-fn click_slot(app: &mut SoundApp, id: TrackId, slot: usize, plugin: &str) {
-    let name = plugin_info(plugin).map_or(plugin, |p| p.name);
-    match slot_click(soundcraft_mix::is_third_party(plugin), LiveEditor::of(app.player.as_ref(), id, slot)) {
-        SlotClick::OpenEditor => {
-            if let Some(Err(e)) = app.player.as_ref().map(|p| p.open_editor(id, slot)) {
-                app.ui.status = format!("{name}: {e}");
-                show_parameters(app, id, slot);
-            }
-        }
-        SlotClick::CloseEditor => {
-            if let Some(p) = &app.player {
-                p.close_editor(id, slot);
-            }
-        }
-        SlotClick::Parameters(why) => {
-            if let Some(why) = why {
-                app.ui.status = format!("{name} {why}.");
-            }
-            show_parameters(app, id, slot);
-        }
-    }
-}
-
-/// Opens SoundCraft's parameter window for `slot` (an insert, or the instrument), once.
-fn show_parameters(app: &mut SoundApp, id: TrackId, slot: usize) {
-    if !app.ui.plugin_windows.contains(&(id, slot)) {
-        app.ui.plugin_windows.push((id, slot));
-    }
+/// A click on the used plugin slot `slot` (an insert, or the instrument): `window.plugin` toggles
+/// the plugin's own editor (a built-in's parameter window opens), as a Pro Tools insert button
+/// does with its plug-in window. When the editor can't open, the status line says why.
+fn click_slot(app: &mut SoundApp, id: TrackId, slot: usize) {
+    let _ = app.run("window.plugin", json!({"track": id.0, "slot": crate::plugin_window::slot_value(slot)}));
 }
 
 /// An insert's menu: a search field that takes typing at once, then (until something is typed)
 /// a hosted plugin's parameter window (a click opens its own editor), Bypass and removal, and the
-/// plugins by category and format.
-pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, occupied: bool) {
+/// plugins by category and format. `ins` is the slot's insert.
+pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, ins: Option<&soundcraft_model::Insert>) {
     let search = MenuSearch::show(ui, egui::Id::new(("plugin-search", id.0, slot)), "Search plugins…");
     if search.typing() {
         if let Some(plugin) = plugin_search(ui, &search, false) {
@@ -707,16 +632,11 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         }
         return;
     }
-    if occupied {
-        let hosted = app
-            .engine
-            .session()
-            .track(id)
-            .and_then(|t| t.mixer.inserts.get(slot)?.as_ref())
-            .is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
-        if hosted && ui.button("Edit Parameters…").clicked() {
-            show_parameters(app, id, slot);
-            ui.close();
+    if let Some(ins) = ins {
+        // A built-in's parameters open with a click; a plugin SoundCraft knows nothing of has none to show.
+        let parameters = soundcraft_mix::is_third_party(&ins.plugin) && plugin_info(&ins.plugin).is_some();
+        if parameters && ui.button("Edit Parameters…").clicked() {
+            run_pick(app, ui, "window.plugin", json!({"track": id.0, "slot": slot, "view": "parameters", "value": true}));
         }
         if ui.button("Bypass").clicked() {
             run_pick(app, ui, "mix.insert_bypass", json!({"track": id.0, "slot": slot}));
@@ -761,23 +681,15 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     let current = app.engine.session().track(id).and_then(|t| t.instrument.clone());
     if let Some(info) = current.as_ref().and_then(|i| plugin_info(&i.plugin)) {
         ui.label(egui::RichText::new(info.name).strong());
-        if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
-            show_parameters(app, id, slot);
-            ui.close();
+        let hosted = current.as_ref().is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
+        if !hosted && ui.button("Edit Parameters…").clicked() {
+            run_pick(app, ui, "window.plugin", json!({"track": id.0, "slot": "instrument", "view": "parameters", "value": true}));
         }
-        if let Some(p) = &app.player
-            && p.has_editor(id, slot)
-        {
-            if p.editor_open(id, slot) {
-                if ui.button("Close Plugin Editor").clicked() {
-                    p.close_editor(id, slot);
-                    ui.close();
-                }
-            } else if ui.button("Open Plugin Editor").clicked() {
-                if let Err(e) = p.open_editor(id, slot) {
-                    app.ui.status = format!("{}: {e}", info.name);
-                }
-                ui.close();
+        let editor = app.player.as_ref().map(|p| p.editor_state(id, slot));
+        if let Some(state @ (EditorState::Open | EditorState::Closed)) = editor {
+            let (label, open) = if state == EditorState::Open { ("Close Plugin Editor", false) } else { ("Open Plugin Editor", true) };
+            if ui.button(label).clicked() {
+                run_pick(app, ui, "window.plugin", json!({"track": id.0, "slot": "instrument", "value": open}));
             }
         }
         ui.separator();
@@ -991,10 +903,36 @@ fn vendor_menus(ui: &mut Ui, mut list: Vec<MenuPlugin>, none: &str) -> Option<St
 /// A built-in plugin's description, else a hosted CLAP (`clap:<id>`), VST3 (`vst3:<class id>`) or
 /// Audio Unit (`au:<type>:<subtype>:<manufacturer>`) plugin's.
 pub fn plugin_info(id: &str) -> Option<&'static soundcraft_dsp::PluginInfo> {
+    #[cfg(test)]
+    if let Some(info) = test_plugins::get(id) {
+        return Some(info);
+    }
     soundcraft_dsp::plugin_info(id)
         .or_else(|| soundcraft_clap_host::plugin_info(id))
         .or_else(|| soundcraft_vst3_host::plugin_info(id))
         .or_else(|| soundcraft_au_host::plugin_info(id))
+}
+
+/// Hosted plugins a unit test makes known, as a scan would, to its own thread.
+#[cfg(test)]
+pub(crate) mod test_plugins {
+    use soundcraft_dsp::PluginInfo;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static KNOWN: RefCell<Vec<&'static PluginInfo>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Makes the hosted plugin `id` known as `name`, with the parameters of the built-in `like`.
+    pub(crate) fn know(id: &'static str, name: &'static str, like: &str) {
+        let like = soundcraft_dsp::plugin_info(like).unwrap();
+        let info: &'static PluginInfo = Box::leak(Box::new(PluginInfo { id, name, short_name: name, ..*like }));
+        KNOWN.with(|k| k.borrow_mut().push(info));
+    }
+
+    pub(super) fn get(id: &str) -> Option<&'static PluginInfo> {
+        KNOWN.with(|k| k.borrow().iter().find(|i| i.id == id).copied())
+    }
 }
 
 pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
@@ -1377,52 +1315,8 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{LiveEditor, SlotClick, click_slot, dragged_send_db, editable_readout, parse_db, parse_pan, slot_click};
+    use super::{dragged_send_db, editable_readout, parse_db, parse_pan};
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
-
-    const EDITORS: [LiveEditor; 4] = [LiveEditor::NotLoaded, LiveEditor::Missing, LiveEditor::Closed, LiveEditor::Open];
-
-    #[test]
-    fn a_hosted_plugin_opens_its_own_editor_and_a_second_click_closes_it() {
-        assert_eq!(slot_click(true, LiveEditor::Closed), SlotClick::OpenEditor);
-        assert_eq!(slot_click(true, LiveEditor::Open), SlotClick::CloseEditor);
-    }
-
-    #[test]
-    fn without_an_editor_a_hosted_plugin_opens_its_parameters_and_says_why() {
-        let SlotClick::Parameters(Some(not_loaded)) = slot_click(true, LiveEditor::NotLoaded) else { panic!("parameters, with a reason") };
-        let SlotClick::Parameters(Some(missing)) = slot_click(true, LiveEditor::Missing) else { panic!("parameters, with a reason") };
-        assert!(not_loaded.contains("not loaded"), "{not_loaded}");
-        assert!(missing.contains("no editor"), "{missing}");
-    }
-
-    #[test]
-    fn a_built_in_plugin_always_opens_its_parameters() {
-        for e in EDITORS {
-            assert_eq!(slot_click(false, e), SlotClick::Parameters(None), "{e:?}");
-        }
-    }
-
-    #[test]
-    fn clicking_a_hosted_slot_without_audio_opens_its_parameters_once_with_the_reason() {
-        let mut app = crate::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, crate::Services::default());
-        let kick = app.engine.session().track_by_name("Kick").map(|t| t.id).unwrap();
-        // A VST3 id no plugin has: never looked up on disk.
-        let hosted = "vst3:not-a-class-id";
-        let t = app.engine.session_mut().track_mut(kick).unwrap();
-        t.mixer.inserts[2] = Some(soundcraft_model::Insert::new(hosted));
-        let built_in = t.mixer.inserts[0].clone().unwrap().plugin;
-        for _ in 0..2 {
-            click_slot(&mut app, kick, 2, hosted);
-        }
-        assert_eq!(app.ui.plugin_windows, vec![(kick, 2)]);
-        assert_eq!(app.ui.status, format!("{hosted} is not loaded while audio is off, so its own editor can't open."));
-
-        app.ui.status.clear();
-        click_slot(&mut app, kick, 0, &built_in);
-        assert_eq!(app.ui.plugin_windows, vec![(kick, 2), (kick, 0)]);
-        assert!(app.ui.status.is_empty(), "a built-in has no editor of its own to miss: {}", app.ui.status);
-    }
 
     #[test]
     fn typed_db_accepts_console_notation_and_clamps() {

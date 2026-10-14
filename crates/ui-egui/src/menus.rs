@@ -68,6 +68,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("ui.audio_device", "Audio Device", "", None),
     ("window.io_setup", "I/O Setup", "", None),
     ("window.shortcuts", "Keyboard Shortcuts", "", None),
+    ("window.plugin", "Plugin Window", "", None),
     ("view.mix_section", "Mix Window View", "", None),
     ("ui.new_tracks_dialog", "New Tracks…", "", None),
     ("ui.bounce_dialog", "Bounce Mix…", "", None),
@@ -420,6 +421,14 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Event > MIDI Real-Time Properties", "window.rtp"),
 ];
 
+/// The parameters of a UI command, as `engine.commands` lists them.
+pub fn ui_params(id: &str) -> &'static str {
+    match id {
+        "window.plugin" => crate::plugin_window::PARAMS,
+        _ => "{}",
+    }
+}
+
 /// The shortcut of an engine or window command.
 pub fn shortcut_for(id: &str) -> Option<&'static str> {
     soundcraft_engine::find_command(id).map_or_else(|| UI_COMMANDS.iter().find(|c| c.0 == id).and_then(|c| c.3), |c| c.shortcut)
@@ -485,6 +494,9 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
     }
     if id == "ui.audio_device" {
         return Some(crate::windows::audio_device_command(app, p));
+    }
+    if id == "window.plugin" {
+        return Some(crate::plugin_window::command(app, p));
     }
     let toggle = |v: &mut bool| {
         *v = p.get("value").and_then(Value::as_bool).unwrap_or(!*v);

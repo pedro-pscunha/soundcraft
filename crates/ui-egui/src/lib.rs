@@ -19,6 +19,7 @@ pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
+pub mod plugin_window;
 mod recent;
 pub mod recovery;
 pub mod sampler_window;

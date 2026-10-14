@@ -740,11 +740,6 @@ impl Player {
         self.side().editor_state((track, slot))
     }
 
-    /// True when the plugin in this slot has its own editor.
-    pub fn has_editor(&self, track: TrackId, slot: usize) -> bool {
-        self.side().editors.contains_key(&(track, slot))
-    }
-
     /// Opens (or raises) the plugin's own editor window. Main thread only.
     pub fn open_editor(&self, track: TrackId, slot: usize) -> Result<(), String> {
         self.side().open_editor((track, slot))
@@ -762,10 +757,6 @@ impl Player {
         for e in self.side().editors.values_mut() {
             e.close();
         }
-    }
-
-    pub fn editor_open(&self, track: TrackId, slot: usize) -> bool {
-        self.side().editors.get(&(track, slot)).is_some_and(|e| e.is_open())
     }
 
     pub fn any_editor_open(&self) -> bool {
@@ -862,6 +853,62 @@ impl Player {
         side.shadow.insert(key, Live { id: spec.id, ch: spec.ch, created: true, epoch });
         side.editors.insert(key, editor);
         true
+    }
+}
+
+/// A stand-in for a hosted plugin's own editor ([`Player::adopt_editor`], the `test-util`
+/// feature): its window is a flag, and it records the calls it gets. Clones share both.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Clone, Debug, Default)]
+pub struct StandInEditor {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    shown: Arc<AtomicBool>,
+    /// What `open` answers instead of opening.
+    refusal: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl StandInEditor {
+    /// An editor whose window never opens: `open` answers `why`.
+    pub fn refusing(why: &str) -> StandInEditor {
+        StandInEditor { refusal: Some(why.into()), ..StandInEditor::default() }
+    }
+
+    /// The calls so far, in order: "open" and "close".
+    pub fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    pub fn shown(&self) -> bool {
+        self.shown.load(Ordering::Relaxed)
+    }
+
+    fn record(&self, call: &'static str) {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner).push(call);
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl PluginEditor for StandInEditor {
+    fn open(&mut self) -> Result<(), String> {
+        self.record("open");
+        match &self.refusal {
+            Some(why) => Err(why.clone()),
+            None => {
+                self.shown.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+    }
+    fn close(&mut self) {
+        self.record("close");
+        self.shown.store(false, Ordering::Relaxed);
+    }
+    fn is_open(&self) -> bool {
+        self.shown()
+    }
+    fn idle(&mut self) -> Vec<(String, f32)> {
+        Vec::new()
     }
 }
 
@@ -1310,25 +1357,6 @@ mod tests {
         }
     }
 
-    /// An editor whose window is a flag.
-    struct Shown(Arc<AtomicBool>);
-
-    impl PluginEditor for Shown {
-        fn open(&mut self) -> Result<(), String> {
-            self.0.store(true, Ordering::Relaxed);
-            Ok(())
-        }
-        fn close(&mut self) {
-            self.0.store(false, Ordering::Relaxed);
-        }
-        fn is_open(&self) -> bool {
-            self.0.load(Ordering::Relaxed)
-        }
-        fn idle(&mut self) -> Vec<(String, f32)> {
-            Vec::new()
-        }
-    }
-
     #[test]
     fn each_editor_state_says_why_the_editor_cannot_open() {
         // Insert A holds a plugin that is not installed; insert B was never asked for.
@@ -1342,8 +1370,7 @@ mod tests {
         made(&mut side, true);
         assert_eq!(side.editor_state(k), EditorState::NoEditor);
         assert_eq!(side.open_editor(k), Err("this plugin has no editor of its own".into()));
-        let shown = Arc::new(AtomicBool::new(false));
-        side.editors.insert(k, Box::new(Shown(Arc::clone(&shown))));
+        side.editors.insert(k, Box::new(StandInEditor::default()));
         assert_eq!(side.editor_state(k), EditorState::Closed);
         side.open_editor(k).unwrap();
         assert_eq!(side.editor_state(k), EditorState::Open);
@@ -1361,15 +1388,19 @@ mod tests {
         let p = Player::without_device(Arc::clone(&s));
         assert!(p.silent && p.device_channels == 0, "{}", p.device_name);
         assert_eq!(p.editor_state(t, 2), EditorState::Failed);
-        let shown = Arc::new(AtomicBool::new(false));
-        assert!(!p.adopt_editor(&s, t, 0, Box::new(Shown(Arc::clone(&shown)))), "a built-in has no instance here");
-        assert!(p.adopt_editor(&s, t, 2, Box::new(Shown(Arc::clone(&shown)))));
+        let editor = StandInEditor::default();
+        assert!(!p.adopt_editor(&s, t, 0, Box::new(editor.clone())), "a built-in has no instance here");
+        assert!(p.adopt_editor(&s, t, 2, Box::new(editor.clone())));
         assert_eq!(p.editor_state(t, 2), EditorState::Closed);
         p.open_editor(t, 2).unwrap();
         p.update_session(Arc::clone(&s));
         assert_eq!(p.editor_state(t, 2), EditorState::Open, "the same plugin keeps its instance and editor");
         p.close_editors();
-        assert!(!shown.load(Ordering::Relaxed));
+        assert_eq!((editor.shown(), editor.calls()), (false, vec!["open", "close"]));
+        let refusing = StandInEditor::refusing("no window today");
+        assert!(p.adopt_editor(&s, t, 2, Box::new(refusing.clone())));
+        assert_eq!(p.open_editor(t, 2), Err("no window today".into()));
+        assert_eq!((refusing.shown(), p.editor_state(t, 2)), (false, EditorState::Closed));
     }
 
     #[test]
