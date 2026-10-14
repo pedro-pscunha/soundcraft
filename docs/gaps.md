@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (G-05: CLAP editors are missing embedded on macOS and Linux only, as plugin-parity.md and ROADMAP.md say; previously minor: G-05 shrunk, AU editor views and the shared plugin window) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (G-05: passing unused keys back to SoundCraft is macOS-only; previously minor: G-13, offline renders wait only for hosted instruments) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
