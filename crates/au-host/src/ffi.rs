@@ -541,16 +541,16 @@ impl Edits {
     }
 
     /// Notes that parameter `i` has `value` as far as the host knows (lock-free: the audio thread
-    /// calls it too).
+    /// calls it too, after setting the unit).
     pub fn know(&self, i: usize, value: f32) {
         if let Some(k) = self.known.get(i) {
-            k.store(value.to_bits(), Ordering::Relaxed);
+            k.store(value.to_bits(), Ordering::Release);
         }
     }
 
     /// The value the host last knew parameter `i` has.
     pub fn known(&self, i: usize) -> Option<f32> {
-        self.known.get(i).map(|k| f32::from_bits(k.load(Ordering::Relaxed)))
+        self.known.get(i).map(|k| f32::from_bits(k.load(Ordering::Acquire)))
     }
 
     fn record(&self, id: u32, value: f32) {
@@ -1289,6 +1289,19 @@ impl UnitLink {
         };
         release(data);
         out
+    }
+
+    /// The unit's value of global parameter `id` (`AudioUnitGetParameter`, under the lock like
+    /// `save_state`). `None` once the instance is gone, or when the unit refuses.
+    pub fn get_param(&self, id: u32) -> Option<f32> {
+        let g = self.lock();
+        let unit = g.unit?;
+        let mut v = 0f32;
+        // SAFETY: the unit is live while the link holds it (the instance clears the link under
+        // this lock before disposing of it); `v` is a local. Hosts read parameters from other
+        // threads while a unit renders.
+        let st = unsafe { AudioUnitGetParameter(unit, id, SCOPE_GLOBAL, 0, &mut v) };
+        (st == 0 && v.is_finite()).then_some(v)
     }
 
     /// Opens (or raises) the unit's view in a host window, reporting the view's edits of `ids`

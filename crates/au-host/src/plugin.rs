@@ -1,7 +1,7 @@
 //! `AuPlugin`: a loaded Audio Unit behind the safe `soundcraft_dsp::Plugin` trait.
 
 use crate::ffi::{Edits, Instance, UnitLink};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, RenderMode, Transport};
+use soundcraft_dsp::{ParamReading, Plugin, PluginEditor, PluginInfo, PluginStateReader, RenderMode, Transport};
 use std::sync::Arc;
 
 /// Most MIDI events queued between two blocks (extra events are dropped).
@@ -169,10 +169,12 @@ impl Plugin for AuPlugin {
         // The session sending back the view's own edit: by now a drag may have moved the unit on,
         // and setting it would step the unit back until the next echo.
         let echo = self.edits.take_echo(i, v);
-        self.edits.know(i, v);
         if !echo {
             self.inst.set_param(aid, v);
         }
+        // Known only once the unit has it: a state reader in between would otherwise take the
+        // unit's previous value for one it set by itself.
+        self.edits.know(i, v);
         true
     }
 
@@ -326,9 +328,36 @@ impl Plugin for AuPlugin {
         Some(Box::new(AuEditor { link, edits: Arc::clone(&self.edits), info: self.info, ids: self.ids.clone() }))
     }
 
-    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+    fn state_reader(&mut self) -> Option<Box<dyn PluginStateReader>> {
         let link = Arc::clone(self.inst.link());
-        Some(Box::new(move || link.save_state()))
+        Some(Box::new(AuStateReader { link, edits: Arc::clone(&self.edits), info: self.info, ids: self.ids.clone() }))
+    }
+}
+
+/// Reads an Audio Unit's state and parameters on the main thread.
+struct AuStateReader {
+    link: Arc<UnitLink>,
+    edits: Arc<Edits>,
+    info: &'static PluginInfo,
+    ids: Vec<u32>,
+}
+
+impl PluginStateReader for AuStateReader {
+    fn save_state(&mut self) -> Option<Vec<u8>> {
+        self.link.save_state()
+    }
+
+    /// The unit's values next to what the host knows of them (see `Edits`), which is read first
+    /// (see `set_param`).
+    fn param_values(&mut self, ids: &[&str]) -> Vec<Option<ParamReading>> {
+        ids.iter()
+            .map(|id| {
+                let i = self.info.params.iter().position(|p| p.id == *id)?;
+                let host = self.edits.known(i)?;
+                let live = self.info.params.get(i)?.clamp(self.link.get_param(*self.ids.get(i)?)?);
+                Some(ParamReading { live, host })
+            })
+            .collect()
     }
 }
 
@@ -444,6 +473,27 @@ mod tests {
         assert!(ed.idle().is_empty());
         ed.set_param(mix.id, 50.0);
         assert!(!ed.is_open());
+    }
+
+    /// A unit that changes a value by itself (a preset loaded in its view, without a notice; here
+    /// `AudioUnitSetParameter` straight on the unit) has it read back by the state reader, next to
+    /// what the host knows. AUDelay ships with macOS; skipped where missing.
+    #[test]
+    fn the_state_reader_reads_values_the_unit_set_itself() {
+        use soundcraft_dsp::ParamReading;
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let (Some(mix), Some(time)) = (p.info.params.first(), p.info.params.get(1)) else { panic!("AUDelay has parameters") };
+        let Some(&time_id) = p.ids.get(1) else { panic!("ids") };
+        let mut reader = p.state_reader().expect("every unit has a state");
+        let start = p.param(time.id).expect("a value");
+        assert_ne!(start, 1.5);
+        assert!(p.set_param(mix.id, 30.0));
+        let read = reader.param_values(&[mix.id, time.id, "nope"]);
+        assert_eq!(read, vec![Some(ParamReading { live: 30.0, host: 30.0 }), Some(ParamReading { live: start, host: start }), None]);
+        assert!(p.inst.set_param(time_id, 1.5), "the unit's own change");
+        assert_eq!(reader.param_values(&[time.id]), vec![Some(ParamReading { live: 1.5, host: start })]);
+        drop(p);
+        assert_eq!(reader.param_values(&[mix.id]), vec![None], "the instance is gone");
     }
 
     /// A view that loads a preset changes the unit's values without a notice per parameter and
