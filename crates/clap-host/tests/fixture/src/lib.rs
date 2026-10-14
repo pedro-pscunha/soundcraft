@@ -8,7 +8,8 @@
 //!
 //! The gain plugin also implements `clap.state` (gain and mode as two little-endian f64s) and a
 //! floating-only `clap.gui` without a real window (its calls must come on the main thread, checked
-//! on macOS): showing it "edits" the gain to 0.25 in the GUI,
+//! on macOS, as must `deactivate` while the GUI exists; `destroy` checks it is inactive): showing
+//! it "edits" the gain to 0.25 in the GUI,
 //! reported as an output parameter event by the next `process`. While its GUI exists, `get_value`
 //! reads Gain from a main-thread copy that `on_main_thread` brings up to date, asked for by the
 //! `process` that changed the gain (as GUIs that show audio-thread values do). It implements
@@ -112,6 +113,7 @@ unsafe extern "C" fn init(p: *const clap_plugin) -> bool {
 
 unsafe extern "C" fn destroy(p: *const clap_plugin) {
     assert!(!unsafe { fx(p) }.gui_created, "plugin destroyed with its GUI alive");
+    assert!(!unsafe { fx(p) }.active, "plugin destroyed while active");
     let data = unsafe { (*p).plugin_data } as *mut Fx;
     drop(unsafe { Box::from_raw(data) });
 }
@@ -128,6 +130,10 @@ unsafe extern "C" fn activate(p: *const clap_plugin, sr: f64, min: u32, max: u32
 unsafe extern "C" fn deactivate(p: *const clap_plugin) {
     let f = unsafe { fx(p) };
     assert!(!f.processing, "deactivate while processing");
+    // A main-thread call: off it, it would race the GUI's own (main-thread) code.
+    if f.gui_created {
+        assert_main_thread("deactivate with the GUI alive");
+    }
     f.active = false;
 }
 

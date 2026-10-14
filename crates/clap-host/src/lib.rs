@@ -26,9 +26,13 @@
 //! still works for them.
 //! Parameter changes made in the plugin's GUI arrive as output events while the plugin processes
 //! and are reported by the editor's `idle`. An instance dropped off the main thread with its
-//! editor open (the audio thread drops a torn-down mixer's instances) is not touched there: its GUI
-//! is destroyed, and then the plugin, on the main thread (macOS: the main dispatch queue; Windows:
-//! a message to a message-only window of SoundCraft's). Values the host sets reach the plugin as
+//! editor open (the audio thread drops a torn-down mixer's instances) only stops processing there:
+//! its GUI is destroyed, then the plugin deactivated and destroyed, on the main thread (macOS: the
+//! main dispatch queue; Windows: a message to a message-only window of SoundCraft's), the order an
+//! instance dropped on the main thread keeps. One dropped off the main thread with no editor open
+//! is still deactivated and destroyed where it goes, although CLAP makes both main-thread calls:
+//! no GUI runs meanwhile, and runs that never turn the main run loop (headless ones) would
+//! otherwise never destroy it. Values the host sets reach the plugin as
 //! events of the next block; the state reader takes a value as the plugin's from then on, and reads
 //! the plugin's own values (`get_value`) after running a pending `on_main_thread`, so a value not
 //! handed over yet is not taken for one the plugin set by itself. A requested `on_main_thread` is

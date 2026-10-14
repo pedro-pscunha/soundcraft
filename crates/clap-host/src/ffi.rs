@@ -1551,9 +1551,19 @@ impl Drop for Instance {
         // Editors first (CLAP: destroy the GUI before the plugin), and no handle may call in after.
         // Off the main thread an open GUI comes back, to be destroyed on the main thread.
         let gui = self.gui.kill();
-        self.deactivate();
+        let deactivate = if gui.is_some() {
+            // `deactivate` is a main-thread call, and the GUI runs on there until it is destroyed:
+            // the plugin is deactivated there, after it. Processing (an audio-thread call) stops here.
+            self.stop_processing();
+            let f = self.vt().deactivate;
+            std::mem::take(&mut self.active).then_some(f).flatten()
+        } else {
+            self.deactivate();
+            None
+        };
         let retire = Retire {
             gui,
+            deactivate,
             plugin: std::mem::take(&mut self.created).then_some(self.plugin),
             _host: self.host.take(),
             _state: Arc::clone(&self.state),
@@ -1582,13 +1592,18 @@ pub fn instances_awaiting_main_thread() -> usize {
     RETIRING.load(Ordering::Relaxed)
 }
 
-/// What destroying an instance leaves to do once it is deactivated, in this order: destroy its
-/// GUI (and close the host window of an embedded one), destroy the plugin, then free the host
-/// struct and its state and let go of the bundle. Run where the instance goes, or on the main
-/// thread when it goes elsewhere with its editor open (see [`GuiLink::kill`]).
+/// What destroying an instance leaves to do once it stopped processing, in this order: destroy
+/// its GUI (and close the host window of an embedded one), deactivate the plugin when that was
+/// left to this, destroy the plugin, then free the host struct and its state and let go of the
+/// bundle. Run where the instance goes, or on the main thread when it goes elsewhere with its
+/// editor open (see [`GuiLink::kill`]); then the deactivation waits for the main thread too (a
+/// main-thread call, which the GUI must not race), in the order the instance itself keeps when it
+/// goes on the main thread: GUI, deactivate, destroy.
 struct Retire {
     /// A GUI still open (only when the instance went off the main thread).
     gui: Option<OpenGui>,
+    /// The plugin's `deactivate`, when it is still active (only with `gui`).
+    deactivate: Option<unsafe extern "C" fn(*const clap_plugin)>,
     /// The plugin, when it was created (it is destroyed here).
     plugin: Option<*const clap_plugin>,
     // Dropped after the plugin is destroyed, in this order: the plugin may call its host until it
@@ -1607,6 +1622,11 @@ impl Retire {
     fn run(self) {
         if let Some(gui) = self.gui {
             gui.destroy();
+        }
+        if let (Some(plugin), Some(f)) = (self.plugin, self.deactivate) {
+            // SAFETY: valid, active instance that no longer processes (the instance stopped it and
+            // calls it no more); deactivated exactly once, on the main thread.
+            unsafe { f(plugin) };
         }
         if let Some(plugin) = self.plugin {
             // SAFETY: the plugin is valid until destroyed just below; we copy its vtable struct.

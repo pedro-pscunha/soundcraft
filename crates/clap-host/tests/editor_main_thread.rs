@@ -78,12 +78,15 @@ mod macos {
     use objc2::rc::autoreleasepool;
     use objc2_foundation::{NSDate, NSRunLoop};
 
-    /// Dropped on another thread with its editor open (the audio thread drops instances when the
-    /// mixer is torn down): nothing is touched there; on the main thread the GUI is destroyed,
-    /// then the plugin. The fixture checks that its GUI calls come on the main thread and that it
-    /// is never destroyed with its GUI alive (either would abort this test).
+    /// Dropped on another thread with its editor open while processing (the audio thread drops
+    /// instances when the mixer is torn down): only processing stops there; on the main thread the
+    /// GUI is destroyed, then the plugin deactivated and destroyed. The fixture checks that its GUI
+    /// calls, and `deactivate` while the GUI exists, come on the main thread, and that it is never
+    /// destroyed with its GUI alive or while active (any of these would abort this test).
     pub fn dropped_elsewhere() {
         let mut p = soundcraft_clap_host::create(super::GAIN).expect("fixture");
+        p.prepare(48_000.0, 64, 2);
+        let _ = super::block(&mut p);
         let mut ed = p.editor().expect("editor handle");
         ed.open().expect("open on the main thread");
         std::thread::spawn(move || drop(p)).join().expect("dropped on another thread");
