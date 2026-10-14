@@ -76,7 +76,8 @@ mod macos {
     }
 
     /// The view resizes itself: the editor's idle fits the window to it, keeping the window's
-    /// top-left corner.
+    /// top-left corner. The view gets its size back at the end: some plugins (Pro-L 2) remember
+    /// their editor size for every later instance.
     fn view_resizes(mtm: MainThreadMarker, id: &str) {
         let mut p = soundcraft_au_host::instantiate_plugin(id).expect("instantiate");
         let mut ed = p.editor().expect("an editor");
@@ -86,10 +87,12 @@ mod macos {
             let window = view.window().expect("in its window");
             let before = window.frame();
             let old = window.contentRectForFrameRect(before).size;
+            let original = view.frame().size;
             view.setFrameSize(NSSize::new(old.width + 40.0, old.height + 30.0));
             let want = view.frame().size;
             if (want.width, want.height) == (old.width, old.height) {
                 println!("{id}: the view keeps its size");
+                view.setFrameSize(original);
                 return;
             }
             assert!(ed.idle().is_empty());
@@ -99,6 +102,8 @@ mod macos {
             assert_eq!(after.origin.x, before.origin.x, "{id}: the left edge stays");
             assert_eq!(after.origin.y + after.size.height, before.origin.y + before.size.height, "{id}: the top edge stays");
             println!("{id}: the view grew to {}x{}; the window followed", want.width, want.height);
+            view.setFrameSize(original);
+            assert!(ed.idle().is_empty());
         });
         ed.close();
         drop(p);
