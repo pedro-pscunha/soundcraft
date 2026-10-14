@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (Audio Units show their own editor, or Apple's generic view; previously minor: offline renders put hosted plugins in their offline mode) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (a preset loaded in a plugin's own editor is saved whole; previously minor: Audio Units show their own editor, or Apple's generic view) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -42,7 +42,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | Scan, vendor menus, instrument picker | ✅ | ✅ | #23 |
 | Audio, parameters, automation, latency (PDC) | ✅ | ✅ | |
 | Notes / MIDI to instruments | ✅ | ✅ | But no live MIDI input (G-02) |
-| State saved in sessions, presets | ✅ | ✅ | |
+| State saved in sessions, presets | ✅ | ✅ | A preset loaded in a plugin's own editor is saved whole: before each save or bounce, session overrides the plugin changed by itself take its values (VST3, CLAP, AU), except automated ones |
 | Create/destroy off the audio thread | ✅ | ✅ | |
 | Editors: CLAP | — | 🟡 floating windows; embedded editors on Windows | Embedded on macOS/Linux missing |
 | Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing |
@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Hosting: a preset loaded in a plugin's own editor is no longer half reverted at load (saves store the values the plugin set by itself over the session's overrides) |
 | 2026-10-13 | minor | Editors: Audio Units show their own Cocoa view, or Apple's generic view, with edits reported to the session |
 | 2026-10-13 | minor | Hosting: offline renders put VST3, CLAP and AU plugins in their offline mode |
 | 2026-10-13 | trivial | mix.instrument sets built-in instrument parameters in params (#265) |

@@ -53,7 +53,12 @@
 //! only overrides (values set by a command, an automation lane or its own editor): everything
 //! else stays in the plugin's state, so a hosted plugin's defaults never overwrite that state. A
 //! host reads states back for saving through each instance's [`Plugin::state_reader`], on its UI
-//! thread.
+//! thread, and with them the instance's values of the insert's overrides
+//! ([`param_values`](soundcraft_dsp::PluginStateReader::param_values)). An override the plugin
+//! has moved away from by itself, without telling the host per parameter (a preset loaded in its
+//! own editor: VST3 reports only that values changed), is stored with the plugin's value, or it
+//! would set that preset half back when the session loads. Overrides an automation lane drives,
+//! and ones the instance has not received yet (they are applied as blocks render), keep theirs.
 //!
 //! A built-in instrument's parameter values are applied the same way. A sample-playing
 //! instrument (the Sampler) is handed the decoded audio of its insert's

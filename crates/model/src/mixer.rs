@@ -428,7 +428,9 @@ pub struct Insert {
     /// The values the mixer sends the plugin. A built-in plugin gets every declared parameter when
     /// inserted, so this is its whole setting. A hosted plugin (CLAP, VST3, AU) keeps its settings
     /// in its own [`state`](Self::state): this holds only the parameters set since (by a command,
-    /// the plugin panel, its editor or a preset), which the mixer sends on top of that state.
+    /// the plugin panel, its editor or a preset), which the mixer sends on top of that state. A
+    /// save stores the playing plugin's own value of one it changed by itself (a preset loaded in
+    /// its editor) together with its state.
     #[serde(default, deserialize_with = "finite_params")]
     pub params: BTreeMap<String, f32>,
     #[serde(default)]
