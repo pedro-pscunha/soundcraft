@@ -1,0 +1,193 @@
+//! Files SoundCraft is asked to open: dropped on its window, opened with it from Finder or the Dock
+//! (macOS), or named on the command line. A session opens (asking to save the open one first), MIDI
+//! and audio files import.
+
+use serde_json::{Value, json};
+use soundcraft_engine::io::session_file;
+use soundcraft_ui_egui::{SoundApp, dialogs};
+use std::collections::VecDeque;
+use std::path::Path;
+
+/// Files waiting to open while a dialog is up, so none replaces it (a Save Changes question, say)
+/// and none lands in a session that is about to be replaced.
+#[derive(Default)]
+pub struct Opener {
+    pending: VecDeque<String>,
+}
+
+impl Opener {
+    /// Opens one batch of files (dropped together, or opened together from Finder). Only the first
+    /// session opens, first, and the status line names the others; MIDI and audio files then
+    /// import in order. While a dialog is up, what is left of the batch waits for it to close.
+    pub fn open(&mut self, app: &mut SoundApp, batch: Vec<String>) {
+        let (sessions, files): (Vec<String>, Vec<String>) = batch.into_iter().filter(|p| !p.is_empty()).partition(|p| is_session(p));
+        let mut sessions = sessions.into_iter();
+        self.pending.extend(sessions.next());
+        let skipped: Vec<String> = sessions.map(|p| file_name(&p)).collect();
+        self.pending.extend(files);
+        self.drain(app);
+        if !skipped.is_empty() {
+            app.ui.status = format!("One session opens at a time: {} did not open.", skipped.join(", "));
+        }
+    }
+
+    /// Opens what waits, unless a dialog is up. Call every frame.
+    pub fn drain(&mut self, app: &mut SoundApp) {
+        while app.dialogs.open.is_none()
+            && let Some(p) = self.pending.pop_front()
+        {
+            open_path(app, &p);
+        }
+    }
+}
+
+fn is_session(p: &str) -> bool {
+    p.to_ascii_lowercase().ends_with(".scraft")
+}
+
+fn file_name(p: &str) -> String {
+    Path::new(p).file_name().map_or_else(|| p.to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// True when `opened` is the session file of the session at `open` (`Engine::path`, which may
+/// name it without its extension), following links.
+fn same_session(open: &str, opened: &str) -> bool {
+    let (a, b) = (session_file(open), session_file(opened));
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
+fn open_path(app: &mut SoundApp, p: &str) {
+    let lower = p.to_ascii_lowercase();
+    let at = app.engine.session().edit.selection.start;
+    let r = if is_session(p) {
+        if app.engine.path.as_deref().is_some_and(|open| same_session(open, p)) {
+            // Opening it again would reload it: its undo history, and what its plugins hold that
+            // was never saved, would be lost.
+            app.ui.status = format!("{} is already open.", app.engine.session().name);
+            return;
+        }
+        dialogs::run_or_ask(app, "session.open", json!({"path": p})).map(drop)
+    } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
+        app.run("file.import_midi", json!({"path": p})).map(|v| imported(app, p, &v["tracks"], 0))
+    } else {
+        app.run("file.import_audio", json!({"path": p, "at": at})).map(|v| imported(app, p, &v["imported"], at))
+    };
+    if let Err(e) = r {
+        log::warn!("{p}: {e}");
+    }
+}
+
+/// Says in the status line where the file `p` went: `tracks` lists the track ids it went to
+/// (numbers, or objects with a `track`), from `at`.
+fn imported(app: &mut SoundApp, p: &str, tracks: &Value, at: i64) {
+    let s = app.engine.session();
+    let ids = tracks.as_array().into_iter().flatten().filter_map(|t| t.as_u64().or_else(|| t.get("track")?.as_u64()));
+    let names: Vec<&str> = ids.filter_map(|id| s.tracks.iter().find(|t| t.id.0 == id)).map(|t| t.name.as_str()).collect();
+    let to = match names[..] {
+        [] => String::new(),
+        [one] => format!(" to {one}"),
+        _ => format!(" to {} tracks", names.len()),
+    };
+    app.ui.status = format!("Imported {}{to} at {}.", file_name(p), s.format_position(at, s.edit.main_counter));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Opener, same_session};
+    use serde_json::json;
+    use soundcraft_ui_egui::{Services, SoundApp};
+    use std::path::PathBuf;
+
+    /// A fresh folder for one test.
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("soundcraft-open-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn app() -> SoundApp {
+        SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default())
+    }
+
+    fn path(p: &std::path::Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn the_open_session_is_known_by_its_file_with_or_without_the_extension() {
+        let d = dir("same");
+        let file = d.join("Song.scraft");
+        std::fs::write(&file, "{}").unwrap();
+        let via = d.join("sub").join("..").join("Song.scraft");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        assert!(same_session(&path(&file), &path(&file)));
+        assert!(same_session(&path(&d.join("Song")), &path(&file)), "saved as `Song`, written to Song.scraft");
+        assert!(same_session(&path(&file), &path(&via)), "the same file by another path");
+        assert!(!same_session(&path(&d.join("Other.scraft")), &path(&file)));
+        assert!(!same_session(&path(&d.join("Song")), &path(&d.join("Song.scraft.bak"))));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn opening_the_open_session_again_keeps_it_as_it_is() {
+        let d = dir("again");
+        let mut app = app();
+        let file = d.join("Song.scraft");
+        app.run("session.save_as", json!({"path": path(&d.join("Song"))})).unwrap();
+        app.run("track.new", json!({"name": "Unsaved"})).unwrap();
+        let undo = app.engine.undo_label().map(str::to_string);
+        Opener::default().open(&mut app, vec![path(&file)]);
+        assert!(app.engine.session().track_by_name("Unsaved").is_some(), "not reloaded");
+        assert_eq!((app.engine.undo_label().map(str::to_string), app.engine.is_dirty()), (undo, true));
+        assert!(app.dialogs.open.is_none(), "nothing to save first");
+        assert_eq!(app.ui.status, format!("{} is already open.", app.engine.session().name));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_batch_opens_one_session_and_waits_for_its_save_question() {
+        let d = dir("batch");
+        let (a, b, c) = (d.join("A.scraft"), d.join("B.scraft"), d.join("Lead.mid"));
+        // Two sessions on disk, and a MIDI file.
+        let mut maker = app();
+        maker.run("file.export_midi", json!({"path": path(&c), "tracks": ["Lead"]})).unwrap();
+        maker.run("session.save_as", json!({"path": path(&a)})).unwrap();
+        maker.run("session.save_as", json!({"path": path(&b)})).unwrap();
+        let mut app = app();
+        app.run("track.new", json!({"name": "Unsaved"})).unwrap();
+        let tracks = app.engine.session().tracks.len();
+        let mut opener = Opener::default();
+        opener.open(&mut app, vec![path(&c), path(&a), path(&b)]);
+        // A asks to save the modified session first; the MIDI file waits, so it neither replaces
+        // that question nor lands in the session being replaced.
+        assert!(matches!(&app.dialogs.open, Some(soundcraft_ui_egui::dialogs::Dialog::SaveChanges { then }) if then.1["path"] == path(&a)));
+        assert_eq!(app.ui.status, "One session opens at a time: B.scraft did not open.");
+        assert_eq!(app.engine.session().tracks.len(), tracks, "the MIDI file waits");
+        opener.drain(&mut app);
+        assert_eq!(app.engine.session().tracks.len(), tracks, "still waiting");
+        // Don't Save: A opens, then the MIDI file imports into it.
+        app.dialogs.open = None;
+        app.run("session.open", json!({"path": path(&a)})).unwrap();
+        opener.drain(&mut app);
+        assert_eq!(app.engine.path.as_deref(), Some(path(&a).as_str()));
+        assert!(app.engine.session().track_by_name("Unsaved").is_none());
+        assert!(app.ui.status.starts_with("Imported Lead.mid to "), "{}", app.ui.status);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_import_says_where_the_file_went() {
+        let d = dir("import");
+        let wav = d.join("Mix.wav");
+        let mut app = app();
+        app.run("file.bounce_mix", json!({"path": path(&wav), "start": 0, "end": 4800})).unwrap();
+        app.run("edit.select", json!({"start": 96_000, "end": 96_000})).unwrap();
+        let at = app.engine.session().format_position(96_000, app.engine.session().edit.main_counter);
+        Opener::default().open(&mut app, vec![path(&wav)]);
+        // A new track, named after the file.
+        assert!(app.engine.session().track_by_name("Mix").is_some_and(|t| t.clips().first().is_some_and(|c| c.start == 96_000)));
+        assert_eq!(app.ui.status, format!("Imported Mix.wav to Mix at {at}."));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

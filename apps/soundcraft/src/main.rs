@@ -18,12 +18,13 @@ mod graphics;
 mod logging;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod open;
 
 use soundcraft_engine::Engine;
 use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
 use std::sync::Arc;
 
-struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+struct App(SoundApp, Option<&'static logging::AppLogger>, open::Opener, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
 
 /// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
 fn set_title(ctx: &egui::Context, title: String) {
@@ -41,26 +42,27 @@ impl eframe::App for App {
             logger.report_audio_thread();
         }
         #[cfg(target_os = "macos")]
-        if let Some(menu) = &mut self.2 {
+        if let Some(menu) = &mut self.3 {
             menu.process(&mut self.0);
         }
         self.0.guarded(|app| app.logic(ctx));
         #[cfg(target_os = "macos")]
-        if let Some(menu) = &mut self.2 {
+        if let Some(menu) = &mut self.3 {
             menu.sync(&self.0);
         }
         // Files dropped on the window: audio on an instrument track or a Sampler window loads
-        // the sampler; otherwise sessions open and audio/MIDI import.
+        // the sampler; otherwise sessions open and audio/MIDI import (see `open`).
         let dropped: Vec<String> =
             self.0.take_dropped_files(ctx).iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect();
-        for p in dropped {
-            open_path(&mut self.0, &p);
-        }
         // Files the system opens with SoundCraft (macOS: Finder, the Dock, `open -a`), including
         // the one that launched it. They have no drop position, so they open like files dropped
-        // away from a Sampler: sessions open (asking to save first), audio and MIDI import.
-        for p in soundcraft_macos_open::take_paths() {
-            open_path(&mut self.0, &p.to_string_lossy());
+        // away from a Sampler.
+        let opened: Vec<String> = soundcraft_macos_open::take_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        self.2.drain(&mut self.0);
+        for batch in [dropped, opened] {
+            if !batch.is_empty() {
+                self.2.open(&mut self.0, batch);
+            }
         }
         if self.0.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -108,21 +110,6 @@ impl eframe::App for App {
         // returns: release the player's plugin instances and shut plugin hosting down here.
         self.0.player = None;
         soundcraft_engine::shutdown_plugin_hosts();
-    }
-}
-
-fn open_path(app: &mut SoundApp, p: &str) {
-    let lower = p.to_ascii_lowercase();
-    let r = if lower.ends_with(".scraft") {
-        dialogs::run_or_ask(app, "session.open", serde_json::json!({"path": p}))
-    } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
-        app.run("file.import_midi", serde_json::json!({"path": p}))
-    } else {
-        let at = app.engine.session().edit.selection.start;
-        app.run("file.import_audio", serde_json::json!({"path": p, "at": at}))
-    };
-    if let Err(e) = r {
-        log::warn!("{p}: {e}");
     }
 }
 
@@ -287,9 +274,8 @@ fn main() -> eframe::Result {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
             }
-            for f in &files {
-                open_path(&mut app, f);
-            }
+            let mut opener = open::Opener::default();
+            opener.open(&mut app, files);
             let ctx = cc.egui_ctx.clone();
             soundcraft_macos_open::set_waker(move || ctx.request_repaint());
             // If the system menu bar cannot be built, keep the egui menu bar rather than fail to start.
@@ -307,6 +293,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(App(
                 app,
                 logger,
+                opener,
                 #[cfg(target_os = "macos")]
                 menu,
             )))
