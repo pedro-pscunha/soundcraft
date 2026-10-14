@@ -295,17 +295,36 @@ impl Engine {
         }
     }
 
-    /// Whether command `id` must wait for the take being recorded: nothing may replace the
-    /// session or quit under it.
-    pub fn blocked_while_recording(&self, id: &str) -> bool {
-        self.transport.recording && matches!(id, "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit")
+    /// Whether command `id`, with `params`, must wait for the take being recorded: nothing may
+    /// replace the session or quit under it, and nothing may move or restart the transport (a
+    /// take is placed from where recording started). Stopping, and Play while playing, go on.
+    pub fn blocked_while_recording(&self, id: &str, params: &Value) -> bool {
+        self.transport.recording
+            && match id {
+                "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit" => true,
+                "transport.locate"
+                | "transport.rtz"
+                | "transport.go_to_end"
+                | "transport.rewind"
+                | "transport.fast_forward"
+                | "transport.play_selection"
+                | "transport.half_speed"
+                | "edit.play_timeline"
+                | "markers.recall"
+                | "markers.next"
+                | "markers.previous" => true,
+                "transport.play" => params.get("from").is_some(),
+                // Tab moves the insertion and the transport with it; with `extend` it only extends the selection.
+                "edit.tab" => !cmd::bool_or(params, "extend", false),
+                _ => false,
+            }
     }
 
     /// Run a command by id. Never panics: escaped panics become `EngineError::Internal` and the
     /// document is restored.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
-        if self.blocked_while_recording(id) {
+        if self.blocked_while_recording(id, params) {
             return Err(EngineError::Disabled(id.to_string(), "stop recording first".into()));
         }
         if let Err(reason) = (spec.enabled)(self) {

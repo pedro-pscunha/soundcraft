@@ -7,7 +7,8 @@ use soundcraft_time::Range;
 fn replacing_session_resets_status_and_discards_old_transport_requests() {
     let mut engine = Engine::default();
     engine.transport = TransportStatus { playing: true, recording: true, position: 48_000 };
-    engine.execute("transport.play", &json!({"from": 96_000})).unwrap();
+    // Requests a recording transport still takes (a jump would be refused: it waits for the take).
+    engine.execute("transport.play", &json!({})).unwrap();
     engine.execute("transport.record", &json!({})).unwrap();
     let mut session = Session::default();
     session.edit.selection = Range::point(12_000);
