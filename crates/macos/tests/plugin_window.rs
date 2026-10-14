@@ -27,9 +27,10 @@ mod macos {
     use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
     use std::cell::{Cell, RefCell};
 
-    /// Space, W and left Shift (virtual key codes).
+    /// Space, W, Tab and left Shift (virtual key codes).
     const SPACE: u16 = 49;
     const W: u16 = 13;
+    const TAB: u16 = 48;
     const SHIFT: u16 = 56;
 
     thread_local! {
@@ -132,6 +133,28 @@ mod macos {
     );
 
     define_class!(
+        // SAFETY: an NSView subclass without Drop that overrides responder methods with their
+        // declared signatures.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SoundCraftTestThrowingControl"]
+        /// A plugin control whose own code throws as it takes the focus.
+        struct ThrowingControl;
+
+        impl ThrowingControl {
+            #[unsafe(method(acceptsFirstResponder))]
+            fn accepts_first_responder(&self) -> bool {
+                true
+            }
+            #[unsafe(method(becomeFirstResponder))]
+            fn become_first_responder(&self) -> bool {
+                throws_now();
+                true
+            }
+        }
+    );
+
+    define_class!(
         // SAFETY: an NSObject subclass without Drop that implements `windowShouldClose:` with its
         // declared signature.
         #[unsafe(super(NSObject))]
@@ -205,6 +228,7 @@ mod macos {
         let chars = NSString::from_str(match code {
             SPACE => " ",
             W => "w",
+            TAB => "\t",
             _ => "",
         });
         NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
@@ -333,8 +357,45 @@ mod macos {
             type_key(win, NSEventType::KeyUp, SPACE, none);
             assert_eq!(seen(), [("plugin", "down", SPACE), ("plugin", "up", SPACE)]);
 
-            // No view has the focus: the window itself is first responder, and hands keys on.
+            // Tab that a focused plugin control passes up moves the focus to the plugin's next
+            // control (AppKit's key-view loop), ⇧Tab back; it is not handed on.
             taking.removeFromSuperview();
+            content.addSubview(&passing);
+            let next = plugin_view(mtm, false);
+            content.addSubview(&next);
+            // SAFETY: plain key-view links between two views of the same window, both alive here.
+            unsafe {
+                passing.setNextKeyView(Some(&next));
+                next.setNextKeyView(Some(&passing));
+            }
+            assert!(win.makeFirstResponder(Some(&passing)));
+            type_key(win, NSEventType::KeyDown, TAB, none);
+            assert_eq!(seen(), []);
+            assert!(
+                win.firstResponder().is_some_and(|r| std::ptr::addr_eq(Retained::as_ptr(&r), Retained::as_ptr(&next))),
+                "the next control has the focus"
+            );
+            type_key(win, NSEventType::KeyDown, TAB, NSEventModifierFlags::Shift);
+            assert_eq!(seen(), []);
+            assert!(win.firstResponder().is_some_and(|r| std::ptr::addr_eq(Retained::as_ptr(&r), Retained::as_ptr(&passing))), "⇧Tab: back");
+            // A control whose own code throws as it takes the focus: caught, not left to abort.
+            // SAFETY: NSView's designated initializer on a fresh instance.
+            let thrower: Retained<ThrowingControl> = unsafe { msg_send![super(ThrowingControl::alloc(mtm).set_ivars(())), initWithFrame: rect] };
+            content.addSubview(&thrower);
+            // SAFETY: as above.
+            unsafe { passing.setNextKeyView(Some(&thrower)) };
+            type_key(win, NSEventType::KeyDown, TAB, none);
+            assert_eq!(seen(), []);
+            thrower.removeFromSuperview();
+            passing.removeFromSuperview();
+            next.removeFromSuperview();
+
+            // No view has the focus: the window itself is first responder, and hands keys on (Tab
+            // too: SoundCraft's own Tab).
+            assert!(win.makeFirstResponder(None));
+            type_key(win, NSEventType::KeyDown, TAB, none);
+            type_key(win, NSEventType::KeyUp, TAB, none);
+            assert_eq!(seen(), [("soundcraft", "down", TAB), ("soundcraft", "up", TAB)]);
             assert!(win.makeFirstResponder(None));
             type_key(win, NSEventType::KeyDown, SPACE, none);
             assert_eq!(seen(), [("soundcraft", "down", SPACE)]);

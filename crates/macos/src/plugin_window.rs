@@ -38,6 +38,9 @@
 //! - ⌘W (no other modifier) that the plugin does not take closes the editor's own window
 //!   (`performClose:`, as its close button does; the editor is taken down at the next idle).
 //!   Handed on, it would close SoundCraft's window. ⌘W with another modifier is handed on.
+//! - Tab and ⇧Tab (⌃ held or not) that a focused plugin control passed up move the focus to the
+//!   plugin's next (previous) control, AppKit's key-view loop, as in any window. With no control
+//!   focused (the window itself is first responder) they are handed on like any key.
 //!
 //! The window stays key after it opens (`makeKeyAndOrderFront`), so a plugin's text field can be
 //! typed in at once.

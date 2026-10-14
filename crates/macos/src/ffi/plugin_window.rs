@@ -50,6 +50,20 @@ define_class!(
                 guarded("closing it with ⌘W", || self.performClose(None));
                 return;
             }
+            // Tab and ⇧Tab that a focused plugin control passed up move the focus to the plugin's
+            // next (previous) control: AppKit's key-view loop. With no control focused (the window
+            // itself is first responder) they are handed on like any key.
+            if is_tab(event) && self.firstResponder().is_some_and(|r| !std::ptr::addr_eq(Retained::as_ptr(&r), std::ptr::from_ref(self))) {
+                // The controls' own code runs as the focus moves.
+                guarded("moving the focus with Tab", || {
+                    if event.modifierFlags().contains(NSEventModifierFlags::Shift) {
+                        self.selectPreviousKeyView(None);
+                    } else {
+                        self.selectNextKeyView(None);
+                    }
+                });
+                return;
+            }
             // While SoundCraft has a text field focused, a key handed on would type into it unseen.
             if APP_WANTS_KEYBOARD.load(Ordering::Relaxed) || !forward(self.mtm(), event, Key::Down) {
                 // SAFETY: NSWindow's own `keyDown:`, with the event AppKit passed in.
@@ -141,6 +155,12 @@ fn is_close_window(event: &NSEvent) -> bool {
     let held = NSEventModifierFlags::Shift | NSEventModifierFlags::Control | NSEventModifierFlags::Option | NSEventModifierFlags::Command;
     event.modifierFlags() & held == NSEventModifierFlags::Command
         && event.charactersIgnoringModifiers().is_some_and(|c| c.to_string().eq_ignore_ascii_case("w"))
+}
+
+/// The Tab key (`kVK_Tab`, the same on every layout), ⇧ or ⌃ held or not; ⌘Tab is the system's.
+fn is_tab(event: &NSEvent) -> bool {
+    const TAB: u16 = 48;
+    event.keyCode() == TAB && !event.modifierFlags().intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Option)
 }
 
 /// A synthetic key event (`None` if AppKit makes none).
