@@ -292,7 +292,9 @@ pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descri
 /// The plugins of the search folders, scanned once (`fresh`: again, without the scan cache's
 /// answers, for a rescan). The scan runs without the registry lock, so the registry answers other
 /// calls meanwhile (helpers may take their time limit); callers that need the list wait for it.
-fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
+///
+/// Returns the plugins with the bundles skipped, read together, so they describe the same scan.
+fn ensure_scanned(fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
     let mut r = lock();
     if fresh {
         r.generation = r.generation.wrapping_add(1);
@@ -304,7 +306,7 @@ fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
     }
     loop {
         if let Some(list) = &r.scanned {
-            return list.clone();
+            return (list.clone(), all_skipped(&r));
         }
         if !r.scanning {
             break;
@@ -330,21 +332,33 @@ fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
     let _scanning = Scanning;
     let (found, new) = scan_unlocked(&dirs, helper.as_ref(), &known, fresh);
     let mut r = lock();
-    // A rescan that began meanwhile wins: it scans again once this one has ended.
-    if r.generation == generation {
-        r.scanned = Some(found.clone());
-        let (not_scanned, skipped): (Vec<_>, Vec<_>) = new.into_iter().partition(|s| s.helper_failed);
-        // Added to what is there: other scans (a folder added meanwhile) may have skipped bundles
-        // too.
-        add_skips(&mut r.skipped, skipped);
-        // This scan covered every folder: only its own bundles stay not scanned.
-        r.not_scanned = not_scanned;
+    // A rescan that began meanwhile wins: it scans again once this one has ended. This scan's
+    // own result goes back to its caller.
+    if r.generation != generation {
+        let mut own = known;
+        add_skips(&mut own, new);
+        return (found, own);
     }
-    found
+    r.scanned = Some(found.clone());
+    let (not_scanned, skipped): (Vec<_>, Vec<_>) = new.into_iter().partition(|s| s.helper_failed);
+    // Added to what is there: other scans (a folder added meanwhile) may have skipped bundles too.
+    add_skips(&mut r.skipped, skipped);
+    // This scan covered every folder: only its own bundles stay not scanned.
+    r.not_scanned = not_scanned;
+    (found, all_skipped(&r))
+}
+
+/// The bundles skipped, then those not scanned (see `skipped`).
+fn all_skipped(r: &Registry) -> Vec<SkippedBundle> {
+    r.skipped.iter().chain(&r.not_scanned).cloned().collect()
 }
 
 pub fn scan() -> Vec<Vst3Descriptor> {
-    ensure_scanned(false)
+    ensure_scanned(false).0
+}
+
+pub fn scan_with_skipped(rescan: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+    ensure_scanned(rescan)
 }
 
 pub fn cached() -> Option<Vec<Vst3Descriptor>> {
@@ -352,7 +366,7 @@ pub fn cached() -> Option<Vec<Vst3Descriptor>> {
 }
 
 pub fn rescan() -> Vec<Vst3Descriptor> {
-    ensure_scanned(true)
+    ensure_scanned(true).0
 }
 
 /// Adds `dir` to the search folders and returns how many plugins it holds. Its plugins join the
@@ -391,8 +405,7 @@ pub fn set_scan_helper(helper: Option<ScanHelper>) {
 }
 
 pub fn skipped() -> Vec<SkippedBundle> {
-    let r = lock();
-    r.skipped.iter().chain(&r.not_scanned).cloned().collect()
+    all_skipped(&lock())
 }
 
 fn leak(s: String) -> &'static str {
@@ -484,7 +497,7 @@ fn instantiate_raw(id: &str) -> Result<(Instance, &'static PluginInfo), Vst3Erro
     if lock().failed.contains(id) {
         return Err(Vst3Error::Instantiate(id.to_string(), "failed before".into()));
     }
-    let desc = ensure_scanned(false).into_iter().find(|d| d.id == id).ok_or_else(|| Vst3Error::NotFound(id.to_string()))?;
+    let desc = ensure_scanned(false).0.into_iter().find(|d| d.id == id).ok_or_else(|| Vst3Error::NotFound(id.to_string()))?;
     let made = Bundle::load(&desc.path).and_then(|b| b.instantiate(&cid));
     let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
     match made {

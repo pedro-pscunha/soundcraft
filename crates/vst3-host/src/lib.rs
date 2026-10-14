@@ -264,6 +264,9 @@ mod api {
     pub fn skipped() -> Vec<SkippedBundle> {
         registry::skipped()
     }
+    pub fn scan_with_skipped(rescan: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+        registry::scan_with_skipped(rescan)
+    }
     pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
         registry::scan_paths_with(dirs, helper)
     }
@@ -304,6 +307,9 @@ mod api {
     pub fn set_scan_helper(_helper: Option<ScanHelper>) {}
     pub fn skipped() -> Vec<SkippedBundle> {
         Vec::new()
+    }
+    pub fn scan_with_skipped(_rescan: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+        (Vec::new(), Vec::new())
     }
     pub fn scan_paths_with(_dirs: &[PathBuf], _helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
         (Vec::new(), Vec::new())
@@ -400,6 +406,12 @@ pub fn set_scan_helper(helper: Option<ScanHelper>) {
 /// scans skip them without starting a helper.
 pub fn skipped() -> Vec<SkippedBundle> {
     api::skipped()
+}
+
+/// [`scan()`] (or [`rescan`] when `rescan`), with the bundles that scan skipped, read together: a
+/// rescan begun on another thread cannot pair one scan's plugins with another's skips.
+pub fn scan_with_skipped(rescan: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+    api::scan_with_skipped(rescan)
 }
 
 /// Scans `dirs` in helper processes, whatever [`set_scan_helper`] says, without touching the cache

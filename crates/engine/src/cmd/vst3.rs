@@ -15,12 +15,9 @@ pub fn specs() -> Vec<CommandSpec> {
         "{rescan?: bool} → {plugins: [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}], skipped: [{path, reason, from_cache}]}. The apps scan in helper processes and cache the result per bundle; skipped lists the bundles that hung, crashed or failed (from_cache: by an earlier scan, not tried again). rescan retries every bundle, the skipped ones too, and rewrites the cache",
         always,
         |_, p| {
-            let list = if p.get("rescan").and_then(Value::as_bool).unwrap_or(false) {
-                soundcraft_vst3_host::rescan()
-            } else {
-                soundcraft_vst3_host::scan()
-            };
-            Ok(json!({"plugins": list, "skipped": soundcraft_vst3_host::skipped()}))
+            let rescan = p.get("rescan").and_then(Value::as_bool).unwrap_or(false);
+            let (plugins, skipped) = soundcraft_vst3_host::scan_with_skipped(rescan);
+            Ok(json!({"plugins": plugins, "skipped": skipped}))
         }
     )]
 }
