@@ -792,13 +792,23 @@ fn a_timeout_kills_what_the_helper_started(dir: &Path) {
 #[cfg(unix)]
 fn a_process_the_plugin_leaves_running_does_not_hold_the_answer(dir: &Path) {
     let (bundle, mode) = install(dir, "LeavesChild", Some("child-entry"));
+    let (plain, _) = install(dir, "Plain", None);
     let generous = ScanHelper { timeout: Duration::from_secs(10), ..helper() };
-    let started = Instant::now();
-    let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &generous);
-    let took = started.elapsed();
+    let scan = |bundle: &Path| {
+        let started = Instant::now();
+        let (found, skipped) = soundcraft_vst3_host::scan_paths_with(&[bundle.to_path_buf()], &generous);
+        (started.elapsed(), found.len() == 2 && skipped.is_empty())
+    };
+    // What a scan takes here, now (a debug helper, a loaded machine): the answer held open would
+    // add the helper's exit grace (2 s) to it.
+    let (baseline, plain_loaded) = scan(&plain);
+    let (took, loaded) = scan(&bundle);
     processes::end(pid_in(&mode.unwrap().with_file_name("child-pid")));
-    assert!(skipped.is_empty() && found.len() == 2, "{skipped:?}");
-    assert!(took < Duration::from_millis(1500), "{took:?}: the answer was held open by the plugin's process");
+    assert!(plain_loaded && loaded, "a fixture bundle did not load");
+    assert!(
+        took < baseline + Duration::from_secs(1),
+        "{took:?} ({baseline:?} without the process): the answer was held open by the plugin's process"
+    );
 }
 
 /// What the plugin starts and leaves running in its helper's process group ends with a scan that
