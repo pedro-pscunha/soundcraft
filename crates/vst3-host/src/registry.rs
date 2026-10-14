@@ -76,6 +76,12 @@ fn remember_skips(new: Vec<SkippedBundle>) {
     add_skips(&mut r.not_scanned, not_scanned);
 }
 
+/// The revision of how a bundle is scanned: bump it when `Bundle::load` or the way descriptors are
+/// derived from a factory ([`load_bundle`]) changes. Scan caches written by another revision (or
+/// another SoundCraft version, or helper protocol) start cold, so an update's scanning fixes reach
+/// bundles scanned before it.
+pub(crate) const SCANNER_REVISION: u32 = 1;
+
 /// Descriptors of every audio module class in one `.vst3`.
 pub fn load_bundle(path: &Path) -> Result<Vec<Vst3Descriptor>, Vst3Error> {
     let b = Bundle::load(path)?;

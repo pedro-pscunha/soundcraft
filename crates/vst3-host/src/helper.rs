@@ -48,7 +48,7 @@ const HELLO: &str = "soundcraft-vst3-scan-protocol: ";
 /// The version of this protocol. A helper that does not greet with it (an older or newer
 /// SoundCraft, or a program that is no scan helper at all) is SoundCraft's failure, not the
 /// bundle's.
-const PROTOCOL: &str = "1";
+pub(crate) const PROTOCOL: &str = "1";
 /// Most of a helper's standard output read for the answer (the rest is drained unread).
 const MAX_STDOUT: u64 = 8 << 20;
 /// How much of the end of a helper's standard error is kept.

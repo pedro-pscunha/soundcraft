@@ -4,9 +4,12 @@
 //! bundle skipped once (a PACE plugin that never answers) then costs nothing until it changes or
 //! an explicit rescan.
 //!
-//! The file is JSON (`{"version":1,"bundles":[…]}`), written whole to a temporary file next to it
-//! and renamed over it. A missing, unreadable, corrupt or other-version file is logged and treated
-//! as empty (then replaced): the cache never fails a scan.
+//! The file is JSON (`{"version":1,"scanner":"…","bundles":[…]}`), written whole to a temporary
+//! file next to it and renamed over it. `scanner` names the code that made the outcomes
+//! ([`scanner`]: SoundCraft's version, the helper protocol and the scanner revision): a file
+//! written by other code starts cold, so an update's scanning fixes reach every bundle. A missing,
+//! unreadable, corrupt, other-version or other-scanner file is logged and treated as empty (then
+//! replaced): the cache never fails a scan.
 
 use crate::Vst3Descriptor;
 use crate::scan as paths;
@@ -47,7 +50,15 @@ struct Entry {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CacheFile {
     version: u32,
+    /// The code that made the outcomes (see [`scanner`]).
+    #[serde(default)]
+    scanner: String,
     bundles: Vec<Entry>,
+}
+
+/// The code that makes scan outcomes: `<SoundCraft version>/<helper protocol>/<scanner revision>`.
+pub(crate) fn scanner() -> String {
+    format!("{}/{}/{}", env!("CARGO_PKG_VERSION"), crate::helper::PROTOCOL, crate::registry::SCANNER_REVISION)
 }
 
 /// The fingerprint of `bundle` now, `None` when its binary cannot be found or read.
@@ -123,7 +134,7 @@ impl ScanCache {
             .filter(|(path, _)| path.to_str().is_some())
             .map(|(path, (fingerprint, outcome))| Entry { path: path.clone(), fingerprint: *fingerprint, outcome: outcome.clone() })
             .collect();
-        let bytes = serde_json::to_vec(&CacheFile { version: VERSION, bundles }).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(&CacheFile { version: VERSION, scanner: scanner(), bundles }).map_err(|e| e.to_string())?;
         if let Some(dir) = self.file.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
@@ -158,6 +169,9 @@ fn read(file: &Path) -> Result<Option<BTreeMap<PathBuf, (Fingerprint, Outcome)>>
     let parsed: CacheFile = serde_json::from_slice(&bytes).map_err(|e| format!("unreadable: {e}"))?;
     if parsed.version != VERSION {
         return Err(format!("format version {} (this build reads {VERSION})", parsed.version));
+    }
+    if parsed.scanner != scanner() {
+        return Err(format!("written by scanner {:?} (this build is {:?})", parsed.scanner, scanner()));
     }
     Ok(Some(
         parsed
@@ -229,7 +243,7 @@ mod tests {
         let d = dir("filed");
         let (file, a) = (d.join("vst3.json"), d.join("A.vst3"));
         let elsewhere = plugin(Path::new("/elsewhere/Evil.vst3"));
-        let json = serde_json::json!({"version": VERSION, "bundles": [{"path": a, "fingerprint": PRINT, "outcome": {"plugins": [elsewhere]}}]});
+        let json = serde_json::json!({"version": VERSION, "scanner": scanner(), "bundles": [{"path": a, "fingerprint": PRINT, "outcome": {"plugins": [elsewhere]}}]});
         std::fs::write(&file, json.to_string()).unwrap();
         assert_eq!(ScanCache::load(&file).lookup(&a, PRINT), Some(&Outcome::Plugins(vec![plugin(&a)])));
         let _ = std::fs::remove_dir_all(&d);
@@ -240,7 +254,7 @@ mod tests {
         let d = dir("malformed");
         let (file, a, b) = (d.join("vst3.json"), d.join("A.vst3"), d.join("B.vst3"));
         let other_host = Vst3Descriptor { id: "clap:com.x".into(), ..plugin(&a) };
-        let json = serde_json::json!({"version": VERSION, "bundles": [
+        let json = serde_json::json!({"version": VERSION, "scanner": scanner(), "bundles": [
             {"path": a, "fingerprint": PRINT, "outcome": {"plugins": [other_host, plugin(&a)]}},
             {"path": b, "fingerprint": PRINT, "outcome": {"skipped": format!("x\n{}", "y".repeat(5000))}},
         ]});
@@ -253,10 +267,29 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_made_by_other_scanning_code_starts_cold() {
+        let d = dir("scanner");
+        let (file, a) = (d.join("vst3.json"), d.join("A.vst3"));
+        let mut c = ScanCache::load(&file);
+        c.record(&a, PRINT, Outcome::Plugins(vec![plugin(&a)]));
+        c.save();
+        assert!(ScanCache::load(&file).lookup(&a, PRINT).is_some(), "the same scanner reads it");
+        for other in [format!("0.0.0/{}/{}", crate::helper::PROTOCOL, crate::registry::SCANNER_REVISION), String::new()] {
+            let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            saved["scanner"] = other.clone().into();
+            std::fs::write(&file, saved.to_string()).unwrap();
+            let c = ScanCache::load(&file);
+            assert!(c.lookup(&a, PRINT).is_none() && c.changed, "scanner {other:?}: cold, and replaced");
+            c.save();
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn other_versions_and_garbage_start_empty_and_are_replaced() {
         let d = dir("versions");
         let file = d.join("vst3.json");
-        for bad in [serde_json::json!({"version": VERSION + 1, "bundles": []}).to_string(), "{not json".into(), String::new()] {
+        for bad in [serde_json::json!({"version": VERSION + 1, "scanner": scanner(), "bundles": []}).to_string(), "{not json".into(), String::new()] {
             std::fs::write(&file, &bad).unwrap();
             let c = ScanCache::load(&file);
             assert!(c.entries.is_empty() && c.changed, "{bad:?}");
