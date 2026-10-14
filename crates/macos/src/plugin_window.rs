@@ -53,7 +53,11 @@
 //!   field's undo is the window's (`undo:` is NSWindow's), so ⌘Z after typing in a plugin's field
 //!   undoes that typing. With no control focused (the window itself is first responder), or when
 //!   no responder implements the action or it is disabled (nothing selected to copy, nothing to
-//!   undo), the key goes on to `keyDown:` and is handed on as before: ⌘Z is SoundCraft's undo.
+//!   undo), the key goes on to the first responder's `keyDown:`. When that passes it up to the
+//!   window (no control focused, or a control that does not use the key), it is handed on as
+//!   before: ⌘Z is SoundCraft's undo. A text view keeps it instead and beeps, as in any app: with
+//!   a plugin's text field focused, ⌘Z with nothing left to undo or ⌘C with nothing selected
+//!   beeps, and SoundCraft does nothing.
 //! - The other ⌘-keys in a plugin's text field: a plain Cocoa text field edits in a field editor
 //!   (an `NSText` whose `isFieldEditor` is true), which keeps a ⌘-key it has no use for in its
 //!   `keyDown:` and beeps, so the key never reaches the window. While a field editor is first
@@ -90,11 +94,13 @@
 //!    goes to the plugin, and Space types a space instead of starting playback. In a plain Cocoa
 //!    field (an Audio Unit with Apple's generic view): ⌘A selects all of it, ⌘C then ⌘V pastes a
 //!    copy, ⌘Z undoes the paste and ⇧⌘Z redoes it, ⌘X cuts, and the text pasted into another app
-//!    is the one copied. SoundCraft copies, pastes and undoes nothing meanwhile. With the field
-//!    still focused, press ⌘S on a modified session: it saves, without a beep, and the field keeps
-//!    its text; ⌘→ moves to the end of the field; if SoundCraft's Edit menu lists Emoji & Symbols,
-//!    ⌃⌘Space opens the Character Viewer; ⌘W closes the editor. Close the editor, open it again
-//!    and, before clicking in it (no field focused), press ⌘Z: SoundCraft undoes its last edit.
+//!    is the one copied. SoundCraft copies, pastes and undoes nothing meanwhile. With nothing
+//!    selected in the field, ⌘C beeps; once the field's edits are all undone, ⌘Z beeps: SoundCraft
+//!    copies and undoes nothing then either. With the field still focused, press ⌘S on a modified
+//!    session: it saves, without a beep, and the field keeps its text; ⌘→ moves to the end of the
+//!    field; if SoundCraft's Edit menu lists Emoji & Symbols, ⌃⌘Space opens the Character Viewer;
+//!    ⌘W closes the editor. Close the editor, open it again and, before clicking in it (no field
+//!    focused), press ⌘Z: SoundCraft undoes its last edit.
 //! 4. With the editor key and no field of the plugin focused, press ⇧Space: playback starts at
 //!    half speed (a shortcut that needs its modifier). Hold ⌥ or ⇧ and click in the Edit window:
 //!    SoundCraft sees the modifier as with its own window key. Hold ⇧ in the editor, ⌘Tab to

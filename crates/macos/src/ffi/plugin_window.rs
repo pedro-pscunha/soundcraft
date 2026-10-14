@@ -240,9 +240,10 @@ impl HostWindow {
     /// sends them (SoundCraft's menu bar has none of them: its shortcuts are egui's): the action
     /// goes to the first of the focused control and the responders after it, up to this window,
     /// that implements it, if it is enabled there. True when it was sent. False (the key goes on
-    /// to `keyDown:`, and so to SoundCraft, as before) for a key aimed at another window, with no
-    /// control focused (the window itself first responder), or when no responder implements the
-    /// action or it is disabled (nothing selected to copy, nothing to undo).
+    /// to the first responder's `keyDown:`: to SoundCraft as before when it reaches this window, a
+    /// beep when a text view keeps it) for a key aimed at another window, with no control focused
+    /// (the window itself first responder), or when no responder implements the action or it is
+    /// disabled (nothing selected to copy, nothing to undo).
     fn perform_edit(&self, event: &NSEvent) -> bool {
         let Some(action) = edit_action(event) else { return false };
         if event.windowNumber() != self.windowNumber() {

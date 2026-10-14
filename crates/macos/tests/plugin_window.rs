@@ -849,6 +849,12 @@ mod macos {
             assert_eq!(text.string().to_string(), "hello", "⌘X cuts");
             assert_eq!(clipboard_text().as_deref(), Some("hello"));
             assert_eq!(seen(), [], "none of them reached SoundCraft");
+            // An Edit key whose action is disabled (⌘C with nothing selected) goes on to the field
+            // editor's `keyDown:`, which keeps it (a beep): it is not handed on.
+            text.setSelectedRange(NSRange::new(5, 0));
+            press(win, C, cmd);
+            assert_eq!(seen(), [], "⌘C with nothing selected stays with the field editor");
+            assert_eq!(clipboard_text().as_deref(), Some("hello"), "and copies nothing");
 
             // Other ⌘-keys on character keys: a field editor keeps them and beeps, so they are
             // handed on before they reach it (⌘S saves), and the text is untouched.
