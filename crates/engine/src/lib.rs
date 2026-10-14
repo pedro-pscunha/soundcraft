@@ -59,7 +59,8 @@ pub enum TransportRequest {
     /// Stop the old session's transport without applying stop-time edits to the new document.
     ResetSession,
     Play,
-    /// Play from this position (stopped), or jump there (playing): `transport.play {from}`.
+    /// Play from this position on, neither stopping nor looping; while playing, playback restarts
+    /// there without the end or loop of what was playing: `transport.play {from}`.
     PlayFrom(Samples),
     /// Play this range as Play plays the edit selection (looped with Loop Playback, else stopping at
     /// its end, with pre- and post-roll; an empty range plays on): `edit.play_timeline`.

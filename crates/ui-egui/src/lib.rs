@@ -1055,13 +1055,8 @@ impl SoundApp {
                         self.play_from_selection();
                     }
                 }
-                TransportRequest::PlayFrom(at) => {
-                    if self.is_playing() {
-                        self.locate(at);
-                    } else {
-                        self.start_play(at, None, None);
-                    }
-                }
+                // A start, also while playing: the end or loop of what was playing does not carry over.
+                TransportRequest::PlayFrom(at) => self.start_play(at, None, None),
                 // Play Timeline plays the timeline selection as Play plays the edit selection.
                 TransportRequest::PlayRange(r) => self.play_range(r),
                 TransportRequest::Stop | TransportRequest::Pause => self.stop_play(),
@@ -1361,6 +1356,25 @@ mod tests {
         app.run("transport.play", json!({"from": from + 480_000})).unwrap();
         app.handle_transport(0.25);
         assert!((from + 480_000..from + 504_000).contains(&app.position()), "jumped to {}", app.position());
+    }
+
+    /// `transport.play {from}` while a selection plays (to its end, or looped) plays on from
+    /// `from` with neither that end nor that loop.
+    #[test]
+    fn play_from_while_playing_drops_the_selections_end_and_loop() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.run("edit.select", json!({"start": 48_000, "end": 96_000})).unwrap();
+        for looped in [false, true] {
+            app.run("options.loop_playback", json!({"value": looped})).unwrap();
+            app.run("transport.play", json!({})).unwrap();
+            app.handle_transport(0.0);
+            assert!(app.sim.is_some_and(|(_, end, lp)| end.is_some() != lp.is_some()), "loop {looped}: {:?}", app.sim);
+            app.run("transport.play", json!({"from": 480_000})).unwrap();
+            app.handle_transport(0.0);
+            assert_eq!(app.sim, Some((480_000, None, None)), "loop {looped}");
+            app.run("transport.stop", json!({})).unwrap();
+            app.handle_transport(0.0);
+        }
     }
 
     /// Play Timeline plays the timeline selection even when it is unlinked from the edit selection.
