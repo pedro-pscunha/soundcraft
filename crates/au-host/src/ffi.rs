@@ -1455,7 +1455,8 @@ impl Drop for Instance {
 /// the unit's own Cocoa view (the factory class its `kAudioUnitProperty_CocoaUI` names,
 /// conforming to `AUCocoaUIBase`), or Apple's `AUGenericView` when it publishes none or it fails
 /// to load. Every function takes a `MainThreadMarker`: AppKit objects are only touched on the main
-/// thread.
+/// thread. Calls that run a plugin's own Objective-C code (its view bundle, factory and view) are
+/// [`guarded`]: an exception thrown there is caught and logged, never left to abort SoundCraft.
 mod window {
     use super::{AudioUnit, CFTypeRef, cf_string, cocoa_ui, release};
     use objc2::rc::{Allocated, Retained, Weak, autoreleasepool};
@@ -1464,6 +1465,20 @@ mod window {
     use objc2_app_kit::NSView;
     use objc2_foundation::{NSBundle, NSPoint, NSSize, NSString, NSURL};
     use soundcraft_macos::plugin_window::{DEFAULT_CONTENT, PluginWindow};
+
+    /// Runs `f`, which calls into a plugin's own Objective-C code, catching an exception it throws
+    /// (logged; an error then). Uncaught, the exception would unwind into AppKit or Rust and abort
+    /// the app. Rust values `f` holds are dropped on the way out.
+    pub(super) fn guarded<R>(what: &str, f: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
+        match objc2::exception::catch(std::panic::AssertUnwindSafe(f)) {
+            Ok(r) => r,
+            Err(e) => {
+                let e = e.map_or_else(|| "nil".to_string(), |e| e.to_string());
+                log::error!("au: {what} threw an Objective-C exception: {e}");
+                Err(format!("{what} threw an exception ({e})"))
+            }
+        }
+    }
 
     /// A view and, for a unit's own view, the factory that made it (kept until the view goes).
     struct View {
@@ -1475,7 +1490,8 @@ mod window {
     fn make_view(_mtm: MainThreadMarker, unit: AudioUnit) -> Result<View, String> {
         // SAFETY: the caller holds the unit (live) under the link's lock.
         if let Some((url, class)) = unsafe { cocoa_ui(unit) } {
-            let made = cocoa_view(unit, url, class);
+            // Loading the bundle runs its initializers; the factory and the view are its code.
+            let made = guarded("the unit's own view", || cocoa_view(unit, url, class));
             release(url);
             release(class);
             match made {
@@ -1483,7 +1499,8 @@ mod window {
                 Err(e) => log::warn!("au: the unit's own view failed ({e}); showing the generic view"),
             }
         }
-        generic_view(unit)
+        // The generic view asks the unit for its parameters and their names.
+        guarded("the generic view", || generic_view(unit))
     }
 
     /// Asks the unit's view factory for a view.
@@ -1551,18 +1568,22 @@ mod window {
         pub fn open(mtm: MainThreadMarker, unit: AudioUnit, title: &str, show: bool) -> Result<Editor, String> {
             autoreleasepool(|_| {
                 let View { view, factory } = make_view(mtm, unit)?;
-                let mut size = view.frame().size;
-                if !has_size(size) {
-                    view.setFrameSize(DEFAULT_CONTENT);
-                    size = DEFAULT_CONTENT;
-                }
-                let window = PluginWindow::new(mtm, title, size);
-                // The window goes (closed and released) when it is dropped on these early returns.
-                let content = window.content_view(mtm).ok_or_else(|| "the editor window has no content view".to_string())?;
-                // The window follows the view's size (`fit`), never the other way round.
-                content.setAutoresizesSubviews(false);
-                view.setFrameOrigin(NSPoint::new(0.0, 0.0));
-                content.addSubview(&view);
+                // The view's own code runs as it is sized and joins the window.
+                let (window, view) = guarded("the unit's view joining its window", || {
+                    let mut size = view.frame().size;
+                    if !has_size(size) {
+                        view.setFrameSize(DEFAULT_CONTENT);
+                        size = DEFAULT_CONTENT;
+                    }
+                    let window = PluginWindow::new(mtm, title, size);
+                    // The window goes (closed and released) when it is dropped on these early returns.
+                    let content = window.content_view(mtm).ok_or_else(|| "the editor window has no content view".to_string())?;
+                    // The window follows the view's size (`fit`), never the other way round.
+                    content.setAutoresizesSubviews(false);
+                    view.setFrameOrigin(NSPoint::new(0.0, 0.0));
+                    content.addSubview(&view);
+                    Ok((window, view))
+                })?;
                 let mut e = Editor { window, view: Retained::into_raw(view), factory: factory.map_or(std::ptr::null_mut(), Retained::into_raw) };
                 // The view may have sized itself on joining the window.
                 e.fit(mtm);
@@ -1606,14 +1627,18 @@ mod window {
         pub fn fit(&self, mtm: MainThreadMarker) {
             let Some(v) = self.view(mtm) else { return };
             autoreleasepool(|_| {
-                let f = v.frame();
-                if !has_size(f.size) {
-                    return;
-                }
-                if f.origin.x != 0.0 || f.origin.y != 0.0 {
-                    v.setFrameOrigin(NSPoint::new(0.0, 0.0));
-                }
-                self.window.fit(mtm, f.size);
+                // Resizing redraws the view (its own code).
+                let _ = guarded("the unit's view resizing", || {
+                    let f = v.frame();
+                    if !has_size(f.size) {
+                        return Ok(());
+                    }
+                    if f.origin.x != 0.0 || f.origin.y != 0.0 {
+                        v.setFrameOrigin(NSPoint::new(0.0, 0.0));
+                    }
+                    self.window.fit(mtm, f.size);
+                    Ok(())
+                });
             });
         }
 
@@ -1627,13 +1652,19 @@ mod window {
             autoreleasepool(|_| {
                 // SAFETY: each pointer is null or holds the retain taken in `open`, released here
                 // exactly once (`self` is consumed); main thread (the marker).
-                unsafe {
-                    if let Some(v) = Retained::from_raw(raw_view) {
-                        view = Some(ClosedView(Weak::from_retained(&v)));
+                let (v, factory) = unsafe { (Retained::from_raw(raw_view), Retained::from_raw(factory)) };
+                if let Some(v) = &v {
+                    view = Some(ClosedView(Weak::from_retained(v)));
+                }
+                // Leaving the window and being released run the view's and the factory's own code.
+                let _ = guarded("the unit's view closing", || {
+                    if let Some(v) = &v {
                         v.removeFromSuperview();
                     }
-                    drop(Retained::from_raw(factory));
-                }
+                    drop(v);
+                    drop(factory);
+                    Ok(())
+                });
                 window.close(mtm);
             });
             view.filter(|v| v.alive(mtm))
@@ -1859,6 +1890,31 @@ mod tests {
         assert_eq!(changed, 0, "a change is reported once");
         // SAFETY: a null user pointer is refused before anything is read.
         assert_eq!(unsafe { beat_and_tempo(ptr::null_mut(), &mut beat, &mut tempo) }, -50);
+    }
+
+    /// An Objective-C exception thrown by a plugin's code (here `-[NSException raise]`) is caught,
+    /// logged and turned into an error, never left to abort the process.
+    #[test]
+    fn a_plugins_objective_c_exception_is_caught() {
+        use objc2::msg_send;
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_foundation::NSString;
+        let r: Result<(), String> = window::guarded("a test view", || {
+            let cls = AnyClass::get(c"NSException").ok_or("no NSException")?;
+            let name = NSString::from_str("SoundCraftTestException");
+            let reason = NSString::from_str("a plugin threw");
+            // SAFETY: NSException's documented class method and `raise`, which throws.
+            unsafe {
+                let e: Retained<AnyObject> = msg_send![cls, exceptionWithName: &*name, reason: &*reason, userInfo: None::<&AnyObject>];
+                let () = msg_send![&*e, raise];
+            }
+            Ok(())
+        });
+        let e = r.expect_err("the exception became an error");
+        assert!(e.starts_with("a test view threw an exception"), "{e}");
+        assert!(e.contains("a plugin threw"), "{e}");
+        assert_eq!(window::guarded("a test view", || Ok(7)), Ok(7));
     }
 
     #[test]

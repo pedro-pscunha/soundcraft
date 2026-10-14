@@ -22,7 +22,7 @@ log.workspace = true
 # method encoding names.
 [target.'cfg(target_os = "macos")'.dependencies]
 soundcraft-macos.workspace = true
-objc2 = { version = "0.6", features = ["relax-void-encoding"] }
+objc2 = { version = "0.6", features = ["exception", "relax-void-encoding"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSGeometry", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView"] }
 

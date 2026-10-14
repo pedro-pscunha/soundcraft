@@ -85,7 +85,8 @@ impl Drop for Forwarding {
 /// responder of SoundCraft's own window. False when there is none, or while a forwarded event is
 /// being handled; the plugin window's own handling runs then.
 fn forward(mtm: MainThreadMarker, event: &NSEvent, key: Key) -> bool {
-    // A panic must never unwind into AppKit.
+    // A panic must never unwind into AppKit (and `catch_unwind` aborts on an Objective-C
+    // exception, so the target's code runs inside `exception::catch`).
     let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if FORWARDING.with(Cell::get) {
             return false;
@@ -93,10 +94,13 @@ fn forward(mtm: MainThreadMarker, event: &NSEvent, key: Key) -> bool {
         let Some(target) = target_window(mtm).and_then(|w| w.firstResponder()) else { return false };
         FORWARDING.with(|f| f.set(true));
         let _clear = Forwarding;
-        match key {
+        let handled = objc2::exception::catch(std::panic::AssertUnwindSafe(|| match key {
             Key::Down => target.keyDown(event),
             Key::Up => target.keyUp(event),
             Key::Flags => target.flagsChanged(event),
+        }));
+        if let Err(e) = handled {
+            log::error!("plugin window: a forwarded key threw an Objective-C exception: {}", e.map_or_else(|| "nil".to_string(), |e| e.to_string()));
         }
         true
     }));
