@@ -393,6 +393,33 @@ impl AudioState {
     }
 }
 
+/// Where the plugin in a slot stands with its own editor ([`Player::editor_state`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorState {
+    /// No instance was asked for: a built-in plugin, or a hosted one the player has not been
+    /// given yet ([`Player::update_session`]).
+    NotLoaded,
+    /// The hosted plugin could not be made (not installed, or it failed to load).
+    Failed,
+    /// The instance has no editor of its own.
+    NoEditor,
+    Closed,
+    Open,
+}
+
+impl EditorState {
+    /// Why the editor can't open, worded to follow the plugin's name ("Diva has no editor of its
+    /// own"), or `None` when it can.
+    pub fn unavailable(self) -> Option<&'static str> {
+        match self {
+            Self::NotLoaded => Some("is not loaded yet"),
+            Self::Failed => Some("did not load"),
+            Self::NoEditor => Some("has no editor of its own"),
+            Self::Closed | Self::Open => None,
+        }
+    }
+}
+
 /// What was last created for a slot.
 #[derive(Debug, PartialEq)]
 struct Live {
@@ -488,7 +515,10 @@ impl Player {
     /// Open the output device `cfg` chooses (system, device, rate, buffer size), falling back to the
     /// defaults for whatever is unavailable. Never fails: without a device it runs a silent clock.
     pub fn with_config(session: Arc<Session>, cfg: &AudioConfig) -> Player {
-        let p = Player::open(Arc::clone(&session), cfg);
+        Player::started(Player::open(Arc::clone(&session), cfg), session)
+    }
+
+    fn started(p: Player, session: Arc<Session>) -> Player {
         p.side().return_old_sessions(&p.tx);
         // Hand the initial session's third-party plugins over.
         p.update_session(session);
@@ -512,13 +542,17 @@ impl Player {
         self.side.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn open(session: Arc<Session>, cfg: &AudioConfig) -> Player {
-        let shared = Arc::new(Shared {
+    fn new_shared() -> Arc<Shared> {
+        Arc::new(Shared {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
-        });
+        })
+    }
+
+    fn open(session: Arc<Session>, cfg: &AudioConfig) -> Player {
+        let shared = Player::new_shared();
         let want = session.sample_rate.hz();
         let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
         let side_rate = session.sample_rate.as_f64() as f32;
@@ -700,12 +734,18 @@ impl Player {
         out
     }
 
+    /// Where the plugin in this slot (an insert, or [`soundcraft_mix::INSTRUMENT_SLOT`]) stands with
+    /// its own editor.
+    pub fn editor_state(&self, track: TrackId, slot: usize) -> EditorState {
+        self.side().editor_state((track, slot))
+    }
+
     /// True when the plugin in this slot has its own editor.
     pub fn has_editor(&self, track: TrackId, slot: usize) -> bool {
         self.side().editors.contains_key(&(track, slot))
     }
 
-    /// Opens the plugin's own editor window. Main thread only.
+    /// Opens (or raises) the plugin's own editor window. Main thread only.
     pub fn open_editor(&self, track: TrackId, slot: usize) -> Result<(), String> {
         self.side().open_editor((track, slot))
     }
@@ -795,6 +835,36 @@ impl Player {
     }
 }
 
+/// Test seams (the `test-util` feature): a player that never touches the audio device, and plugin
+/// editors that stand in for a hosted plugin's own.
+#[cfg(any(test, feature = "test-util"))]
+impl Player {
+    /// A player on the silent clock, as when no audio device is available, without looking for
+    /// one: tests must never open the real device.
+    pub fn without_device(session: Arc<Session>) -> Player {
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let side = Mutex::new(Side::new(session.sample_rate.as_f64() as f32, grx));
+        let p = Player::silent_clock_with(Player::new_shared(), tx, rx, Arc::clone(&session), side, gtx);
+        Player::started(p, session)
+    }
+
+    /// Makes `editor` the editor of the hosted plugin `s` holds in `slot` (an insert, or
+    /// [`soundcraft_mix::INSTRUMENT_SLOT`]), as if the player had made its instance; the next
+    /// [`update_session`](Self::update_session) with that plugin keeps it. Returns false, changing
+    /// nothing, when `s` holds no hosted plugin there.
+    pub fn adopt_editor(&self, s: &Session, track: TrackId, slot: usize, editor: Box<dyn PluginEditor>) -> bool {
+        let key = (track, slot);
+        let Some(spec) = soundcraft_mix::instance_specs(s).into_iter().find(|x| (x.track, x.slot) == key) else { return false };
+        let epoch = insert_at(s, key).map_or(0, Insert::state_epoch);
+        let mut side = self.side();
+        side.forget(key);
+        side.shadow.insert(key, Live { id: spec.id, ch: spec.ch, created: true, epoch });
+        side.editors.insert(key, editor);
+        true
+    }
+}
+
 fn copy_meter_snapshot(source: &MeterSnapshot, out: &mut MeterSnapshot) {
     out.tracks.retain(|id, _| source.tracks.contains_key(id));
     for (id, meter) in &source.tracks {
@@ -818,8 +888,21 @@ impl Side {
             .collect()
     }
 
+    fn editor_state(&self, key: (TrackId, usize)) -> EditorState {
+        match (self.shadow.get(&key), self.editors.get(&key)) {
+            (None, _) => EditorState::NotLoaded,
+            (Some(l), _) if !l.created => EditorState::Failed,
+            (Some(_), None) => EditorState::NoEditor,
+            (Some(_), Some(e)) if e.is_open() => EditorState::Open,
+            (Some(_), Some(_)) => EditorState::Closed,
+        }
+    }
+
     fn open_editor(&mut self, key: (TrackId, usize)) -> Result<(), String> {
-        let e = self.editors.get_mut(&key).ok_or_else(|| "this plugin has no editor (or it is not loaded)".to_string())?;
+        let Some(e) = self.editors.get_mut(&key) else {
+            let why = self.editor_state(key).unavailable().unwrap_or("has no editor of its own");
+            return Err(format!("this plugin {why}"));
+        };
         e.open()?;
         self.refused.remove(&key);
         Ok(())
@@ -1225,6 +1308,68 @@ mod tests {
         fn idle(&mut self) -> Vec<(String, f32)> {
             Vec::new()
         }
+    }
+
+    /// An editor whose window is a flag.
+    struct Shown(Arc<AtomicBool>);
+
+    impl PluginEditor for Shown {
+        fn open(&mut self) -> Result<(), String> {
+            self.0.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+        fn close(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+        fn is_open(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+        fn idle(&mut self) -> Vec<(String, f32)> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn each_editor_state_says_why_the_editor_cannot_open() {
+        // Insert A holds a plugin that is not installed; insert B was never asked for.
+        let (mut side, _, k) = hosted_slot();
+        let other = (k.0, 1);
+        assert_eq!(side.editor_state(other), EditorState::NotLoaded);
+        assert_eq!(side.editor_state(k), EditorState::Failed);
+        assert_eq!(side.open_editor(other), Err("this plugin is not loaded yet".into()));
+        assert_eq!(side.open_editor(k), Err("this plugin did not load".into()));
+        let made = |side: &mut Side, yes: bool| side.shadow.get_mut(&k).map(|l| l.created = yes);
+        made(&mut side, true);
+        assert_eq!(side.editor_state(k), EditorState::NoEditor);
+        assert_eq!(side.open_editor(k), Err("this plugin has no editor of its own".into()));
+        let shown = Arc::new(AtomicBool::new(false));
+        side.editors.insert(k, Box::new(Shown(Arc::clone(&shown))));
+        assert_eq!(side.editor_state(k), EditorState::Closed);
+        side.open_editor(k).unwrap();
+        assert_eq!(side.editor_state(k), EditorState::Open);
+        assert_eq!(side.editor_state(k).unavailable(), None);
+    }
+
+    #[test]
+    fn a_player_without_a_device_adopts_a_stand_in_editor_and_keeps_it() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("gain"));
+        s.track_mut(t).unwrap().mixer.inserts[2] = Some(Insert::new("clap:does.not.exist"));
+        let s = Arc::new(s);
+        let p = Player::without_device(Arc::clone(&s));
+        assert!(p.silent && p.device_channels == 0, "{}", p.device_name);
+        assert_eq!(p.editor_state(t, 2), EditorState::Failed);
+        let shown = Arc::new(AtomicBool::new(false));
+        assert!(!p.adopt_editor(&s, t, 0, Box::new(Shown(Arc::clone(&shown)))), "a built-in has no instance here");
+        assert!(p.adopt_editor(&s, t, 2, Box::new(Shown(Arc::clone(&shown)))));
+        assert_eq!(p.editor_state(t, 2), EditorState::Closed);
+        p.open_editor(t, 2).unwrap();
+        p.update_session(Arc::clone(&s));
+        assert_eq!(p.editor_state(t, 2), EditorState::Open, "the same plugin keeps its instance and editor");
+        p.close_editors();
+        assert!(!shown.load(Ordering::Relaxed));
     }
 
     #[test]

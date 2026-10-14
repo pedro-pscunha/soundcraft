@@ -26,6 +26,8 @@ cpal = { workspace = true, features = ["wasm-bindgen"] }
 # ASIO on Windows (cpal's ASIO host). Off by default: building it downloads Steinberg's ASIO SDK
 # (its own licence) and needs LLVM (libclang) for the bindings. `cargo build -p soundcraft --features asio`.
 asio = ["cpal/asio"]
+# Test seams for the crates above (`Player::without_device`, `Player::adopt_editor`); never in a release build.
+test-util = []
 
 [dev-dependencies]
 serde_json.workspace = true
