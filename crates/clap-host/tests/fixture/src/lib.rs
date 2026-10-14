@@ -7,7 +7,8 @@
 //!   MIDI CC 7 (volume) sets the constant to its value / 127.
 //!
 //! The gain plugin also implements `clap.state` (gain and mode as two little-endian f64s) and a
-//! floating-only `clap.gui` without a real window: showing it "edits" the gain to 0.25 in the GUI,
+//! floating-only `clap.gui` without a real window (its calls must come on the main thread, checked
+//! on macOS): showing it "edits" the gain to 0.25 in the GUI,
 //! reported as an output parameter event by the next `process`. It implements `clap.render`
 //! (only while deactivated) and reports 5 samples of latency instead of 3 while rendering offline,
 //! so tests can see the mode (as an offline "quality" with more lookahead). Its Mode stands in for
@@ -435,6 +436,19 @@ unsafe extern "C" fn state_load(p: *const clap_plugin, stream: *const clap_istre
 
 static STATE: clap_plugin_state = clap_plugin_state { save: Some(state_save), load: Some(state_load) };
 
+/// CLAP's GUI calls are main-thread only. Checked where the thread can be told: macOS.
+fn assert_main_thread(what: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn pthread_main_np() -> std::ffi::c_int;
+        }
+        assert!(unsafe { pthread_main_np() } == 1, "{what} off the main thread");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = what;
+}
+
 unsafe extern "C" fn gui_is_api_supported(_p: *const clap_plugin, api: *const c_char, floating: bool) -> bool {
     assert!(!api.is_null());
     floating
@@ -442,6 +456,7 @@ unsafe extern "C" fn gui_is_api_supported(_p: *const clap_plugin, api: *const c_
 
 unsafe extern "C" fn gui_create(p: *const clap_plugin, _api: *const c_char, floating: bool) -> bool {
     let f = unsafe { fx(p) };
+    assert_main_thread("gui.create");
     assert!(floating && !f.gui_created, "create");
     f.gui_created = true;
     true
@@ -449,6 +464,7 @@ unsafe extern "C" fn gui_create(p: *const clap_plugin, _api: *const c_char, floa
 
 unsafe extern "C" fn gui_destroy(p: *const clap_plugin) {
     let f = unsafe { fx(p) };
+    assert_main_thread("gui.destroy");
     assert!(f.gui_created, "destroy without create");
     f.gui_created = false;
     f.gui_visible = false;
@@ -465,6 +481,7 @@ unsafe extern "C" fn gui_suggest_title(p: *const clap_plugin, title: *const c_ch
 
 unsafe extern "C" fn gui_show(p: *const clap_plugin) -> bool {
     let f = unsafe { fx(p) };
+    assert_main_thread("gui.show");
     assert!(f.gui_created, "show without create");
     f.gui_visible = true;
     f.gui_edit_pending = true;

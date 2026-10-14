@@ -17,12 +17,22 @@ serde.workspace = true
 thiserror.workspace = true
 log.workspace = true
 
+# The main dispatch queue, where a plugin's GUI and the plugin go when the instance is dropped
+# off the main thread with its editor open (soundcraft-macos's `on_main_queue`).
+[target.'cfg(target_os = "macos")'.dependencies]
+soundcraft-macos.workspace = true
+
 # The Windows host window for embedded editors (a top-level HWND the plugin parents its GUI in).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 soundcraft-clap-host = { path = ".", features = ["testing"] }
+
+# The editor test turns the main run loop, where work for the main thread runs.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDate", "NSRunLoop"] }
 
 [[test]]
 name = "editor_main_thread"

@@ -44,5 +44,32 @@ fn main() {
     assert!(ed.open().is_err());
     assert!(ed.idle().is_empty());
     ed.close();
+    #[cfg(target_os = "macos")]
+    macos::dropped_elsewhere();
     println!("editor_main_thread: ok");
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2::rc::autoreleasepool;
+    use objc2_foundation::{NSDate, NSRunLoop};
+
+    /// Dropped on another thread with its editor open (the audio thread drops instances when the
+    /// mixer is torn down): nothing is touched there; on the main thread the GUI is destroyed,
+    /// then the plugin. The fixture checks that its GUI calls come on the main thread and that it
+    /// is never destroyed with its GUI alive (either would abort this test).
+    pub fn dropped_elsewhere() {
+        let mut p = soundcraft_clap_host::create(super::GAIN).expect("fixture");
+        let mut ed = p.editor().expect("editor handle");
+        ed.open().expect("open on the main thread");
+        std::thread::spawn(move || drop(p)).join().expect("dropped on another thread");
+        assert_eq!(soundcraft_clap_host::instances_awaiting_main_thread(), 1, "waits for the main thread");
+        assert!(!ed.is_open(), "the handle reports the editor closed at once");
+        assert!(ed.open().is_err(), "the plugin is going");
+        let start = std::time::Instant::now();
+        while soundcraft_clap_host::instances_awaiting_main_thread() > 0 && start.elapsed().as_secs() < 5 {
+            autoreleasepool(|_| NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01)));
+        }
+        assert_eq!(soundcraft_clap_host::instances_awaiting_main_thread(), 0, "destroyed on the main thread");
+    }
 }

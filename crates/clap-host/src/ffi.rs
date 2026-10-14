@@ -41,7 +41,7 @@ use soundcraft_dsp::{RenderMode, Transport};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// Most plugins one factory may report (hostile-input cap).
@@ -259,7 +259,7 @@ impl Bundle {
             processing: false,
             max_frames: 0,
             created: true,
-            _host: host,
+            host: Some(host),
             state,
             _bundle: self.clone(),
         };
@@ -736,9 +736,38 @@ pub(crate) fn on_main_thread() -> bool {
     unsafe { pthread_main_np() == 1 }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// True on the thread that owns the editor windows: Rust names the process's first thread "main",
+/// and the app runs its UI (and message loop) there.
+#[cfg(windows)]
+pub(crate) fn on_main_thread() -> bool {
+    std::thread::current().name() == Some("main")
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn on_main_thread() -> bool {
     true
+}
+
+/// Work for the main thread (see [`defer`]).
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Runs `job` on the main thread soon after this returns, from its run loop (the main dispatch
+/// queue): a plugin's GUI is only touched there.
+#[cfg(target_os = "macos")]
+fn defer(job: Job) {
+    soundcraft_macos::plugin_window::on_main_queue(Box::new(move |_| job()));
+}
+
+/// Runs `job` on the main thread, from the app's message loop (see [`hostwin::defer`]).
+#[cfg(windows)]
+fn defer(job: Job) {
+    hostwin::defer(job);
+}
+
+/// Runs `job` at once: every thread counts as the main thread here (see [`on_main_thread`]).
+#[cfg(not(any(target_os = "macos", windows)))]
+fn defer(job: Job) {
+    job();
 }
 
 /// The windowing API of this platform.
@@ -824,6 +853,8 @@ impl GuiLink {
         if !on_main_thread() {
             return Err("plugin editors must be opened on the main thread".into());
         }
+        // So that an instance dropped elsewhere with this editor open can have it destroyed here.
+        hostwin::prepare_defer();
         let mut g = self.lock();
         let vt = GuiLink::vt(&g).ok_or_else(|| "this plugin has no editor".to_string())?;
         if g.created {
@@ -933,18 +964,7 @@ impl GuiLink {
     }
 
     fn destroy(g: &mut GuiInner) {
-        if g.created
-            && let Some(f) = GuiLink::vt(g).and_then(|v| v.destroy)
-        {
-            // SAFETY: live plugin with a created GUI; destroyed exactly once.
-            unsafe { f(g.plugin) };
-        }
-        g.created = false;
-        g.visible = false;
-        // The plugin's child window is gone; now its host window can go too.
-        if let Some(w) = g.window.take() {
-            w.close();
-        }
+        OpenGui::take(g).destroy();
     }
 
     /// `clap_plugin_state.save` into memory (`None` without the extension, on failure, or once the
@@ -1049,20 +1069,63 @@ impl GuiLink {
         out
     }
 
-    /// Called by the instance before it destroys the plugin.
-    fn kill(&self) {
+    /// Called by the instance before it destroys the plugin: cuts the handles off and destroys the
+    /// GUI. Off the main thread a GUI still open cannot be destroyed (CLAP's GUI calls, and its
+    /// windows, are main-thread only): it is handed back, for the instance to destroy on the main
+    /// thread before it destroys the plugin.
+    fn kill(&self) -> Option<OpenGui> {
         let mut g = self.lock();
-        if g.created {
-            if on_main_thread() {
-                GuiLink::destroy(&mut g);
-            } else {
-                log::warn!("clap: editor still open while its plugin is destroyed off the main thread");
-                g.created = false;
-                // Window calls are main-thread only: leave the host window rather than crash.
-                g.window = None;
-            }
-        }
+        let open = OpenGui::take(&mut g);
         g.alive = false;
+        if !open.is_open() {
+            return None;
+        }
+        if on_main_thread() {
+            open.destroy();
+            return None;
+        }
+        log::warn!("clap: an editor is open while its plugin goes off the main thread; its GUI is destroyed, and the plugin, on the main thread");
+        Some(open)
+    }
+}
+
+/// A plugin's GUI and the host window of an embedded one, taken out of its link to be destroyed.
+struct OpenGui {
+    plugin: *const clap_plugin,
+    /// The plugin's `clap.gui` when its GUI is created (null otherwise).
+    gui: *const clap_plugin_gui,
+    window: Option<hostwin::HostWindow>,
+}
+
+// SAFETY: carried, at most once, from the thread an instance goes on to the main thread, and used
+// only there; the plugin it names is destroyed only after it (see `Retire`).
+unsafe impl Send for OpenGui {}
+
+impl OpenGui {
+    fn take(g: &mut GuiInner) -> OpenGui {
+        let gui = if g.alive && g.created { g.gui } else { std::ptr::null() };
+        g.created = false;
+        g.visible = false;
+        OpenGui { plugin: g.plugin, gui, window: g.window.take() }
+    }
+
+    fn is_open(&self) -> bool {
+        !self.gui.is_null() || self.window.is_some()
+    }
+
+    /// Destroys the GUI, then closes its host window. Main thread only.
+    fn destroy(self) {
+        // SAFETY: null or the plugin's static extension vtable; the plugin is alive (an instance
+        // destroys it only after this).
+        if let Some(f) = unsafe { self.gui.as_ref() }.and_then(|v| v.destroy) {
+            // SAFETY: live plugin with a created GUI; destroyed exactly once (taken out of its
+            // link); main thread (callers check).
+            unsafe { f(self.plugin) };
+        }
+        // The plugin's child window is gone; now its host window can go too.
+        if let Some(w) = self.window {
+            w.close();
+        }
     }
 }
 
@@ -1166,8 +1229,9 @@ pub(crate) struct Instance {
     max_frames: usize,
     created: bool,
     // Field order matters for drop: the plugin is destroyed in `Drop::drop` first; then the host
-    // struct and its state, then the bundle (which keeps the code mapped) go.
-    _host: Box<clap_host>,
+    // struct and its state, then the bundle (which keeps the code mapped) go. When the plugin is
+    // destroyed later, on the main thread (see `Retire`), that job holds them until then.
+    host: Option<Box<clap_host>>,
     state: Arc<HostState>,
     _bundle: Arc<Bundle>,
 }
@@ -1464,15 +1528,72 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         // Editors first (CLAP: destroy the GUI before the plugin), and no handle may call in after.
-        self.gui.kill();
+        // Off the main thread an open GUI comes back, to be destroyed on the main thread.
+        let gui = self.gui.kill();
         self.deactivate();
-        if self.created
-            && let Some(f) = self.vt().destroy
-        {
-            // SAFETY: valid instance, deactivated above; destroyed exactly once.
-            unsafe { f(self.plugin) };
+        let retire = Retire {
+            gui,
+            plugin: std::mem::take(&mut self.created).then_some(self.plugin),
+            _host: self.host.take(),
+            _state: Arc::clone(&self.state),
+            _bundle: Arc::clone(&self._bundle),
+        };
+        if retire.gui.is_none() {
+            return retire.run();
         }
-        self.created = false;
+        // The GUI is only touched on the main thread, and the plugin is destroyed only once its
+        // GUI is gone: both go there.
+        RETIRING.fetch_add(1, Ordering::Relaxed);
+        defer(Box::new(move || {
+            retire.run();
+            RETIRING.fetch_sub(1, Ordering::Relaxed);
+        }));
+    }
+}
+
+/// Instances whose destruction waits for the main thread (see [`Retire`]).
+static RETIRING: AtomicUsize = AtomicUsize::new(0);
+
+/// Instances dropped off the main thread with their editor open whose plugin has not been
+/// destroyed on the main thread yet. For tests (the `testing` feature).
+#[cfg(feature = "testing")]
+pub fn instances_awaiting_main_thread() -> usize {
+    RETIRING.load(Ordering::Relaxed)
+}
+
+/// What destroying an instance leaves to do once it is deactivated, in this order: destroy its
+/// GUI (and close the host window of an embedded one), destroy the plugin, then free the host
+/// struct and its state and let go of the bundle. Run where the instance goes, or on the main
+/// thread when it goes elsewhere with its editor open (see [`GuiLink::kill`]).
+struct Retire {
+    /// A GUI still open (only when the instance went off the main thread).
+    gui: Option<OpenGui>,
+    /// The plugin, when it was created (it is destroyed here).
+    plugin: Option<*const clap_plugin>,
+    // Dropped after the plugin is destroyed, in this order: the plugin may call its host until it
+    // is gone, and the bundle keeps its code loaded.
+    _host: Option<Box<clap_host>>,
+    _state: Arc<HostState>,
+    _bundle: Arc<Bundle>,
+}
+
+// SAFETY: moved once, from the thread the instance goes on to the main thread, and used only
+// there. No handle reaches the plugin any more (`GuiLink::kill`), and the instance no longer
+// calls it.
+unsafe impl Send for Retire {}
+
+impl Retire {
+    fn run(self) {
+        if let Some(gui) = self.gui {
+            gui.destroy();
+        }
+        if let Some(plugin) = self.plugin {
+            // SAFETY: the plugin is valid until destroyed just below; we copy its vtable struct.
+            if let Some(f) = unsafe { (*plugin).destroy } {
+                // SAFETY: valid instance, deactivated, its GUI destroyed; destroyed exactly once.
+                unsafe { f(plugin) };
+            }
+        }
     }
 }
 
@@ -1481,9 +1602,11 @@ impl Drop for Instance {
 /// The Windows host window for embedded editors: a top-level window owned by the app's active
 /// window (no taskbar button) whose client area is the plugin's parent `HWND`. Closing it only
 /// hides it; the editor link notices in `idle`, destroys the plugin's GUI, then the window.
-/// Messages are dispatched by the app's own event loop on the main thread.
+/// Messages are dispatched by the app's own event loop on the main thread. The same window class
+/// makes the message-only window that runs work posted for the main thread (see `defer`).
 #[cfg(windows)]
 mod hostwin {
+    use super::{Job, on_main_thread};
     use std::ffi::c_void;
     use std::sync::OnceLock;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -1491,16 +1614,12 @@ mod hostwin {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE,
-        GetWindowLongPtrW, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
+        GetWindowLongPtrW, HWND_MESSAGE, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_APP, WM_CLOSE, WNDCLASSEXW, WS_CAPTION,
+        WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
     };
 
     pub const SUPPORTED: bool = true;
-
-    /// Rust names the process's first thread "main"; the app runs its UI (and message loop) there.
-    fn on_main_thread() -> bool {
-        std::thread::current().name() == Some("main")
-    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().filter(|&c| c != 0).chain(Some(0)).collect()
@@ -1508,14 +1627,76 @@ mod hostwin {
 
     const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 
+    /// Posted by SoundCraft to its own job window: run the job in `lparam` (see [`defer`]).
+    const WM_RUN_JOB: u32 = WM_APP + 0x5C;
+
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if msg == WM_CLOSE {
             // SAFETY: `hwnd` is the window this procedure was called for.
             unsafe { ShowWindow(hwnd, SW_HIDE) };
             return 0;
         }
+        if msg == WM_RUN_JOB {
+            if lparam != 0 {
+                // SAFETY: the box `defer` posted with this message, taken back once.
+                let job = unsafe { Box::from_raw(lparam as *mut Job) };
+                // A panic must not unwind into the message loop.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                    log::error!("clap: a panic in work for the main thread was stopped");
+                }
+            }
+            return 0;
+        }
         // SAFETY: default handling of a message for the window it was sent to.
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    /// SoundCraft's message-only window on the main thread, which runs the work posted to it for
+    /// the main thread (see [`defer`]). Made by [`prepare_defer`] when an editor first opens, then
+    /// kept for the process; 0 when it could not be made.
+    static JOB_WINDOW: OnceLock<usize> = OnceLock::new();
+
+    /// Makes the job window, on the main thread (where editors open), before any work may be
+    /// posted to it.
+    pub fn prepare_defer() {
+        if !on_main_thread() {
+            return;
+        }
+        JOB_WINDOW.get_or_init(|| {
+            let Some(class) = class_name() else { return 0 };
+            // SAFETY: registered class; a message-only window (no title, size or styles) of this,
+            // the main, thread.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    std::ptr::null_mut(),
+                    GetModuleHandleW(std::ptr::null()),
+                    std::ptr::null(),
+                )
+            };
+            hwnd as usize
+        });
+    }
+
+    /// Runs `job` on the main thread, from the app's message loop, by posting it to the job window
+    /// (see [`prepare_defer`]). Without one, or if it takes no message, the job is never run,
+    /// rather than run off the main thread: its plugin stays alive.
+    pub fn defer(job: Job) {
+        let window = JOB_WINDOW.get().copied().unwrap_or(0) as HWND;
+        let job = Box::into_raw(Box::new(job));
+        // SAFETY: `PostMessageW` accepts any handle and only queues the message; the box goes with
+        // it and `wndproc` takes it back once.
+        if window.is_null() || unsafe { PostMessageW(window, WM_RUN_JOB, 0, job as LPARAM) } == 0 {
+            log::error!("clap: no window took work for the main thread; a plugin is left alive rather than destroyed off the main thread");
+        }
     }
 
     /// Registers the window class once; the name lives for the whole process.
@@ -1678,6 +1859,9 @@ mod hostwin {
     }
 
     pub fn resize(_window: *mut c_void, _w: f64, _h: f64) {}
+
+    /// Nothing to prepare: work for the main thread needs no window here (see `defer`).
+    pub fn prepare_defer() {}
 }
 
 #[cfg(test)]
