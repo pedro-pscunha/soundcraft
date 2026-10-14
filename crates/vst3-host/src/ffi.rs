@@ -1932,11 +1932,10 @@ impl EditorLink {
     }
 
     /// Shows a value change in the editor (`setParamNormalized`, main thread; a `performEdit` of
-    /// `id` the controller makes meanwhile is not an edit, see [`HostContext::setting`]).
-    pub fn set_normalized(&self, id: u32, n: f64) {
-        if window::on_main_thread() && n.is_finite() {
-            EditorLink::set_on_controller(&self.lock(), id, n);
-        }
+    /// `id` the controller makes meanwhile is not an edit, see [`HostContext::setting`]). True
+    /// when the controller was handed `n`.
+    pub fn set_normalized(&self, id: u32, n: f64) -> bool {
+        window::on_main_thread() && n.is_finite() && EditorLink::set_on_controller(&self.lock(), id, n)
     }
 
     /// Called by the instance before it terminates: cuts the handles off and closes the editor.

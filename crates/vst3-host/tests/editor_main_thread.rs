@@ -24,6 +24,7 @@ fn main() {
     ed.set_param("7", 1.5);
     ed.set_param("nope", 1.0);
     assert!(ed.idle().is_empty(), "set_param is not reported back as an edit");
+    generic_panel_drag(&mut p, ed.as_mut());
     #[cfg(target_os = "macos")]
     macos::shared_window(&mut p, ed.as_mut());
     #[cfg(target_os = "macos")]
@@ -32,6 +33,29 @@ fn main() {
     assert!(!ed.is_open());
     assert!(ed.open().is_err(), "the plugin is gone");
     println!("editor_main_thread: ok");
+}
+
+/// A drag in the generic plugin panel sets each value in the session and, at once, on the
+/// controller through the editor handle. The audio thread applies the session's values a block
+/// later, and the next UI frame hands what it applied to the controller: an older value than the
+/// one the controller already has must not be handed over (the knob would jump back for a frame).
+fn generic_panel_drag(p: &mut soundcraft_vst3_host::Vst3Plugin, ed: &mut dyn soundcraft_dsp::PluginEditor) {
+    use soundcraft_dsp::Plugin;
+    let mut reader = p.state_reader().expect("every VST3 component has a state");
+    let live = |reader: &mut Box<dyn soundcraft_dsp::PluginStateReader>| reader.param_values(&["7"])[0].expect("Gain").live;
+    ed.set_param("7", 0.4);
+    ed.set_param("7", 0.6);
+    // The audio thread has applied only the first value when the UI frame comes.
+    assert!(p.set_param("7", 0.4));
+    reader.idle();
+    assert!((live(&mut reader) - 0.6).abs() < 1e-6, "the controller keeps the newer value: {}", live(&mut reader));
+    assert!(p.set_param("7", 0.6));
+    reader.idle();
+    assert!((live(&mut reader) - 0.6).abs() < 1e-6);
+    // A value of the host's own (Undo, automation) is handed over.
+    assert!(p.set_param("7", 1.0));
+    reader.idle();
+    assert!((live(&mut reader) - 1.0).abs() < 1e-6, "the host's own value: {}", live(&mut reader));
 }
 
 #[cfg(target_os = "macos")]

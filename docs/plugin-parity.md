@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | Editors: dragging a VST3 insert's control in the plugin panel no longer makes the plugin's own editor knob jump back to the previous value for a frame at large buffer sizes |
 | 2026-10-14 | trivial | Hosting: a VST3 controller that reports the values SoundCraft sets on it back as edits (`performEdit` inside `setParamNormalized`) no longer turns automation playback into edits that mark the session modified, add undo steps and replace the insert's base value |
 | 2026-10-14 | trivial | Editors: Audio Unit edits whose echo never came back stay forgotten after a second, even when the view keeps reporting the parameter, so a later set of one of those values (the plugin panel, Undo) reaches the plugin |
 | 2026-10-14 | trivial | Editors: an Audio Unit view that moves a parameter away and back within one audio block no longer makes a later set of the value in between (Undo, the plugin panel, a command) look like its own edit coming back, which was never applied |

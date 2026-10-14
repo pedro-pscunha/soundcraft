@@ -486,11 +486,13 @@ impl Plugin for Vst3Plugin {
     }
 }
 
-/// The values the editor reported as edits, on their way back from the session as host sets.
-/// Handing such an echo to the controller would set a knob the user is dragging back to where it
-/// was a frame or an audio block ago, and a preset loaded in the editor meanwhile back to the
-/// edit. Each report is `(VST3 id, normalized bits, when)`, the normalized value as `set_param`
-/// makes it from the plain value the session sends. Main thread only.
+/// The values the controller already has, on their way back from the session as host sets: the
+/// editor's edits, and the values the editor handle's `set_param` handed the controller (the
+/// generic panel sets the session and the controller at once). Handing such an echo to the
+/// controller would set a knob the user is dragging back to where it was a frame or an audio block
+/// ago, and a preset loaded in the editor meanwhile back to the edit. Each report is `(VST3 id,
+/// normalized bits, when)`, the normalized value as `set_param` makes it from the plain value the
+/// session sends. Main thread only.
 #[derive(Default)]
 struct Echoes(Vec<(u32, u64, Instant)>);
 
@@ -672,10 +674,18 @@ impl PluginEditor for Vst3Editor {
         out
     }
 
+    /// Hands the controller the value at once. The session sends it to the instance too, which
+    /// hands it to the controller again a frame later, maybe after a newer one (the audio thread
+    /// had not applied the newer one yet): the knob would jump back for a frame. So it is a report
+    /// (see [`Echoes`]): its echo, and an older value's, are not handed over again.
     fn set_param(&mut self, id: &str, value: f32) {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return };
-        if let (Some(&vid), Some(n)) = (self.ids.get(i), self.normalized(i, value)) {
-            self.link.set_normalized(vid, n);
+        let (Some(pi), Some(&vid)) = (self.info.params.get(i), self.ids.get(i)) else { return };
+        // Clamped as `Vst3Plugin::set_param` clamps it, so the echo matches bit for bit.
+        if let Some(n) = self.normalized(i, pi.clamp(value))
+            && self.link.set_normalized(vid, n)
+        {
+            self.echoes.lock().unwrap_or_else(PoisonError::into_inner).reported(vid, n, Instant::now());
         }
     }
 }
