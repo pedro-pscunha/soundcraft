@@ -1,0 +1,30 @@
+[package]
+name = "soundcraft-macos-open"
+description = "SoundCraft's macOS open-documents hook: hands the app the files opened from Finder, the Dock or `open -a` (an isolated unsafe FFI crate; a no-op elsewhere)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+log.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+thiserror.workspace = true
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSNotification", "NSOperation", "NSString", "NSURL", "block2"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+block2 = "0.6"
+
+# An isolated unsafe helper crate (craftrules never-crash), like soundcraft-au-host: this crate
+# opts out of the workspace `unsafe_code = "forbid"` for itself only. It denies unsafe everywhere
+# and allows it solely on the FFI module (`src/ffi.rs`). The rest mirrors `[workspace.lints]`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+type_complexity = "allow"

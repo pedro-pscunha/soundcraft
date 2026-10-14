@@ -3578,6 +3578,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "soundcraft-engine",
+ "soundcraft-macos-open",
  "soundcraft-playback",
  "soundcraft-ui-egui",
  "winresource",
@@ -3671,6 +3672,18 @@ dependencies = [
  "soundcraft-vst3-host",
  "thiserror 2.0.21",
  "zip",
+]
+
+[[package]]
+name = "soundcraft-macos-open"
+version = "0.7.0"
+dependencies = [
+ "block2 0.6.2",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
