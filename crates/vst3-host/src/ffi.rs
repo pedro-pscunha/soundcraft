@@ -385,6 +385,15 @@ pub(crate) fn end_own_process_group() -> ! {
     exit_now(3)
 }
 
+/// Names this process "soundcraft-scan" for `top`, `ps` and system monitors: a helper started
+/// through `/proc/self/exe` would otherwise be called "exe".
+#[cfg(target_os = "linux")]
+pub(crate) fn name_scan_helper() {
+    // SAFETY: PR_SET_NAME takes a NUL-terminated name of at most 16 bytes, this static one (15
+    // characters and the NUL), and copies it.
+    unsafe { libc::prctl(libc::PR_SET_NAME, c"soundcraft-scan".as_ptr() as libc::c_ulong, 0, 0, 0) };
+}
+
 /// The status a scan helper ends with when plugin code crashes in it (see [`exit_on_crash_signals`]).
 #[cfg(unix)]
 pub(crate) const CRASHED_STATUS: c_int = 4;

@@ -136,6 +136,8 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
         return None;
     }
     end_with_host();
+    #[cfg(target_os = "linux")]
+    crate::ffi::name_scan_helper();
     #[cfg(unix)]
     crate::ffi::exit_on_crash_signals();
     let mut out = answer_channel();
@@ -275,6 +277,9 @@ impl Running {
         // A group of its own: a timeout kills the helper and whatever it started.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        // Run as /proc/self/exe on Linux, it would show as that in `ps`.
+        #[cfg(target_os = "linux")]
+        std::os::unix::process::CommandExt::arg0(&mut cmd, "soundcraft");
         cmd.arg(SCAN_HELPER_FLAG)
             .arg(bundle)
             .env(HOST_ENV, std::process::id().to_string())
