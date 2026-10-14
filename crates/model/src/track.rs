@@ -1,6 +1,6 @@
 //! Tracks and playlists.
 
-use crate::{AutoParam, AutomationLane, ChannelFormat, Clip, ClipId, Mixer, TrackId};
+use crate::{AutoParam, AutomationLane, ChannelFormat, Clip, ClipId, Insert, Mixer, TrackId};
 use soundcraft_time::{Range, Samples};
 
 /// Track types (Track › New).
@@ -251,6 +251,22 @@ fn yes() -> bool {
 }
 
 impl Track {
+    /// The plugin in insert `slot`, or the instrument for `None`.
+    pub fn insert_at(&self, slot: Option<usize>) -> Option<&Insert> {
+        match slot {
+            Some(i) => self.mixer.inserts.get(i)?.as_ref(),
+            None => self.instrument.as_ref(),
+        }
+    }
+
+    /// The plugin in insert `slot`, or the instrument for `None`.
+    pub fn insert_at_mut(&mut self, slot: Option<usize>) -> Option<&mut Insert> {
+        match slot {
+            Some(i) => self.mixer.inserts.get_mut(i)?.as_mut(),
+            None => self.instrument.as_mut(),
+        }
+    }
+
     pub fn new(id: TrackId, name: impl Into<String>, kind: TrackKind, format: ChannelFormat, color: [u8; 3]) -> Self {
         let name = name.into();
         let format = if kind.is_midi() && kind == TrackKind::Midi { ChannelFormat::Mono } else { format };

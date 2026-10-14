@@ -1101,8 +1101,7 @@ fn same_value(a: f32, b: f32) -> bool {
 
 /// The insert in `slot` (or the instrument, [`soundcraft_mix::INSTRUMENT_SLOT`]) of a track.
 fn insert_at(s: &Session, (t, slot): (TrackId, usize)) -> Option<&Insert> {
-    let tr = s.track(t)?;
-    if slot == soundcraft_mix::INSTRUMENT_SLOT { tr.instrument.as_ref() } else { tr.mixer.inserts.get(slot)?.as_ref() }
+    s.track(t)?.insert_at((slot != soundcraft_mix::INSTRUMENT_SLOT).then_some(slot))
 }
 
 /// ITU stereo fold-down gains for each main channel of a session.

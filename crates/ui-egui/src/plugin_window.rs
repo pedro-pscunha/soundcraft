@@ -132,8 +132,7 @@ pub(crate) fn command(app: &mut SoundApp, p: &Value) -> Result<Value, String> {
         Some(v) => Some(v.as_bool().ok_or_else(|| bad("`value` must be true or false"))?),
     };
     let plugin = {
-        let t = app.engine.session().track(track);
-        let ins = if slot == INSTRUMENT_SLOT { t.and_then(|t| t.instrument.as_ref()) } else { t.and_then(|t| t.mixer.inserts.get(slot)?.as_ref()) };
+        let ins = app.engine.session().track(track).and_then(|t| t.insert_at((slot != INSTRUMENT_SLOT).then_some(slot)));
         ins.map(|i| i.plugin.clone()).ok_or_else(|| bad("that slot holds no plugin"))?
     };
     let info = crate::mix_window::plugin_info(&plugin);
