@@ -23,7 +23,7 @@ mod macos {
         NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSResponder, NSView, NSWindow,
         NSWindowCollectionBehavior, NSWindowStyleMask,
     };
-    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{NSException, NSPoint, NSRect, NSSize, NSString};
     use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
     use std::cell::{Cell, RefCell};
 
@@ -127,6 +127,12 @@ mod macos {
         }
     );
 
+    /// Throws an Objective-C exception, as a plugin view's own code may when it is drawn.
+    fn throws(_: &NSWindow) {
+        let name = NSString::from_str("SoundCraftTestException");
+        NSException::new(&name, Some(&NSString::from_str("a plugin view threw")), None).expect("an exception").raise();
+    }
+
     fn plugin_view(mtm: MainThreadMarker, takes_keys: bool) -> Retained<PluginView> {
         let this = PluginView::alloc(mtm).set_ivars(Cell::new(takes_keys));
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 240.0));
@@ -195,7 +201,7 @@ mod macos {
 
         // Each step in its own pool, as each run-loop turn has one: AppKit keeps windows in
         // autoreleased references until the pool drains.
-        let w = autoreleasepool(|_| PluginWindow::new(mtm, "Test Plugin", NSSize::new(320.0, 240.0)));
+        let mut w = autoreleasepool(|_| PluginWindow::new(mtm, "Test Plugin", NSSize::new(320.0, 240.0)));
         autoreleasepool(|_| {
             let win = w.window(mtm);
             assert_eq!(win.styleMask(), NSWindowStyleMask::Titled | NSWindowStyleMask::Closable, "titled and closable, not minimizable");
@@ -288,6 +294,13 @@ mod macos {
         for none in [NSSize::new(f64::NAN, 10.0), NSSize::new(0.5, 10.0), NSSize::new(10.0, f64::INFINITY), NSSize::new(0.0, 0.0)] {
             assert_eq!(content_size(none), None, "{none:?}");
         }
+
+        // Showing the window runs its plugin view's own code (here an order-front that throws, as
+        // a view's drawing may): the exception is caught, not left to abort the app.
+        testing::set_order_front(Some(throws));
+        autoreleasepool(|_| w.show(mtm));
+        testing::set_order_front(None);
+        assert_eq!(windows(mtm), (base + 2, 0), "nothing on screen");
 
         w.close(mtm);
         assert_eq!(windows(mtm), (base + 1, 0), "the plugin window is gone");

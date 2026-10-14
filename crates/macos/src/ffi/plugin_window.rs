@@ -207,9 +207,15 @@ impl PluginWindow {
         self.window(mtm).contentView()
     }
 
-    /// Orders the window front and makes it key.
+    /// Orders the window front and makes it key. AppKit runs the plugin view's own code meanwhile
+    /// (it draws, and may become first responder): an Objective-C exception thrown there is caught
+    /// and logged, never left to abort SoundCraft. The window counts as shown either way: if it
+    /// did not reach the screen, it is hidden and closes as one the user closed.
     pub fn show(&mut self, mtm: MainThreadMarker) {
-        self.window(mtm).makeKeyAndOrderFront(None);
+        let window = self.window(mtm);
+        if let Err(e) = objc2::exception::catch(std::panic::AssertUnwindSafe(|| order_front(window))) {
+            log::error!("plugin window: showing it threw an Objective-C exception: {}", e.map_or_else(|| "nil".to_string(), |e| e.to_string()));
+        }
         self.shown = true;
     }
 
@@ -247,16 +253,37 @@ impl Drop for PluginWindow {
     }
 }
 
-/// The key target tests use instead of SoundCraft's window (tests cannot show windows, and a
-/// hidden window is never main or ordered front).
+/// Puts `window` on screen and makes it key (`makeKeyAndOrderFront:`).
+fn order_front(window: &NSWindow) {
+    #[cfg(feature = "testing")]
+    if let Some(f) = testing::order_front() {
+        return f(window);
+    }
+    window.makeKeyAndOrderFront(None);
+}
+
+/// Seams for the main-thread tests, which never put a window on screen (and a hidden window is
+/// never main or ordered front).
 #[cfg(feature = "testing")]
 pub mod testing {
     use objc2::rc::{Retained, Weak};
     use objc2_app_kit::NSWindow;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         static TARGET: RefCell<Option<Weak<NSWindow>>> = const { RefCell::new(None) };
+        static ORDER_FRONT: Cell<Option<fn(&NSWindow)>> = const { Cell::new(None) };
+    }
+
+    /// Runs `f` where [`PluginWindow::show`](super::PluginWindow::show) would order the window on
+    /// screen, inside the same guard (`None`: AppKit's `makeKeyAndOrderFront:` again). With a
+    /// no-op, `show` marks a hidden window as shown.
+    pub fn set_order_front(f: Option<fn(&NSWindow)>) {
+        ORDER_FRONT.with(|o| o.set(f));
+    }
+
+    pub(super) fn order_front() -> Option<fn(&NSWindow)> {
+        ORDER_FRONT.with(Cell::get)
     }
 
     /// Sends the keys plugin windows pass on to `window` (`None`: back to SoundCraft's window).
