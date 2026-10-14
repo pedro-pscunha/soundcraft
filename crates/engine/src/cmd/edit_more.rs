@@ -128,8 +128,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "edit.play_timeline", "Play Timeline", ["Edit", "Selection"], None, "{} — plays the timeline selection", always, |e, _| {
             let s = e.session();
             let r = if s.edit.timeline_selection.is_empty() { s.edit.selection } else { s.edit.timeline_selection };
-            e.transport_requests.push(TransportRequest::Locate(r.start));
-            e.transport_requests.push(TransportRequest::Play);
+            e.transport_requests.push(TransportRequest::PlayRange(r));
             Ok(json!({"start": r.start, "end": r.end}))
         }),
         cmd!(

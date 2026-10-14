@@ -8,10 +8,12 @@ use serde_json::json;
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "transport.play", "Play", [], Some("Space"), "{from?: position}", always, |e, p| {
-            if let Some(at) = position_param(e, "transport.play", p, "from")? {
-                e.transport_requests.push(TransportRequest::Locate(at.max(0)));
+            // `from` is where playback starts: a Locate followed by Play would start from the edit
+            // selection instead (Play plays from the selection while stopped).
+            match position_param(e, "transport.play", p, "from")? {
+                Some(at) => e.transport_requests.push(TransportRequest::PlayFrom(at.max(0))),
+                None => e.transport_requests.push(TransportRequest::Play),
             }
-            e.transport_requests.push(TransportRequest::Play);
             Ok(json!({}))
         }),
         cmd!(noundo "transport.stop", "Stop", [], Some("Space"), "{}", always, |e, _| { e.transport_requests.push(TransportRequest::Stop); Ok(json!({})) }),

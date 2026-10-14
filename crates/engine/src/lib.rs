@@ -59,6 +59,10 @@ pub enum TransportRequest {
     /// Stop the old session's transport without applying stop-time edits to the new document.
     ResetSession,
     Play,
+    /// Play from this position (stopped), or jump there (playing): `transport.play {from}`.
+    PlayFrom(Samples),
+    /// Play this range and stop at its end (an empty range plays on): `edit.play_timeline`.
+    PlayRange(soundcraft_time::Range),
     Stop,
     TogglePlay,
     Record,

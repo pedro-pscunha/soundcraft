@@ -84,11 +84,7 @@ fn commands_focus_nudges_matches_the_selections_plays_and_redoes() {
         app.engine.transport_requests.clear();
         press(&ctx, &mut app, Key::OpenBracket, Modifiers::NONE);
         press(&ctx, &mut app, Key::CloseBracket, Modifiers::NONE);
-        assert_eq!(
-            app.engine.transport_requests,
-            [TransportRequest::PlaySelection, TransportRequest::Locate(48_000), TransportRequest::Play],
-            "{os:?}"
-        );
+        assert_eq!(app.engine.transport_requests, [TransportRequest::PlaySelection, TransportRequest::PlayRange(edit_selection)], "{os:?}");
     }
 }
 

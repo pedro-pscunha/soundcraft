@@ -464,6 +464,20 @@ impl SoundApp {
         if self.engine.transport.playing { self.engine.transport.position } else { self.engine.session().edit.selection.start }
     }
 
+    /// Moves the transport to `at`; while playing, playback continues from there.
+    fn locate(&mut self, at: Samples) {
+        if self.is_playing() {
+            if let Some(p) = &self.player {
+                p.locate(at);
+            }
+            if let Some(sim) = &mut self.sim {
+                sim.0 = at;
+            }
+            self.last_write_at = i64::MIN;
+        }
+        self.engine.transport.position = at;
+    }
+
     fn start_play(&mut self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
         if let Some(p) = &self.player {
             p.update_session(self.engine.session_arc());
@@ -1012,6 +1026,19 @@ impl SoundApp {
                         self.play_from_selection();
                     }
                 }
+                TransportRequest::PlayFrom(at) => {
+                    if self.is_playing() {
+                        self.locate(at);
+                    } else {
+                        self.engine.transport.position = at;
+                        self.start_play(at, None, None);
+                    }
+                }
+                TransportRequest::PlayRange(r) => {
+                    let end = (!r.is_empty()).then_some(r.end);
+                    self.engine.transport.position = r.start;
+                    self.start_play(r.start, end, None);
+                }
                 TransportRequest::Stop | TransportRequest::Pause => self.stop_play(),
                 TransportRequest::TogglePlay => {
                     if self.is_playing() {
@@ -1027,18 +1054,7 @@ impl SoundApp {
                         self.start_recording();
                     }
                 }
-                TransportRequest::Locate(at) => {
-                    if self.is_playing() {
-                        if let Some(p) = &self.player {
-                            p.locate(at);
-                        }
-                        if let Some(sim) = &mut self.sim {
-                            sim.0 = at;
-                        }
-                        self.last_write_at = i64::MIN;
-                    }
-                    self.engine.transport.position = at;
-                }
+                TransportRequest::Locate(at) => self.locate(at),
                 TransportRequest::PlaySelection => {
                     let sel = self.engine.session().edit.selection;
                     self.start_play(sel.start, Some(sel.end.max(sel.start + 1)), None);
@@ -1304,6 +1320,35 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 mod tests {
     use super::{Services, SoundApp, automation_step_due};
     use serde_json::json;
+
+    /// `transport.play {from}` starts at `from`, not at the edit insertion (a Locate followed by
+    /// Play used to start from the insertion while stopped), and jumps there while playing.
+    #[test]
+    fn play_from_starts_at_from_and_jumps_there_while_playing() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let insertion = app.engine.session().edit.selection.start;
+        let from = insertion + 96_000;
+        app.run("transport.play", json!({"from": from})).unwrap();
+        app.handle_transport(0.25);
+        assert!(app.is_playing());
+        assert!((from..from + 24_000).contains(&app.position()), "started at {}, asked for {from}", app.position());
+        app.run("transport.play", json!({"from": from + 480_000})).unwrap();
+        app.handle_transport(0.25);
+        assert!((from + 480_000..from + 504_000).contains(&app.position()), "jumped to {}", app.position());
+    }
+
+    /// Play Timeline plays the timeline selection even when it is unlinked from the edit selection.
+    #[test]
+    fn play_timeline_plays_the_timeline_selection() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.run("options.link_timeline_edit", json!({"value": false})).unwrap();
+        app.engine.session_mut().edit.timeline_selection = soundcraft_time::Range::new(192_000, 240_000);
+        app.run("edit.select", json!({"start": 0, "end": 10})).unwrap();
+        app.run("edit.play_timeline", json!({})).unwrap();
+        app.handle_transport(0.25);
+        assert!(app.is_playing());
+        assert!((192_000..216_000).contains(&app.position()), "started at {}", app.position());
+    }
 
     #[test]
     fn new_session_stops_playback_and_the_old_clock() {
