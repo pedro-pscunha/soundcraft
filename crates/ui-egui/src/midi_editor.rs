@@ -403,12 +403,20 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         if playing || crate::edit_window::insertion_shown(ui.ctx(), sel.start, &s.edit.selected_tracks) {
             ui.painter().with_clip_rect(lanes).line_segment([pos2(x, lanes.min.y), pos2(x, lanes.max.y)], stroke);
         }
-        if playing {
+        if playing && fast_playhead(&s.tempo, sr, app.position(), px_per_tick) {
             // The roll stretches one clip across its width, so the line can move much faster than
-            // the Edit window's (repainted at 30 Hz): keep it smooth at 60 Hz while it is shown.
+            // the Edit window's (repainted at 30 Hz): keep it smooth at 60 Hz.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000 / 60));
         }
     }
+}
+
+/// True when the playhead at `pos` moves more than 1.5 px a frame at the app's 30 Hz (each tick
+/// `px_per_tick` wide): the MIDI editor then repaints at 60 Hz to keep it smooth.
+fn fast_playhead(tempo: &TempoMap, sr: SampleRate, pos: Samples, px_per_tick: f32) -> bool {
+    let frame = Samples::from(sr.hz() / 30);
+    let ticks = tempo.samples_to_ticks_f(pos.saturating_add(frame), sr) - tempo.samples_to_ticks_f(pos, sr);
+    ticks * f64::from(px_per_tick) > 1.5
 }
 
 #[cfg(test)]
@@ -526,6 +534,23 @@ mod tests {
         (h, clip)
     }
 
+    #[test]
+    fn the_editor_repaints_faster_only_when_the_playhead_would_jump() {
+        // 120 BPM at 48 kHz: 64 ticks a 30 Hz frame. Over 1.5 px that is 3/128 px a tick.
+        let tempo = TempoMap::default();
+        assert!(fast_playhead(&tempo, SR, 8 * BEAT, 0.03), "1.92 px a frame");
+        assert!(!fast_playhead(&tempo, SR, 8 * BEAT, 0.02), "1.28 px a frame");
+        // At half the tempo, half the ticks.
+        let mut slow = TempoMap::default();
+        slow.set_tempo(4 * Q, 60.0).unwrap();
+        assert!(!fast_playhead(&slow, SR, 8 * BEAT, 0.03));
+        assert!(fast_playhead(&slow, SR, BEAT, 0.03), "before the tempo change");
+        for ppt in [f32::NAN, 0.0, -1.0] {
+            assert!(!fast_playhead(&tempo, SR, 8 * BEAT, ppt), "{ppt}");
+        }
+        assert!(!fast_playhead(&tempo, SR, Samples::MAX, 0.03), "nothing past the end of time");
+    }
+
     /// The vertical lines drawn in `color` inside the MIDI editor's body (each must have the Edit
     /// window's `width`), and that body.
     fn editor_lines(h: &Harness<SoundApp>, color: egui::Color32, width: f32) -> (Vec<[egui::Pos2; 2]>, Rect) {
@@ -622,5 +647,23 @@ mod tests {
             h.step();
             assert_eq!(editor_insertions(&h).0, Vec::<[egui::Pos2; 2]>::new(), "Play starts at the range, but no line marks it");
         }
+    }
+
+    #[test]
+    fn the_editor_asks_for_60_hz_only_when_its_playhead_moves_fast() {
+        let repaint = |h: &Harness<SoundApp>| h.output().viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        let (mut h, clip) = lead_in_editor();
+        h.state_mut().engine.transport.playing = true;
+        h.state_mut().engine.transport.position = clip.start + (clip.end - clip.start) / 2;
+        h.run_steps(2);
+        // egui reports each delay less its predicted frame time (1/60 s here): 60 Hz reads as none.
+        let fast = repaint(&h).unwrap();
+        assert!(fast < std::time::Duration::from_millis(5), "a short clip across the panel: {fast:?}");
+        // The same clip a thousand bars long: the line creeps.
+        let cid = h.state().engine.session().track_by_name("Lead").and_then(|t| t.clips().first()).map(|c| c.id).unwrap();
+        h.state_mut().engine.session_mut().find_clip_mut(cid).unwrap().length = 4_000 * 24_000;
+        h.run_steps(2);
+        let slow = repaint(&h).unwrap();
+        assert!(slow > std::time::Duration::from_millis(10), "the app's 30 Hz: {slow:?}");
     }
 }
