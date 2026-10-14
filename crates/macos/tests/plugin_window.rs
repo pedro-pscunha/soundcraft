@@ -313,6 +313,22 @@ mod macos {
             type_key(win, NSEventType::KeyDown, SPACE, none);
             assert_eq!(seen(), [("soundcraft", "down", SPACE)]);
 
+            // Once the window is no longer key, the key-ups and modifier changes of keys still held
+            // go elsewhere, and SoundCraft would see those keys down: the window lets go of them,
+            // a key-up for each, then the modifier state as it is now (key code 0: no key).
+            win.resignKeyWindow();
+            assert_eq!(
+                seen(),
+                [("soundcraft", "up", 1), ("soundcraft", "up", SPACE), ("soundcraft", "flags", 0)],
+                "⌘A and Space were handed on and never released, ⇧ was handed on"
+            );
+            win.resignKeyWindow();
+            assert_eq!(seen(), [], "let go of once");
+            type_key(win, NSEventType::KeyDown, SPACE, none);
+            type_key(win, NSEventType::KeyUp, SPACE, none);
+            win.resignKeyWindow();
+            assert_eq!(seen(), [("soundcraft", "down", SPACE), ("soundcraft", "up", SPACE)], "released: nothing to let go of");
+
             // No SoundCraft window to hand keys to (none is main or on screen here): AppKit's
             // own handling.
             testing::set_key_target(None);
@@ -414,7 +430,14 @@ mod macos {
         assert!(w.closed_by_user(mtm), "hidden while the app is active: closed");
         testing::set_app_active(None);
 
+        // Closing lets go of the keys too.
+        autoreleasepool(|_| {
+            assert!(w.window(mtm).makeFirstResponder(None));
+            type_key(w.window(mtm), NSEventType::KeyDown, SPACE, none);
+        });
+        assert_eq!(seen(), [("soundcraft", "down", SPACE)]);
         w.close(mtm);
+        assert_eq!(seen(), [("soundcraft", "up", SPACE), ("soundcraft", "flags", 0)], "closed with Space held");
         assert_eq!(windows(mtm), (base + 1, 0), "the plugin window is gone");
 
         // Dropped on another thread it is leaked, never touched there.

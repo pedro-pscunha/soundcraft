@@ -24,6 +24,10 @@
 //!   windows are winit's (class `WinitWindow`): a window a plugin opened itself (a CLAP plugin's
 //!   floating window, a plugin's own panel) never gets the keys, even when it is main or in front.
 //!   With no such window, AppKit's own handling runs (a beep, as before).
+//! - Keys still held when the window stops being key or closes: their key-ups and modifier
+//!   changes go elsewhere then, so the window lets go of them itself, handing on a key-up for each
+//!   key-down it handed on and the modifier state as it is now. SoundCraft never sees a key stuck
+//!   down.
 //! - Not while SoundCraft has a text field focused (the app reports it every frame with
 //!   [`set_app_wants_keyboard`]): a key-down handed on would type into that field out of sight, so
 //!   AppKit's own handling runs (a beep).

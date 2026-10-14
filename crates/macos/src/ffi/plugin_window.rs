@@ -4,12 +4,13 @@
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, NSObject};
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSEvent, NSFloatingWindowLevel, NSResponder, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSResponder, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
-use std::cell::Cell;
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Largest window side, in points.
@@ -18,13 +19,26 @@ const MAX_SIDE: f64 = 16_384.0;
 /// The content size of a window made for a view that reports none.
 pub const DEFAULT_CONTENT: NSSize = NSSize::new(400.0, 300.0);
 
+/// What a plugin window remembers of the keys it handed on, to let go of them (see
+/// `HostWindow::let_go`). Main thread only, like the window.
+#[derive(Default)]
+struct Handed {
+    /// Key-downs handed on whose key-up was not (one per key code).
+    down: RefCell<Vec<Retained<NSEvent>>>,
+    /// A modifier change was handed on since the window last let go.
+    flags: Cell<bool>,
+}
+
 define_class!(
-    // SAFETY: `NSWindow` may be subclassed. The subclass has no instance variables and no `Drop`,
-    // and overrides `keyDown:`, `keyUp:`, `flagsChanged:` and `canBecomeMainWindow` with the
-    // signatures AppKit declares for them.
+    // SAFETY: `NSWindow` may be subclassed. The instance variables (`Handed`) are Rust values
+    // dropped with the window, and touched only on the main thread (the class is main-thread
+    // only). The subclass overrides `keyDown:`, `keyUp:`, `flagsChanged:`, `resignKeyWindow`,
+    // `close` and `canBecomeMainWindow` with the signatures AppKit declares for them, and calls
+    // NSWindow's own implementation where it hands nothing on.
     #[unsafe(super(NSWindow, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "SoundCraftPluginWindow"]
+    #[ivars = Handed]
     struct HostWindow;
 
     impl HostWindow {
@@ -34,7 +48,11 @@ define_class!(
             if APP_WANTS_KEYBOARD.load(Ordering::Relaxed) || !forward(self.mtm(), event, Key::Down) {
                 // SAFETY: NSWindow's own `keyDown:`, with the event AppKit passed in.
                 let () = unsafe { msg_send![super(self), keyDown: event] };
+                return;
             }
+            let mut down = self.ivars().down.borrow_mut();
+            down.retain(|d| d.keyCode() != event.keyCode());
+            down.push(event.retain());
         }
 
         #[unsafe(method(keyUp:))]
@@ -42,7 +60,9 @@ define_class!(
             if !forward(self.mtm(), event, Key::Up) {
                 // SAFETY: as in `keyDown:`.
                 let () = unsafe { msg_send![super(self), keyUp: event] };
+                return;
             }
+            self.ivars().down.borrow_mut().retain(|d| d.keyCode() != event.keyCode());
         }
 
         #[unsafe(method(flagsChanged:))]
@@ -50,7 +70,25 @@ define_class!(
             if !forward(self.mtm(), event, Key::Flags) {
                 // SAFETY: as in `keyDown:`.
                 let () = unsafe { msg_send![super(self), flagsChanged: event] };
+                return;
             }
+            self.ivars().flags.set(true);
+        }
+
+        /// No longer key: the key-ups and modifier changes of the keys still held go elsewhere.
+        #[unsafe(method(resignKeyWindow))]
+        fn resign_key_window(&self) {
+            // SAFETY: NSWindow's own `resignKeyWindow`.
+            let () = unsafe { msg_send![super(self), resignKeyWindow] };
+            self.let_go();
+        }
+
+        /// Closed (by the user, ⌘W, or its editor going): as when it resigns key.
+        #[unsafe(method(close))]
+        fn close(&self) {
+            self.let_go();
+            // SAFETY: NSWindow's own `close`.
+            let () = unsafe { msg_send![super(self), close] };
         }
 
         /// Never main: SoundCraft's own window stays the main window (and the key target) while
@@ -61,6 +99,59 @@ define_class!(
         }
     }
 );
+
+impl HostWindow {
+    /// Hands SoundCraft a key-up for each key-down it was handed and whose key-up it was not, then
+    /// the modifier state as it is now: once the window is no longer key (or gone), those key-ups
+    /// and modifier changes go to another window or app, and SoundCraft would see the keys held
+    /// down until they were pressed again.
+    fn let_go(&self) {
+        let down = std::mem::take(&mut *self.ivars().down.borrow_mut());
+        if !self.ivars().flags.replace(false) && down.is_empty() {
+            return;
+        }
+        let mtm = self.mtm();
+        autoreleasepool(|_| {
+            let now = NSEvent::modifierFlags_class();
+            let time = NSProcessInfo::processInfo().systemUptime();
+            for d in down {
+                let (chars, plain) = (d.characters().unwrap_or_default(), d.charactersIgnoringModifiers().unwrap_or_default());
+                if let Some(up) = key_event(NSEventType::KeyUp, now, time, d.windowNumber(), &chars, &plain, d.keyCode()) {
+                    forward(mtm, &up, Key::Up);
+                }
+            }
+            // Key code 0: no key, only the modifier state (winit reads it so).
+            let none = NSString::new();
+            if let Some(flags) = key_event(NSEventType::FlagsChanged, now, time, self.windowNumber(), &none, &none, 0) {
+                forward(mtm, &flags, Key::Flags);
+            }
+        });
+    }
+}
+
+/// A synthetic key event (`None` if AppKit makes none).
+fn key_event(
+    ty: NSEventType,
+    flags: NSEventModifierFlags,
+    time: f64,
+    window: isize,
+    chars: &NSString,
+    plain: &NSString,
+    code: u16,
+) -> Option<Retained<NSEvent>> {
+    NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        ty,
+        NSPoint::new(0.0, 0.0),
+        flags,
+        time,
+        window,
+        None,
+        chars,
+        plain,
+        false,
+        code,
+    )
+}
 
 /// SoundCraft has a text field focused (see [`set_app_wants_keyboard`]).
 static APP_WANTS_KEYBOARD: AtomicBool = AtomicBool::new(false);
@@ -202,7 +293,7 @@ impl PluginWindow {
         // In a pool: what AppKit autoreleases while setting the window up (references to it
         // among them) goes now, not whenever the caller's pool drains.
         let window = autoreleasepool(|_| {
-            let this = HostWindow::alloc(mtm).set_ivars(());
+            let this = HostWindow::alloc(mtm).set_ivars(Handed::default());
             // SAFETY: NSWindow's designated initializer on a fresh instance of the subclass, main
             // thread; a valid rect, style and backing.
             let window: Retained<HostWindow> =
