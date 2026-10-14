@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** patch (G-05: the macOS plugin entitlement is in) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** patch (G-05: AU editors are in) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -105,7 +105,7 @@ Ranked; the alpha gate, the alpha checklist and the beta plan are in [docs/roadm
 1. **Alpha blocker:** audio interfaces: device and buffer-size choice, duplex stream, ASIO; record to disk (G-01, G-06). 35–55 h.
 2. **Alpha blocker:** MIDI devices: record from keyboards, play instruments live, output (G-02). 20–35 h.
 3. **Alpha blocker:** AAF/OMF import and export (G-03). 50–90 h.
-4. AU editors and the remaining plugin-hosting gaps (G-05); the macOS plugin entitlement (#153) is in. 14–24 h.
+4. The remaining plugin-hosting gaps (G-05): VST3 views on Linux, embedded CLAP editors on macOS and Linux; the macOS plugin entitlement (#153) and AU editors are in. 6–12 h.
 5. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
 6. PR CI running `cargo xtask ci` on three OSes (G-14). 5–10 h.
 7. Fidelity harness against Pro Tools (G-07). 20–30 h.
@@ -155,6 +155,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | patch | Upcoming: AU editors are in; G-05 keeps Linux VST3 views and embedded CLAP editors |
 | 2026-10-13 | trivial | Progress log: mix.instrument params, unknown fields refused (#265) |
 | 2026-10-13 | trivial | Progress log: bus bounce compensates aux returns (#246) |
 | 2026-10-13 | trivial | Progress log: master insert latency compensated (#351) |

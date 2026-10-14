@@ -87,11 +87,14 @@ plugins), and WebAudio in the browser.
   It declares the `.scraft` session type (`ai.storyteller.soundcraft.session`, MIME
   `application/x-soundcraft-session`, role Editor, rank Owner) and lists WAV, AIFF/AIFC, FLAC,
   MP3 and MIDI as Viewer/Alternate, so SoundCraft appears under *Open With* without taking over
-  the default player. `NSMicrophoneUsageDescription` explains the recording prompt.
+  the default player. Files opened that way (a double-click, *Open With*, a drop on the Dock icon)
+  arrive as an open-documents Apple Event, which the app answers itself: they open as if dropped
+  on its window. `NSMicrophoneUsageDescription` explains the recording prompt.
 - **Signing** goes inside-out with the hardened runtime and a secure timestamp. The executable is
   signed first, then the bundle. There's no `--deep` on the final signature. `entitlements.plist`
-  holds a single exception, `com.apple.security.device.audio-input`, without which the hardened
-  runtime blocks recording.
+  holds three exceptions: `com.apple.security.device.audio-input`, without which the hardened
+  runtime blocks recording, and `com.apple.security.cs.disable-library-validation` and
+  `allow-unsigned-executable-memory`, so it loads plugins signed by other developers (#153, #149).
 - **Notarization:** the app is zipped and sent with `xcrun notarytool submit --wait`, then the
   ticket is stapled to the app. The app goes on a DMG (`hdiutil`, with an `Applications` link).
   The DMG is signed, notarized and stapled too.

@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (drag across checkboxes, #399; waveforms preview fades during drag) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-14 · **Change:** minor (plugin windows: a slot click opens a hosted plugin's own editor; one window per plugin, a known difference) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -50,7 +50,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | I/O Setup | 🟡 | Busses and paths; no hardware channel matrix (G-01) |
 | Preferences | 🟡 | Many settings stored, fewer honoured |
 | Window configurations, Tile/Cascade | 🟡 | Configurations ✅; Tile/Cascade in PR #151 |
-| Plugin windows | 🟡 | Generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6) |
+| Plugin windows | 🟡 | A click on a CLAP, VST3 or Audio Unit plugin's slot opens and closes the plugin's own editor (`window.plugin`), an insert's parameter window one menu item away. Built-in plugins show generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6). Known difference: Pro Tools reuses its target plug-in window as other inserts are clicked; SoundCraft opens a window per plugin, so they pile up |
 | Command palette (Search) | ✅ | Over every command |
 
 ## Look and meters
@@ -68,6 +68,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Plugin windows: a slot click opens and closes a hosted plugin's own editor (`window.plugin`); one window per plugin where Pro Tools reuses its target window, noted as a known difference. Readiness estimate unchanged |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |
 | 2026-10-13 | minor | Waveforms and fade curves share temporary envelopes during drag, without rebuilding media or editing the document before release. Readiness estimate unchanged |
 | 2026-10-13 | minor | Fade curves use bounded physical-pixel sampling; midpoint handles stay visible and inside the clip, with repeat-drag coverage after extreme bends. Readiness estimate unchanged |

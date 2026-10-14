@@ -1,6 +1,6 @@
 # Target-app parity: SoundCraft vs Avid Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (hours to ~95 % for each audience; full number confirmed as an additive weighted sum) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (hosted plugins open their own editors) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
 
 The authoritative assessment of how close SoundCraft is to Pro Tools. [`ROADMAP.md`](../ROADMAP.md)
 summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimension docs go deeper:
@@ -166,7 +166,7 @@ microphone or interface, uses default settings, and exports a file to share.
 | Discount | Factor | Evidence |
 |---|---:|---|
 | Launch and stability | ×0.90 | Doesn't launch for one user (#142), X11 llvmpipe failure (#107), Linux symbols as boxes (#45), Windows shortcuts (#41); macOS is solid |
-| Discoverability and UI clarity | ×0.90 | Pro Tools' dense layout with no onboarding or user guide; shortcut collisions; plugin windows are bare sliders |
+| Discoverability and UI clarity | ×0.90 | Pro Tools' dense layout with no onboarding or user guide; shortcut collisions; built-in plugins' windows are bare sliders (hosted plugins open their own editors) |
 | Opening files people send them | ×0.97 | These users get WAV/MP3, which work; only Pro Tools sessions fail |
 | **Result** | 72.4 × 0.90 × 0.90 × 0.97 = **56.9 % ≈ 57 %** | |
 
@@ -245,6 +245,7 @@ serializes more, because it needs hands-on testing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | Discount evidence: only built-in plugins' windows are bare sliders; hosted plugins open their own editors. Numbers unchanged |
 | 2026-10-10 | minor | Readiness-by-audience table: hours to ~95 % for full (950–1,450 h), mainstream (380–600 h) and essentials (110–200 h). The full number is already the additive weighted sum over the written dimension table (40.6 %); method unchanged |
 | 2026-10-10 | minor | Added the mainstream-practitioner (~36 %) and essentials-user (~57 %) numbers with written weights, discounts and user evidence. Checked the full ~40 %: it is the written dimension weights × values (40.6 %), so it doesn't move |
 | 2026-10-10 | minor | Stage alpha → pre-alpha under the core-workflow gate; alpha distance ~110–180 h |
