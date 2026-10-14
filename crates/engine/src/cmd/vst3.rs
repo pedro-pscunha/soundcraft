@@ -29,13 +29,16 @@ mod tests {
 
     #[test]
     fn vst3_plugins_query_returns_the_plugins_and_the_skipped_bundles() {
+        crate::no_installed_vst3();
         let mut e = Engine::default();
         let v = e.execute("engine.vst3_plugins", &json!({})).unwrap();
         assert!(v["plugins"].is_array() && v["skipped"].is_array(), "{v}");
+        assert_eq!(v["plugins"], json!([]), "no installed plugin is scanned by the tests");
     }
 
     #[test]
     fn unknown_vst3_insert_is_an_error() {
+        crate::no_installed_vst3();
         let mut e = Engine::default();
         e.execute("track.new", &json!({})).unwrap();
         let t = e.session().tracks[0].id.0;

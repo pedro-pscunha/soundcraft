@@ -192,6 +192,7 @@ mod tests {
 
     #[test]
     fn refuses_effects_unknown_plugins_and_other_track_kinds() {
+        crate::no_installed_vst3();
         let mut e = Engine::default();
         let inst = track(&mut e, "instrument");
         let audio = track(&mut e, "audio");

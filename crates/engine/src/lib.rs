@@ -64,6 +64,15 @@ pub fn plugin_scan_startup() -> Option<i32> {
     None
 }
 
+/// For tests that reach a VST3 scan: the scans see none of the installed plugins (the standard
+/// folders are replaced by none), so a test never loads one, and one that hangs (a PACE plugin
+/// without its licence service) cannot hang the tests. Under plain `cargo test`, no environment
+/// needed.
+#[cfg(test)]
+pub(crate) fn no_installed_vst3() {
+    soundcraft_vst3_host::set_default_search_paths(Some(Vec::new()));
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EngineError {
     #[error("unknown command `{0}`")]

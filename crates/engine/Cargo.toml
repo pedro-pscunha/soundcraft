@@ -26,6 +26,8 @@ zip.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Its test seam: the engine's tests scan no installed VST3 plugin (see `no_installed_vst3`).
+soundcraft-vst3-host = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true
