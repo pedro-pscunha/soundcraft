@@ -80,7 +80,8 @@ fn gain_processes_audio_and_follows_params() {
     p.process(&mut io, 700);
     assert!(io[0].iter().all(|&x| (x - 1.0).abs() < 1e-6));
     assert!(io[1].iter().all(|&x| (x + 0.5).abs() < 1e-6));
-    // Mono strip: the plugin accepts a mono arrangement; the session value is re-sent.
+    // Mono strip: the plugin accepts a mono arrangement and keeps the gain set above (prepare
+    // re-sends nothing).
     p.prepare(48_000.0, 128, 1);
     let mut mono = vec![vec![0.25f32; 128]];
     p.process(&mut mono, 128);

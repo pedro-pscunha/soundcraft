@@ -66,7 +66,7 @@ impl AuPlugin {
         }
     }
 
-    /// The size in pixels of the unit's view (its own, or the generic one): the open editor's, or
+    /// The size in points of the unit's view (its own, or the generic one): the open editor's, or
     /// one made in a window that is never shown and closed at once. Main thread only; for tests
     /// (the `testing` feature).
     #[cfg(feature = "testing")]

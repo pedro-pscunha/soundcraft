@@ -1,8 +1,8 @@
 //! Audio Unit editors on the process main thread (`harness = false`: the standard harness never
-//! runs tests there). Nothing may reach the screen: views are made without a window
-//! (`editor_size`) or put in a window that is never ordered front (`open_editor_hidden`), and no
-//! window of the process may be visible at any point. Units missing here are skipped. The shown
-//! window is the same one ordered front (checked by hand in the app).
+//! runs tests there). Nothing may reach the screen: every view is made in a window that is never
+//! ordered front (`editor_size` makes one and closes it at once, `open_editor_hidden` keeps it),
+//! and no window of the process may be visible at any point. Units missing here are skipped. The
+//! shown window is the same one ordered front (checked by hand in the app).
 
 #[cfg(target_os = "macos")]
 fn main() {

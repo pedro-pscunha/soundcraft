@@ -1671,7 +1671,7 @@ mod window {
             self.view(mtm).map(objc2::Message::retain)
         }
 
-        /// The view's size in pixels.
+        /// The view's size in points.
         #[cfg(feature = "testing")]
         pub fn size(&self, mtm: MainThreadMarker) -> (u32, u32) {
             let s = self.view(mtm).map_or(NSSize::new(0.0, 0.0), |v| v.frame().size);
