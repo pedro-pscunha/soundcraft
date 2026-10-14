@@ -2584,13 +2584,6 @@ fn follow_update(
     (false, Some(pos))
 }
 
-/// Selection overlay, insertion point and playhead across rulers and tracks.
-/// While playing, auto-scroll keeps the playhead in view for the follow
-/// modes (`page`/`continuous`/`center`) — but any outside view move (a manual
-/// pan, scrollbar, universe jump, or programmatic scroll) pauses it, so the
-/// timeline can be inspected anywhere during playback. Scrolling back to the
-/// playhead, stopping/starting, or re-selecting a scrolling mode resumes the
-/// follow. `none` and `after_playback` never scroll during playback.
 /// Whether the insertion line shows this frame. It blinks twice a second from the moment the
 /// insertion point `at` or the selected `tracks` last changed, so a moved insertion shows at once,
 /// and every view that draws it (the Edit window, the MIDI editor) blinks in step.
@@ -2609,6 +2602,13 @@ pub(crate) fn insertion_shown(ctx: &egui::Context, at: Samples, tracks: &[TrackI
     (phase as i64) % 2 == 0
 }
 
+/// Selection overlay, insertion point and playhead across rulers and tracks.
+/// While playing, auto-scroll keeps the playhead in view for the follow
+/// modes (`page`/`continuous`/`center`) — but any outside view move (a manual
+/// pan, scrollbar, universe jump, or programmatic scroll) pauses it, so the
+/// timeline can be inspected anywhere during playback. Scrolling back to the
+/// playhead, stopping/starting, or re-selecting a scrolling mode resumes the
+/// follow. `none` and `after_playback` never scroll during playback.
 fn overlay(app: &mut SoundApp, ui: &mut Ui, tl: Rect, area: Rect) {
     let t = Tokens::current();
     let mut scroll_to: Option<Samples> = None;
