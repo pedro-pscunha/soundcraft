@@ -17,13 +17,13 @@ fn main() {}
 #[cfg(target_os = "macos")]
 mod macos {
     use objc2::rc::{Retained, autoreleasepool};
-    use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSResponder, NSView, NSWindow,
-        NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+        NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenuItem, NSPasteboard,
+        NSPasteboardTypeString, NSResponder, NSText, NSTextView, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     };
-    use objc2_foundation::{NSDate, NSException, NSPoint, NSRect, NSRunLoop, NSSize, NSString};
+    use objc2_foundation::{NSDate, NSException, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSString};
     use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
     use std::cell::{Cell, RefCell};
 
@@ -32,10 +32,29 @@ mod macos {
     const W: u16 = 13;
     const TAB: u16 = 48;
     const SHIFT: u16 = 56;
+    /// The Edit keys' letters, and S (virtual key codes).
+    const A: u16 = 0;
+    const S: u16 = 1;
+    const Z: u16 = 6;
+    const X: u16 = 7;
+    const C: u16 = 8;
+    const V: u16 = 9;
 
     thread_local! {
         /// Key events seen: (who, what, key code).
         static SEEN: RefCell<Vec<(&'static str, &'static str, u16)>> = const { RefCell::new(Vec::new()) };
+        /// The private pasteboard the test text view copies to and pastes from: the user's general
+        /// pasteboard is never touched.
+        static CLIPBOARD: RefCell<Option<Retained<NSPasteboard>>> = const { RefCell::new(None) };
+    }
+
+    fn clipboard() -> Retained<NSPasteboard> {
+        CLIPBOARD.with(|c| c.borrow_mut().get_or_insert_with(NSPasteboard::pasteboardWithUniqueName).clone())
+    }
+
+    fn clipboard_text() -> Option<String> {
+        // SAFETY: a constant AppKit string.
+        clipboard().stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())
     }
 
     fn record(who: &'static str, what: &'static str, e: &NSEvent) {
@@ -202,6 +221,75 @@ mod macos {
         }
     );
 
+    define_class!(
+        // SAFETY: an NSTextView subclass without instance variables or Drop that overrides `copy:`,
+        // `cut:`, `paste:` and `validateMenuItem:` with their declared signatures.
+        #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SoundCraftTestTextView"]
+        /// A plain Cocoa text view (a value box of Apple's generic view, a native plugin UI) whose
+        /// copy, cut and paste use a private pasteboard: the stock ones use the user's.
+        struct TextView;
+
+        impl TextView {
+            #[unsafe(method(copy:))]
+            fn copy_action(&self, _sender: Option<&AnyObject>) {
+                self.copy_selection();
+            }
+            #[unsafe(method(cut:))]
+            fn cut_action(&self, _sender: Option<&AnyObject>) {
+                self.copy_selection();
+                // SAFETY: NSText's `delete:` (deletes the selection, no pasteboard), no sender.
+                unsafe { self.delete(None) };
+            }
+            #[unsafe(method(paste:))]
+            fn paste_action(&self, _sender: Option<&AnyObject>) {
+                // SAFETY: a constant AppKit string.
+                self.readSelectionFromPasteboard_type(&clipboard(), unsafe { NSPasteboardTypeString });
+            }
+            #[unsafe(method(validateMenuItem:))]
+            fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+                if item.action() == Some(sel!(paste:)) {
+                    clipboard_text().is_some()
+                } else {
+                    // SAFETY: NSTextView's own `validateMenuItem:` (copy: needs a selection).
+                    unsafe { msg_send![super(self), validateMenuItem: item] }
+                }
+            }
+        }
+    );
+
+    impl TextView {
+        fn copy_selection(&self) {
+            let selected = self.string().substringWithRange(self.selectedRange());
+            let pasteboard = clipboard();
+            pasteboard.clearContents();
+            // SAFETY: a constant AppKit string.
+            pasteboard.setString_forType(&selected, unsafe { NSPasteboardTypeString });
+        }
+    }
+
+    define_class!(
+        // SAFETY: an NSView subclass without Drop that overrides `copy:` with its declared
+        // signature.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SoundCraftTestThrowingCopy"]
+        /// A plugin control whose own `copy:` throws an Objective-C exception.
+        struct ThrowingCopy;
+
+        impl ThrowingCopy {
+            #[unsafe(method(acceptsFirstResponder))]
+            fn accepts_first_responder(&self) -> bool {
+                true
+            }
+            #[unsafe(method(copy:))]
+            fn copy_action(&self, _sender: Option<&AnyObject>) {
+                throws_now();
+            }
+        }
+    );
+
     /// Throws an Objective-C exception.
     fn throws_now() {
         let name = NSString::from_str("SoundCraftTestException");
@@ -229,6 +317,12 @@ mod macos {
             SPACE => " ",
             W => "w",
             TAB => "\t",
+            A => "a",
+            S => "s",
+            Z => "z",
+            X => "x",
+            C => "c",
+            V => "v",
             _ => "",
         });
         NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
@@ -252,6 +346,29 @@ mod macos {
         autoreleasepool(|_| window.sendEvent(&key(window, ty, code, flags)));
     }
 
+    /// Delivers a key-down as AppKit does to its key window: offered as a key equivalent first (to
+    /// the window), it arrives as `keyDown:` only if nothing took it. In a pool, as in `type_key`.
+    fn press(window: &NSWindow, code: u16, flags: NSEventModifierFlags) {
+        autoreleasepool(|_| {
+            let e = key(window, NSEventType::KeyDown, code, flags);
+            if !window.performKeyEquivalent(&e) {
+                window.sendEvent(&e);
+            }
+        });
+    }
+
+    /// A text view in `window`'s content view, holding `text`, focused.
+    fn focused_text(mtm: MainThreadMarker, window: &PluginWindow, text: &str) -> Retained<TextView> {
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 40.0));
+        // SAFETY: NSTextView's `initWithFrame:` on a fresh instance of the subclass.
+        let view: Retained<TextView> = unsafe { msg_send![super(TextView::alloc(mtm).set_ivars(())), initWithFrame: frame] };
+        view.setString(&NSString::from_str(text));
+        view.setAllowsUndo(true);
+        window.content_view(mtm).expect("a content view").addSubview(&view);
+        assert!(window.window(mtm).makeFirstResponder(Some(&view)));
+        view
+    }
+
     /// A hidden, titled window: SoundCraft's (winit's class) when `app`, else a plain `NSWindow`.
     fn hidden_window(mtm: MainThreadMarker, app: bool) -> Retained<NSWindow> {
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 100.0));
@@ -270,6 +387,11 @@ mod macos {
         // SAFETY: the caller holds its own retain of the window.
         unsafe { w.setReleasedWhenClosed(false) };
         w
+    }
+
+    /// The titles of the process's windows.
+    fn titles(mtm: MainThreadMarker) -> Vec<String> {
+        autoreleasepool(|_| NSApplication::sharedApplication(mtm).windows().iter().map(|w| w.title().to_string()).collect())
     }
 
     /// The process's windows: (all, visible).
@@ -577,6 +699,77 @@ mod macos {
         autoreleasepool(|_| NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05)));
         std::panic::set_hook(hook);
         assert!(ran.load(std::sync::atomic::Ordering::Relaxed), "later work still runs");
+
+        // The Edit keys go to the plugin's focused control as another app's Edit menu sends them
+        // (SoundCraft's menu bar has none): a plain Cocoa text view copies, pastes, cuts, undoes,
+        // redoes and selects all. Its copy and paste use a private pasteboard here. It runs last: a
+        // text view with an insertion point makes AppKit add a hidden window of its own
+        // (TextInputUI's), which the window counts above would see.
+        let general = NSPasteboard::generalPasteboard().changeCount();
+        autoreleasepool(|_| {
+            let cmd = NSEventModifierFlags::Command;
+            let edit = PluginWindow::new(mtm, "Edit Keys", NSSize::new(200.0, 100.0));
+            let win = edit.window(mtm);
+
+            // No control focused (the window itself is first responder): they are handed on to
+            // SoundCraft as before (⌘Z is its undo), as is any other ⌘-key.
+            assert!(win.makeFirstResponder(None));
+            for code in [C, V, X, Z, A, S] {
+                press(win, code, cmd);
+            }
+            press(win, Z, cmd | NSEventModifierFlags::Shift);
+            let downs = |codes: &[u16]| codes.iter().map(|&c| ("soundcraft", "down", c)).collect::<Vec<_>>();
+            assert_eq!(seen(), downs(&[C, V, X, Z, A, S, Z]), "no control focused: handed on");
+
+            // A focused control that implements none of the actions, with nothing to undo in the
+            // window: handed on too.
+            let passing = plugin_view(mtm, false);
+            edit.content_view(mtm).expect("a content view").addSubview(&passing);
+            assert!(win.makeFirstResponder(Some(&passing)));
+            press(win, C, cmd);
+            press(win, Z, cmd);
+            assert_eq!(seen(), downs(&[C, Z]), "nothing takes them: handed on");
+            passing.removeFromSuperview();
+
+            let text = focused_text(mtm, &edit, "hello");
+            press(win, A, cmd);
+            assert_eq!(text.selectedRange(), NSRange::new(0, 5), "⌘A selects all");
+            press(win, C, cmd);
+            assert_eq!(clipboard_text().as_deref(), Some("hello"), "⌘C copies");
+            text.setSelectedRange(NSRange::new(5, 0));
+            press(win, V, cmd);
+            assert_eq!(text.string().to_string(), "hellohello", "⌘V pastes");
+            press(win, Z, cmd);
+            assert_eq!(text.string().to_string(), "hello", "⌘Z undoes the paste (the window's undo)");
+            press(win, Z, cmd | NSEventModifierFlags::Shift);
+            assert_eq!(text.string().to_string(), "hellohello", "⇧⌘Z redoes it");
+            text.setSelectedRange(NSRange::new(0, 5));
+            press(win, X, cmd);
+            assert_eq!(text.string().to_string(), "hello", "⌘X cuts");
+            assert_eq!(clipboard_text().as_deref(), Some("hello"));
+            assert_eq!(seen(), [], "none of them reached SoundCraft");
+            text.removeFromSuperview();
+
+            // A control whose own `copy:` throws: caught, and the key counts as taken (it is not
+            // handed on), never left to abort the app.
+            // SAFETY: NSView's designated initializer on a fresh instance.
+            let thrower: Retained<ThrowingCopy> = unsafe { msg_send![super(ThrowingCopy::alloc(mtm).set_ivars(())), initWithFrame: rect] };
+            edit.content_view(mtm).expect("a content view").addSubview(&thrower);
+            assert!(win.makeFirstResponder(Some(&thrower)));
+            press(win, C, cmd);
+            assert_eq!(seen(), [], "taken");
+            thrower.removeFromSuperview();
+
+            // Closing lets go of the keys handed on above (their key-ups); not under test here.
+            drop(edit);
+            let _ = seen();
+        });
+        assert!(!titles(mtm).iter().any(|t| t == "Edit Keys"), "the plugin window is gone");
+        assert_eq!(NSPasteboard::generalPasteboard().changeCount(), general, "the user's pasteboard is untouched");
+        if let Some(private) = CLIPBOARD.with(|c| c.borrow_mut().take()) {
+            // SAFETY: `releaseGlobally` takes no arguments; the pasteboard is not used after it.
+            let () = unsafe { msg_send![&*private, releaseGlobally] };
+        }
 
         testing::set_key_target(None);
         app_window.close();

@@ -32,10 +32,21 @@
 //!   [`set_app_wants_keyboard`]): a key-down handed on would type into that field out of sight, so
 //!   AppKit's own handling runs (a beep).
 //! - What plugins keep: every key their views handle: text fields, their own shortcuts, a
-//!   computer-keyboard piano. `performKeyEquivalent:` is not overridden, so AppKit still offers
-//!   ⌘-keys to the plugin's views first. SoundCraft's menu bar has no key equivalents (its
-//!   shortcuts are egui's, Quit and Hide included), so every ⌘-key a plugin does not take arrives
-//!   as `keyDown:` and is handed on like any other: ⌘S saves, ⌘Q quits.
+//!   computer-keyboard piano. AppKit offers ⌘-keys to the plugin's views first (the window's
+//!   `performKeyEquivalent:` runs NSWindow's own before anything else). SoundCraft's menu bar has
+//!   no key equivalents (its shortcuts are egui's, Quit and Hide included), so every ⌘-key a
+//!   plugin does not take arrives as `keyDown:` and is handed on like any other: ⌘S saves, ⌘Q
+//!   quits.
+//! - The Edit keys: ⌘C, ⌘V, ⌘X, ⌘Z, ⇧⌘Z and ⌘A (by the character typed, no other modifier) that
+//!   no plugin view took go to the plugin's focused control as another app's Edit menu sends them
+//!   (`copy:`, `paste:`, `cut:`, `undo:`, `redo:`, `selectAll:`): to the first of that control and
+//!   the responders after it, up to the window, that implements the action, when it is enabled
+//!   there (`validateMenuItem:`, else `validateUserInterfaceItem:`). So a plain Cocoa text field
+//!   (Apple's generic view's value boxes, a native plugin UI) copies, pastes and undoes. A text
+//!   field's undo is the window's (`undo:` is NSWindow's), so ⌘Z after typing in a plugin's field
+//!   undoes that typing. With no control focused (the window itself is first responder), or when
+//!   no responder implements the action or it is disabled (nothing selected to copy, nothing to
+//!   undo), the key goes on to `keyDown:` and is handed on as before: ⌘Z is SoundCraft's undo.
 //! - ⌘W (no other modifier) that the plugin does not take closes the editor's own window
 //!   (`performClose:`, as its close button does; the editor is taken down at the next idle).
 //!   Handed on, it would close SoundCraft's window. ⌘W with another modifier is handed on.
@@ -53,9 +64,12 @@
 //! 2. With the editor in front, click its insert again: the editor closes. Click once more: it
 //!    opens.
 //! 3. Click a text field in the plugin's editor (a preset name, a value box) and type: the text
-//!    goes to the plugin, and Space types a space instead of starting playback. Select text in it
-//!    and press ⌘C, ⌘V, ⌘Z: they stay in the field (SoundCraft copies, pastes and undoes
-//!    nothing; a plain Cocoa field such as Apple's generic view's may do nothing at all).
+//!    goes to the plugin, and Space types a space instead of starting playback. In a plain Cocoa
+//!    field (an Audio Unit with Apple's generic view): ⌘A selects all of it, ⌘C then ⌘V pastes a
+//!    copy, ⌘Z undoes the paste and ⇧⌘Z redoes it, ⌘X cuts, and the text pasted into another app
+//!    is the one copied. SoundCraft copies, pastes and undoes nothing meanwhile. Close the editor,
+//!    open it again and, before clicking in it (no field focused), press ⌘Z: SoundCraft undoes its
+//!    last edit.
 //! 4. With the editor key and no field of the plugin focused, press ⇧Space: playback starts at
 //!    half speed (a shortcut that needs its modifier). Hold ⌥ or ⇧ and click in the Edit window:
 //!    SoundCraft sees the modifier as with its own window key. Hold ⇧ in the editor, ⌘Tab to

@@ -3,10 +3,10 @@
 //! [`crate::plugin_window`] for the behaviour.
 
 use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::{AnyClass, NSObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
+use objc2::runtime::{AnyClass, NSObject, Sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSResponder, NSView, NSWindow,
+    NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenuItem, NSResponder, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
@@ -32,9 +32,9 @@ struct Handed {
 define_class!(
     // SAFETY: `NSWindow` may be subclassed. The instance variables (`Handed`) are Rust values
     // dropped with the window, and touched only on the main thread (the class is main-thread
-    // only). The subclass overrides `keyDown:`, `keyUp:`, `flagsChanged:`, `resignKeyWindow`,
-    // `close` and `canBecomeMainWindow` with the signatures AppKit declares for them, and calls
-    // NSWindow's own implementation where it hands nothing on.
+    // only). The subclass overrides `keyDown:`, `keyUp:`, `flagsChanged:`, `performKeyEquivalent:`,
+    // `resignKeyWindow`, `close` and `canBecomeMainWindow` with the signatures AppKit declares for
+    // them, and calls NSWindow's own implementation where it hands nothing on.
     #[unsafe(super(NSWindow, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "SoundCraftPluginWindow"]
@@ -95,6 +95,19 @@ define_class!(
             self.ivars().flags.set(true);
         }
 
+        /// A ⌘-key, before it arrives as `keyDown:`: the plugin's views first (NSWindow's own
+        /// handling), then the Edit keys for the plugin's focused control (see `perform_edit`).
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            let taken = guarded("offering a ⌘-key to the plugin", || {
+                // SAFETY: NSWindow's own `performKeyEquivalent:`, with the event AppKit passed in.
+                let taken: bool = unsafe { msg_send![super(self), performKeyEquivalent: event] };
+                taken
+            });
+            // A plugin's code threw: the key counts as taken, so none of its code runs again for it.
+            taken.unwrap_or(true) || self.perform_edit(event)
+        }
+
         /// No longer key: the key-ups and modifier changes of the keys still held go elsewhere.
         #[unsafe(method(resignKeyWindow))]
         fn resign_key_window(&self) {
@@ -146,6 +159,98 @@ impl HostWindow {
                 forward(mtm, &flags, Key::Flags);
             }
         });
+    }
+
+    /// ⌘C, ⌘V, ⌘X, ⌘Z, ⇧⌘Z and ⌘A for the plugin's focused control, as another app's Edit menu
+    /// sends them (SoundCraft's menu bar has no key equivalents): the action goes to the first of
+    /// the focused control and the responders after it, up to this window, that implements it, if
+    /// it is enabled there. True when it was sent. False (the key goes on to `keyDown:`, and so
+    /// to SoundCraft, as before) for a key aimed at another window, with no control focused (the
+    /// window itself first responder), or when no responder implements the action or it is
+    /// disabled (nothing selected to copy, nothing to undo).
+    fn perform_edit(&self, event: &NSEvent) -> bool {
+        let Some(action) = edit_action(event) else { return false };
+        if event.windowNumber() != self.windowNumber() {
+            return false;
+        }
+        let window: &NSWindow = self;
+        let mtm = self.mtm();
+        // The focused control's own code runs here (`respondsToSelector:`, validation, the action).
+        guarded("an Edit key for the plugin's control", || {
+            let Some(focused) = self.firstResponder().filter(|r| !std::ptr::addr_eq(Retained::as_ptr(r), std::ptr::from_ref(window))) else {
+                return false;
+            };
+            let Some(target) = responder_for(focused, action, window) else { return false };
+            // The menu item such an Edit menu would validate and send the action from.
+            // SAFETY: a valid selector of an action method (`copy:` and the others take a sender).
+            let item =
+                unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::new(), Some(action), &NSString::new()) };
+            // SAFETY: `target` implements `action`, an action method taking its sender, which the
+            // item is.
+            enabled(&target, &item) && unsafe { NSApplication::sharedApplication(mtm).sendAction_to_from(action, Some(&target), Some(&item)) }
+        })
+        // A plugin's code threw: the key counts as taken, as in `performKeyEquivalent:`.
+        .unwrap_or(true)
+    }
+}
+
+/// The Edit menu's action for a ⌘-key down: ⌘C `copy:`, ⌘V `paste:`, ⌘X `cut:`, ⌘Z `undo:`,
+/// ⇧⌘Z `redo:`, ⌘A `selectAll:`. By the character the key types, so it follows the keyboard
+/// layout as menu shortcuts do; no other modifier (Caps Lock aside).
+fn edit_action(event: &NSEvent) -> Option<Sel> {
+    if event.r#type() != NSEventType::KeyDown {
+        return None;
+    }
+    let held = NSEventModifierFlags::Shift | NSEventModifierFlags::Control | NSEventModifierFlags::Option | NSEventModifierFlags::Command;
+    let flags = event.modifierFlags() & held;
+    let key = event.charactersIgnoringModifiers()?.to_string().to_ascii_lowercase();
+    if flags == NSEventModifierFlags::Command {
+        match key.as_str() {
+            "c" => Some(sel!(copy:)),
+            "v" => Some(sel!(paste:)),
+            "x" => Some(sel!(cut:)),
+            "z" => Some(sel!(undo:)),
+            "a" => Some(sel!(selectAll:)),
+            _ => None,
+        }
+    } else if flags == NSEventModifierFlags::Command | NSEventModifierFlags::Shift && key == "z" {
+        Some(sel!(redo:))
+    } else {
+        None
+    }
+}
+
+/// The first of `from` and the responders after it, up to and including `window`, that implements
+/// `action`. A text field's undo is its window's (`undo:` is NSWindow's). At most 64 responders: a
+/// chain that a plugin looped is not followed forever.
+fn responder_for(from: Retained<NSResponder>, action: Sel, window: &NSWindow) -> Option<Retained<NSResponder>> {
+    let mut next = Some(from);
+    for _ in 0..64 {
+        let r = next?;
+        if r.respondsToSelector(action) {
+            return Some(r);
+        }
+        if std::ptr::addr_eq(Retained::as_ptr(&r), std::ptr::from_ref(window)) {
+            return None;
+        }
+        // SAFETY: the getter retains what it returns.
+        next = unsafe { r.nextResponder() };
+    }
+    None
+}
+
+/// Whether `target` enables `item`'s action now, asked as a menu asks: `validateMenuItem:`, else
+/// `validateUserInterfaceItem:`, else enabled.
+fn enabled(target: &NSResponder, item: &NSMenuItem) -> bool {
+    if target.respondsToSelector(sel!(validateMenuItem:)) {
+        // SAFETY: `validateMenuItem:` (NSMenuItemValidation) takes a menu item and returns a BOOL.
+        unsafe { msg_send![target, validateMenuItem: item] }
+    } else if target.respondsToSelector(sel!(validateUserInterfaceItem:)) {
+        // SAFETY: `validateUserInterfaceItem:` (NSUserInterfaceValidations) takes an
+        // `NSValidatedUserInterfaceItem`, which a menu item is, and returns a BOOL.
+        unsafe { msg_send![target, validateUserInterfaceItem: item] }
+    } else {
+        true
     }
 }
 
@@ -463,12 +568,12 @@ unsafe extern "C" fn run_job(context: *mut std::ffi::c_void) {
 }
 
 /// Runs `f`, which may run a plugin view's own code (AppKit calls into the views as it shows,
-/// closes or refocuses their window), catching an Objective-C exception thrown there (logged):
-/// uncaught, it would unwind into AppKit or abort SoundCraft.
-fn guarded(what: &str, f: impl FnOnce()) {
-    if let Err(e) = objc2::exception::catch(std::panic::AssertUnwindSafe(f)) {
-        log::error!("plugin window: {what} threw an Objective-C exception: {}", e.map_or_else(|| "nil".to_string(), |e| e.to_string()));
-    }
+/// closes or refocuses their window), catching an Objective-C exception thrown there (logged, and
+/// `None`): uncaught, it would unwind into AppKit or abort SoundCraft.
+fn guarded<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
+    objc2::exception::catch(std::panic::AssertUnwindSafe(f))
+        .map_err(|e| log::error!("plugin window: {what} threw an Objective-C exception: {}", e.map_or_else(|| "nil".to_string(), |e| e.to_string())))
+        .ok()
 }
 
 /// SoundCraft is the active app.
