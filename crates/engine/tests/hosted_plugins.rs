@@ -140,6 +140,14 @@ fn offline_renders_wait_for_hosted_plugins_to_load() {
     let inst = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
     e.execute("mix.instrument", &json!({"track": inst.0, "plugin": SYNTH})).unwrap();
     assert!(loading(&e).is_some(), "a hosted instrument may load its sounds");
+    // A sliced bounce (the app's Bounce Mix) says so while it waits, and renders nothing then.
+    let out = std::env::temp_dir().join(format!("soundcraft-load-wait-{}.wav", std::process::id()));
+    let mut job = soundcraft_engine::cmd::bounce_job(&e, &json!({"path": out.to_string_lossy()})).unwrap();
+    assert!(job.loading());
+    assert!(job.step(|| false).unwrap().is_none());
+    assert!(job.loading() && job.progress() == 0.0, "still loading: nothing rendered");
+    drop(job);
+    let _ = std::fs::remove_file(&out);
     e.execute("track.delete", &json!({"tracks": [inst.0]})).unwrap();
     assert_eq!(loading(&e), None);
 

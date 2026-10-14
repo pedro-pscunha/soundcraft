@@ -74,7 +74,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         ui.add(egui::ProgressBar::new(job.progress()));
         ui.horizontal(|ui| {
             cancel |= ui.button("Cancel").clicked();
-            ui.label(egui::RichText::new(format!("{:.0}%", job.progress() * 100.0)).color(Tokens::current().text_dim));
+            let state = if job.loading() { "Loading plugins…".to_string() } else { format!("{:.0}%", job.progress() * 100.0) };
+            ui.label(egui::RichText::new(state).color(Tokens::current().text_dim));
         });
     });
     if cancel {

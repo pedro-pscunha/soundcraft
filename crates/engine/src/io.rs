@@ -439,8 +439,15 @@ impl Bounce {
         }
     }
 
-    /// Renders blocks until `more` returns false (at least one per call). Returns the finished
-    /// bounce once its file is complete.
+    /// True while the render waits for hosted plugins to load before its first block
+    /// (`soundcraft_mix::RangeRender::loading`).
+    pub fn loading(&self) -> bool {
+        self.render.loading().is_some()
+    }
+
+    /// Renders blocks until `more` returns false: at least one per call, except while hosted
+    /// plugins load ([`Bounce::loading`]), when it waits in 10 ms pieces and asks `more` after each
+    /// (a call may then render nothing). Returns the finished bounce once its file is complete.
     pub fn step(&mut self, mut more: impl FnMut() -> bool) -> Result<Option<Bounced>> {
         loop {
             // Hosted plugins still loading: wait in short pieces so a sliced caller keeps drawing.
