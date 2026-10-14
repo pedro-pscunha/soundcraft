@@ -388,6 +388,8 @@ fn is_control_method(method: &str) -> bool {
             | "ui.drag"
             | "ui.key"
             | "ui.text"
+            | "ui.scroll"
+            | "ui.zoom"
             | "ui.screenshot"
             | "app.quit"
     )
@@ -555,6 +557,25 @@ mod tests {
         assert_eq!(m, "engine.execute");
         for method in ["session.inspect", "engine.commands", "engine.parity", "ui.screenshot", "app.quit"] {
             assert_eq!(app_request(method, json!({})).0, method);
+        }
+    }
+
+    /// Every method the app's control channel answers stays a method here, not an engine command:
+    /// the list is read from the channel's own `match` (a method missing here was sent as
+    /// `engine.execute` and failed, as `ui.scroll` and `ui.zoom` once were).
+    #[test]
+    fn every_control_channel_method_is_sent_as_a_method() {
+        let control = include_str!("../../../crates/ui-egui/src/control.rs");
+        let methods: Vec<&str> = control
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix('"').and_then(|_| l.split_once("=>")).map(|(arms, _)| arms))
+            .flat_map(|arms| arms.split('|'))
+            .filter_map(|arm| arm.trim().strip_prefix('"')?.strip_suffix('"'))
+            .filter(|m| m.contains('.'))
+            .collect();
+        assert!(methods.len() > 10 && methods.contains(&"ui.scroll"), "the channel's methods were not found: {methods:?}");
+        for method in methods {
+            assert!(is_control_method(method), "{method} would be sent as an engine command");
         }
     }
 
