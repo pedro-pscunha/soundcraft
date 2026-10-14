@@ -1704,9 +1704,10 @@ fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
 
 fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track, i: usize, pos: Samples) {
     // Most strips have no lane for this slot: skip the lookup per parameter.
-    let automated = u8::try_from(i)
-        .is_ok_and(|n| t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if *slot == n) && !l.points.is_empty()));
-    apply_values(slot, ins, |k, val| match driving_lane(t, i, k).filter(|_| automated) {
+    let automated = t.mixer.automation_mode.reads()
+        && u8::try_from(i)
+            .is_ok_and(|n| t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if *slot == n) && !l.points.is_empty()));
+    apply_values(slot, ins, |k, val| match automated.then(|| driving_lane(t, i, k)).flatten() {
         Some(l) => l.value_at(pos, val),
         None => val,
     });
