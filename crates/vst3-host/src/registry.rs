@@ -334,9 +334,9 @@ fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
     if r.generation == generation {
         r.scanned = Some(found.clone());
         let (not_scanned, skipped): (Vec<_>, Vec<_>) = new.into_iter().partition(|s| s.helper_failed);
-        let mut all = known;
-        add_skips(&mut all, skipped);
-        r.skipped = all;
+        // Added to what is there: other scans (a folder added meanwhile) may have skipped bundles
+        // too.
+        add_skips(&mut r.skipped, skipped);
         // This scan covered every folder: only its own bundles stay not scanned.
         r.not_scanned = not_scanned;
     }
@@ -369,7 +369,13 @@ pub fn add_search_dir(dir: &Path) -> usize {
     let (found, new) = scan_unlocked(&[dir.to_path_buf()], helper.as_ref(), &known, false);
     let n = found.len();
     remember_skips(new);
-    if let Some(list) = lock().scanned.as_mut() {
+    // A scan of the search folders running now began without this folder: its result is merged
+    // into that scan's once it is stored.
+    let mut r = lock();
+    while r.scanning {
+        r = scan_done().wait(r).unwrap_or_else(PoisonError::into_inner);
+    }
+    if let Some(list) = r.scanned.as_mut() {
         merge(list, found);
     }
     n

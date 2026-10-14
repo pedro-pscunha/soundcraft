@@ -61,6 +61,28 @@ fn main() {
     }
     // A fresh process for `adding_a_folder_first_keeps_the_standard_ones`: its standard folders hold
     // `standard`; `extra` is added before anything has scanned.
+    // A fresh process for `a_folder_added_during_a_scan_is_kept`: a scan of the standard folders is
+    // stuck on `slow` while `late` (one good bundle, one that crashes) is added.
+    if let [mode, slow, late] = args.as_slice()
+        && mode == "--add-during-scan"
+    {
+        let (slow, late) = (PathBuf::from(slow), PathBuf::from(late));
+        soundcraft_vst3_host::set_scan_helper(Some(helper()));
+        let first = std::thread::spawn(soundcraft_vst3_host::scan);
+        let started = Instant::now();
+        while launches(&slow) == 0 && started.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let held = soundcraft_vst3_host::add_search_dir(&late);
+        first.join().unwrap();
+        let found: Vec<PathBuf> = soundcraft_vst3_host::scan().into_iter().map(|d| d.path).collect();
+        let skipped: Vec<PathBuf> = soundcraft_vst3_host::skipped().into_iter().map(|s| s.path).collect();
+        let ok = held == 2 && found.len() == 2 && found.iter().all(|p| p.starts_with(&late)) && skipped.len() == 2 && skipped.contains(&slow);
+        if !ok {
+            eprintln!("add_search_dir: {held}; scan(): {found:?}; skipped(): {skipped:?}");
+        }
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     // A fresh process for `a_rescan_asked_for_during_a_scan_rescans`: a scan is stuck on `slow`,
     // a rescan is asked for, and the stuck scan's caller scans again as soon as it is done. Exits
     // 0 when `crashy`, cached as skipped, was scanned again (the rescan's scan was fresh).
@@ -151,6 +173,7 @@ fn main() {
     the_registry_answers_while_helpers_scan(&root.join("busy"));
     a_rescan_during_a_scan_wins(&root.join("raced"));
     a_rescan_asked_for_during_a_scan_rescans(&root.join("pending"));
+    a_folder_added_during_a_scan_is_kept(&root.join("during"));
     adding_a_folder_first_keeps_the_standard_ones(&root.join("add-first"));
     #[cfg(unix)]
     a_helper_ends_when_its_host_is_gone(&root.join("orphan"));
@@ -526,6 +549,23 @@ fn a_rescan_during_a_scan_wins(dir: &Path) {
     assert!(skipped.is_empty(), "the first scan's result won: {skipped:?}");
     assert_eq!(launches(&raced), before + 2, "scanned again after the first scan");
     soundcraft_vst3_host::set_scan_helper(None);
+}
+
+/// A folder added while a scan of the standard folders runs keeps its plugins and its skipped
+/// bundles once that scan ends (in a fresh process, see `--add-during-scan`).
+fn a_folder_added_during_a_scan_is_kept(dir: &Path) {
+    let (slow, _) = install(&dir.join("standard"), "Slow", Some("hang-entry"));
+    let late = dir.join("late");
+    install(&late, "Late", None);
+    install(&late, "LateCrash", Some("crash-entry"));
+    let child = Command::new(std::env::current_exe().unwrap())
+        .arg("--add-during-scan")
+        .arg(&slow)
+        .arg(&late)
+        .env("SOUNDCRAFT_VST3_DEFAULT_PATHS", dir.join("standard"))
+        .output()
+        .unwrap();
+    assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stderr));
 }
 
 /// A rescan asked for while a scan runs is a rescan, whichever caller begins the next scan: with
