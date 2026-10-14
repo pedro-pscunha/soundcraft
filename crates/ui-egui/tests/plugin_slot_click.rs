@@ -223,3 +223,26 @@ fn a_built_in_inserts_menu_is_unchanged() {
     assert!(h.query_by_label("Edit Parameters…").is_none(), "a click already opens a built-in's parameters");
     assert!(h.query_by_label("Bypass").is_some());
 }
+
+#[test]
+fn a_hosted_slots_tooltip_says_a_click_opens_or_closes_its_editor() {
+    for (kind, label, tip) in [
+        ("audio", "Insert C", format!("{HOSTED}: click to open or close its editor · {{cmd}}click to bypass · right-click to change")),
+        ("audio", "Insert B", "EQ7: click to open · {cmd}click to bypass · right-click to change".to_string()),
+        ("instrument", "Instrument", "Click: open or close its editor · right-click: change".to_string()),
+    ] {
+        let (app, _) = app(kind, false, |t| {
+            t.mixer.inserts[1] = Some(Insert::new("eq_7band"));
+            if kind == "audio" {
+                t.mixer.inserts[C] = Some(Insert::new(HOSTED));
+            } else {
+                t.instrument = Some(Insert::new(HOSTED));
+            }
+        });
+        let mut h = mix(app);
+        let tip = tip.replace("{cmd}", if h.ctx.os().is_mac() { "⌘" } else { "Ctrl+" });
+        h.get_by_label(label).hover();
+        h.run_steps(60);
+        assert!(h.query_by_label(&tip).is_some(), "{label}: {tip}");
+    }
+}

@@ -507,7 +507,7 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
     if resp.clicked() && hosted {
         click_slot(app, id, slot);
     }
-    let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
+    let menu_resp = if hosted { resp.clone().on_hover_text("Click: open or close its editor · right-click: change") } else { resp.clone() };
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     popup.show(|ui| instrument_menu(app, ui, id));
@@ -608,7 +608,9 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
         }
     }
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
-    let tip = format!("{name}: click to open · {cmd}click to bypass · right-click to change");
+    let hosted = ins.as_ref().is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
+    let open = if hosted { "open or close its editor" } else { "open" };
+    let tip = format!("{name}: click to {open} · {cmd}click to bypass · right-click to change");
     let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text(tip) };
     let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
