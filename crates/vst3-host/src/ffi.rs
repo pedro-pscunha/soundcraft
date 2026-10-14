@@ -2073,7 +2073,7 @@ mod window {
             self.live().unwrap_or(std::ptr::null_mut())
         }
 
-        pub fn raise(&self) {
+        pub fn raise(&mut self) {
             if let Some(h) = self.live() {
                 // SAFETY: a live window of this thread.
                 unsafe {
@@ -2138,7 +2138,7 @@ mod window {
         pub fn parent(&self) -> *mut c_void {
             std::ptr::null_mut()
         }
-        pub fn raise(&self) {}
+        pub fn raise(&mut self) {}
         pub fn is_visible(&self) -> bool {
             false
         }
