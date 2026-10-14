@@ -57,6 +57,10 @@ const STDERR_TAIL: usize = 8 << 10;
 const MAX_LAST_LINE: usize = 200;
 /// Most characters of a skip reason (a helper's error answer can be anything).
 const MAX_REASON: usize = 300;
+/// Most characters of a plugin's name, vendor, version or sub-category from a helper or the cache.
+const MAX_FIELD: usize = 256;
+/// Most sub-categories kept per plugin (as a scan in this process splits them).
+const MAX_SUB_CATEGORIES: usize = 32;
 /// How long a helper may take to exit once it has answered.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// How long a killed helper is waited for here before a thread of its own reaps it.
@@ -434,7 +438,9 @@ fn judge(
 /// with `path` set to `bundle`; others are logged and dropped (they could never be created, or
 /// would claim another host's ids). The fields derived from the sub-categories (category,
 /// instrument or not) are derived again by this build, so a fix of that mapping reaches cached
-/// plugins without a rescan.
+/// plugins without a rescan. Their text is made fit for menus and the cache: control characters
+/// become spaces, each field is cut to [`MAX_FIELD`] characters and the sub-categories to
+/// [`MAX_SUB_CATEGORIES`].
 pub(crate) fn well_formed(ds: Vec<Vst3Descriptor>, bundle: &Path) -> Vec<Vst3Descriptor> {
     let (good, bad): (Vec<_>, Vec<_>) =
         ds.into_iter().partition(|d| parse_id(&d.id).is_some() && d.id.strip_prefix(ID_PREFIX) == Some(d.class_id.as_str()));
@@ -442,19 +448,33 @@ pub(crate) fn well_formed(ds: Vec<Vst3Descriptor>, bundle: &Path) -> Vec<Vst3Des
         log::warn!("vst3: ignoring {} malformed plugin entries for {} (such as id {:?})", bad.len(), bundle.display(), clean_reason(&d.id));
     }
     good.into_iter()
-        .map(|d| Vst3Descriptor {
-            path: bundle.to_path_buf(),
-            category: crate::scan::category_from_sub_categories(&d.sub_categories),
-            is_instrument: crate::scan::is_instrument(&d.sub_categories),
-            ..d
+        .map(|d| {
+            let sub_categories: Vec<String> = d.sub_categories.iter().take(MAX_SUB_CATEGORIES).map(|s| clean_text(s, MAX_FIELD)).collect();
+            Vst3Descriptor {
+                path: bundle.to_path_buf(),
+                category: crate::scan::category_from_sub_categories(&sub_categories),
+                is_instrument: crate::scan::is_instrument(&sub_categories),
+                name: clean_text(&d.name, MAX_FIELD),
+                vendor: clean_text(&d.vendor, MAX_FIELD),
+                version: clean_text(&d.version, MAX_FIELD),
+                sdk_version: clean_text(&d.sdk_version, MAX_FIELD),
+                sub_categories,
+                ..d
+            }
         })
         .collect()
+}
+
+/// `text` with its control characters (line breaks, terminal escapes) turned into spaces, cut to
+/// `max` characters.
+fn clean_text(text: &str, max: usize) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).take(max).collect()
 }
 
 /// A reason fit for a log line and a list: control characters (line breaks, terminal escapes)
 /// become spaces, and it is cut to [`MAX_REASON`] characters.
 pub(crate) fn clean_reason(reason: &str) -> String {
-    reason.chars().map(|c| if c.is_control() { ' ' } else { c }).take(MAX_REASON).collect()
+    clean_text(reason, MAX_REASON)
 }
 
 /// How a helper that never answered ended.
@@ -674,6 +694,26 @@ mod tests {
             panic!()
         };
         assert_eq!(why, "timed out after 1s; its last output: last  line");
+    }
+
+    #[test]
+    fn plugin_text_is_capped_and_cleaned() {
+        let bundle = Path::new("/p/A.vst3");
+        let huge = format!("Name\n\u{1b}[2J{}", "n".repeat(8 << 20));
+        let wild = Vst3Descriptor {
+            name: huge.clone(),
+            vendor: huge.clone(),
+            version: huge.clone(),
+            sdk_version: huge,
+            sub_categories: (0..1000).map(|i| format!("Cat{i}\t")).collect(),
+            ..descriptor("x", "/p")
+        };
+        let [d] = well_formed(vec![wild], bundle).try_into().unwrap();
+        for field in [&d.name, &d.vendor, &d.version, &d.sdk_version] {
+            assert!(field.chars().count() == MAX_FIELD && field.starts_with("Name  [2J"), "{:?}", &field[..20]);
+        }
+        assert_eq!(d.sub_categories.len(), MAX_SUB_CATEGORIES);
+        assert_eq!(d.sub_categories[0], "Cat0 ");
     }
 
     #[test]

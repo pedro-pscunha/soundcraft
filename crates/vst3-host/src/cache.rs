@@ -293,13 +293,16 @@ mod tests {
         let d = dir("malformed");
         let (file, a, b) = (d.join("vst3.json"), d.join("A.vst3"), d.join("B.vst3"));
         let other_host = Vst3Descriptor { id: "clap:com.x".into(), ..plugin(&a) };
+        let long = Vst3Descriptor { name: format!("Gain{}", "\n".repeat(5000)), ..plugin(&a) };
         let json = serde_json::json!({"version": VERSION, "scanner": scanner(), "bundles": [
-            {"path": a, "fingerprint": PRINT, "outcome": {"plugins": [other_host, plugin(&a)]}},
+            {"path": a, "fingerprint": PRINT, "outcome": {"plugins": [other_host, long]}},
             {"path": b, "fingerprint": PRINT, "outcome": {"skipped": format!("x\n{}", "y".repeat(5000))}},
         ]});
         std::fs::write(&file, json.to_string()).unwrap();
         let c = ScanCache::load(&file);
-        assert_eq!(c.lookup(&a, PRINT), Some(&Outcome::Plugins(vec![plugin(&a)])));
+        let Some(Outcome::Plugins(ds)) = c.lookup(&a, PRINT) else { panic!() };
+        assert_eq!(ds.len(), 1, "the other host's id is dropped");
+        assert!(ds[0].name.starts_with("Gain ") && ds[0].name.chars().count() == 256 && !ds[0].name.contains('\n'), "{:?}", &ds[0].name[..8]);
         let Some(Outcome::Skipped(why)) = c.lookup(&b, PRINT) else { panic!() };
         assert!(why.starts_with("x y") && why.chars().count() <= 300, "{why:?}");
         let _ = std::fs::remove_dir_all(&d);
