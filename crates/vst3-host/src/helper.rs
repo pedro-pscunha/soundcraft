@@ -9,7 +9,9 @@
 //! too). The helper's standard error, where plugins chatter, is drained; its last line goes into
 //! the reason a bundle is skipped, the rest to the debug log. Once the answer is in, the helper has
 //! [`EXIT_GRACE`] to exit (module exits, static destructors) before it is killed; the answer
-//! counts either way.
+//! counts either way. A helper whose host is gone (killed mid-scan) ends itself on Unix (the host
+//! hands it its process id in `SOUNDCRAFT_SCAN_HOST_PID`), so a plugin stuck in its module entry
+//! cannot keep it alive forever.
 
 use crate::{SCAN_HELPER_FLAG, ScanHelper, Vst3Descriptor};
 use std::ffi::OsString;
@@ -34,6 +36,11 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(10);
 /// Most helpers at once, whatever the setting.
 const MAX_PARALLEL: usize = 16;
+/// The host's process id, handed to each helper.
+const HOST_ENV: &str = "SOUNDCRAFT_SCAN_HOST_PID";
+/// How often a helper checks that its host is still there.
+#[cfg(unix)]
+const HOST_POLL: Duration = Duration::from_millis(250);
 
 /// What a helper prints after [`MARKER`].
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +80,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
     if args.next()?.to_str() != Some(SCAN_HELPER_FLAG) {
         return None;
     }
+    end_with_host();
     let (line, ok) = match args.next() {
         Some(path) => answer(Path::new(&path)),
         None => (error_line("no bundle given"), false),
@@ -84,6 +92,28 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
     // The module exits run here, on the thread that ran the entry, like the apps do at the end.
     crate::shutdown();
     Some(if ok && written { 0 } else { 2 })
+}
+
+/// Ends this helper as soon as the host named in [`HOST_ENV`] is gone: on Unix the helper then
+/// has another parent. (The host may be gone before the helper first looks, so its parent then
+/// cannot tell it apart.) On Windows a helper whose host died runs until its bundle is scanned.
+fn end_with_host() {
+    #[cfg(unix)]
+    {
+        let Some(host) = std::env::var(HOST_ENV).ok().and_then(|v| v.parse::<u32>().ok()) else { return };
+        let gone = move || std::os::unix::process::parent_id() != host;
+        if gone() {
+            crate::ffi::exit_now(3);
+        }
+        let _ = std::thread::Builder::new().name("vst3-scan-host".into()).spawn(move || {
+            loop {
+                std::thread::sleep(HOST_POLL);
+                if gone() {
+                    crate::ffi::exit_now(3);
+                }
+            }
+        });
+    }
 }
 
 /// The host side: scans each bundle in its own helper, at most `helper.parallel` at a time. One
@@ -117,7 +147,12 @@ pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Resu
 /// Runs one helper on `bundle` and waits for its answer, at most `helper.timeout`.
 fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, String> {
     let mut cmd = Command::new(&helper.exe);
-    cmd.arg(SCAN_HELPER_FLAG).arg(bundle).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.arg(SCAN_HELPER_FLAG)
+        .arg(bundle)
+        .env(HOST_ENV, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

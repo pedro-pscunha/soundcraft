@@ -362,6 +362,19 @@ pub(crate) fn exit_modules() {
     }
 }
 
+/// Ends the process at once, without exit handlers or static destructors: for a scan helper whose
+/// host is gone while a plugin may still be stuck in its module entry on the main thread (running
+/// that plugin's teardown under it could hang or crash).
+#[cfg(unix)]
+pub(crate) fn exit_now(code: c_int) -> ! {
+    unsafe extern "C" {
+        fn _exit(status: c_int) -> !;
+    }
+    // SAFETY: `_exit` is the C library function with this signature; it takes any status and
+    // ends the process without returning or touching process state.
+    unsafe { _exit(code) }
+}
+
 /// Registers [`exit_modules`] to run at process exit. Exit handlers run in reverse order of
 /// registration, C++ static destructors included, so registering again after each module load
 /// puts the exits ahead of the destructors of every module loaded so far.
