@@ -1703,22 +1703,28 @@ fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
 }
 
 fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track, i: usize, pos: Samples) {
-    // Automation lanes address insert slots; the instrument (`INSTRUMENT_SLOT`) has none, so it
-    // must not pick up slot A's lanes.
-    let Ok(slot_u8) = u8::try_from(i) else {
-        return apply_values(slot, ins, |_, v| v);
-    };
-    let automated = t.mixer.automation_mode.reads()
-        && t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if *slot == slot_u8) && !l.points.is_empty());
-    apply_values(slot, ins, |k, val| {
-        if automated
-            && let Some(l) = t.automation.iter().find(|l| matches!(&l.param, AutoParam::Plugin { slot, param } if *slot == slot_u8 && param == k))
-            && !l.points.is_empty()
-        {
-            return l.value_at(pos, val);
-        }
-        val
+    // Most strips have no lane for this slot: skip the lookup per parameter.
+    let automated = u8::try_from(i)
+        .is_ok_and(|n| t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if *slot == n) && !l.points.is_empty()));
+    apply_values(slot, ins, |k, val| match driving_lane(t, i, k).filter(|_| automated) {
+        Some(l) => l.value_at(pos, val),
+        None => val,
     });
+}
+
+/// The automation lane that sets parameter `param` of the plugin in `slot` of `t` during playback
+/// instead of the insert's stored value: one with points, while the track's automation mode reads
+/// lanes. Lanes address insert slots; the instrument ([`INSTRUMENT_SLOT`]) has none, so it never
+/// picks up slot A's lanes. A capture of live plugin values leaves these parameters out.
+pub fn driving_lane<'a>(t: &'a Track, slot: usize, param: &str) -> Option<&'a soundcraft_model::AutomationLane> {
+    let n = u8::try_from(slot).ok()?;
+    if !t.mixer.automation_mode.reads() {
+        return None;
+    }
+    t.automation
+        .iter()
+        .find(|l| matches!(&l.param, AutoParam::Plugin { slot, param: p } if *slot == n && p == param))
+        .filter(|l| !l.points.is_empty())
 }
 
 /// Sends each stored param (as mapped by `value`) to the plugin when it changed since last time.

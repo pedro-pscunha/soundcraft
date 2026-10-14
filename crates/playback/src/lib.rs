@@ -29,7 +29,7 @@ pub use devices::AudioConfig;
 
 use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
-use soundcraft_model::{AutoParam, Insert, Session, Track, TrackId};
+use soundcraft_model::{Insert, Session, Track, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
@@ -1072,15 +1072,10 @@ impl Side {
 /// read now, the value differs from the override and from the value the host last knew the
 /// instance had. That leaves out an override the instance has not received yet (the mixer sends
 /// overrides only while it renders: it still has the value the host knew), and a parameter an
-/// automation lane drives (the lane decides its value during playback, not the override).
+/// automation lane drives ([`soundcraft_mix::driving_lane`]: the lane decides its value during
+/// playback, not the override).
 fn moved_params(t: &Track, slot: usize, ins: &Insert, r: &mut dyn PluginStateReader) -> Vec<(String, f32)> {
-    let lane_slot = u8::try_from(slot).ok();
-    let automated = |id: &str| {
-        lane_slot.is_some_and(|n| {
-            t.automation.iter().any(|l| !l.points.is_empty() && matches!(&l.param, AutoParam::Plugin { slot, param } if *slot == n && param == id))
-        })
-    };
-    let ids: Vec<&str> = ins.params.keys().map(String::as_str).filter(|id| !automated(id)).collect();
+    let ids: Vec<&str> = ins.params.keys().map(String::as_str).filter(|id| soundcraft_mix::driving_lane(t, slot, id).is_none()).collect();
     if ids.is_empty() {
         return Vec::new();
     }
@@ -1225,6 +1220,7 @@ fn open_device(want_rate: u32, want_ch: u16, cfg: &AudioConfig) -> Result<(cpal:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soundcraft_model::AutoParam;
 
     #[test]
     fn reusable_meter_snapshot_updates_and_drops_stale_tracks() {
@@ -1685,8 +1681,7 @@ mod tests {
         t.lane_mut(&AutoParam::Plugin { slot: 0, param: "automated".into() }).set_point(0, 0.25);
         // A lane with no points drives nothing.
         let _ = t.lane_mut(&AutoParam::Plugin { slot: 0, param: "preset".into() });
-        side.states.insert(
-            k,
+        let reads = || {
             Box::new(Reads(vec![
                 ("preset", 7.0, 1.0),
                 ("kept", 2.0, 2.0),
@@ -1694,9 +1689,17 @@ mod tests {
                 ("not sent yet", 0.5, 0.5),
                 ("reported", 5.0, 0.75),
                 ("noise", 500.001, 500.0),
-            ])),
-        );
+            ]))
+        };
+        side.states.insert(k, reads());
         let want = CapturedState { track: k.0, slot: 0, state: b"live".to_vec(), params: vec![("preset".into(), 7.0)] };
+        assert_eq!(side.capture_states(&s), vec![want.clone()]);
+        // With the track's automation off, the mixer sends the override, so the lane does not
+        // keep the plugin's own value out.
+        s.track_mut(k.0).unwrap().mixer.automation_mode = soundcraft_model::AutomationMode::Off;
+        side.states.insert(k, reads());
+        let mut want = want;
+        want.params.insert(0, ("automated".into(), 0.25));
         assert_eq!(side.capture_states(&s), vec![want]);
     }
 
