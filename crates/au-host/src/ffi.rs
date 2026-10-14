@@ -497,12 +497,19 @@ pub struct Edits {
     /// By index: the bits of the last value the host knows the unit has (one it set, showed in
     /// the view, read after a state load, or reported as an edit).
     known: Vec<AtomicU32>,
-    /// By index: `PENDING` plus the bits of the last value reported as an edit, until the host's
-    /// next `set_param` of that parameter takes it (0 then).
-    reported: Vec<AtomicU64>,
+    /// By index: the last [`ECHOES`] values reported as edits whose echo has not come, each as its
+    /// report's number (high 32 bits; 0: an empty slot) and the value's bits (see `take_echo`).
+    reported: Vec<[AtomicU64; ECHOES]>,
+    /// The number of the last report (wrapping, never 0).
+    reports: AtomicU32,
 }
 
 const PENDING: u64 = 1 << 32;
+
+/// Reports remembered per parameter: during a drag the view may report a few values before the
+/// session sends the first of them back (it applies new values once per audio block, and a block
+/// at a large buffer size spans several UI frames).
+const ECHOES: usize = 4;
 
 impl Edits {
     /// Edits of the parameters `ids`, reported by their index in `ids`; `values` are what the host
@@ -515,27 +522,51 @@ impl Edits {
             slots: ids.iter().map(|_| AtomicU64::new(0)).collect(),
             any: AtomicBool::new(false),
             known: (0..ids.len()).map(|i| AtomicU32::new(values.get(i).copied().unwrap_or(f32::NAN).to_bits())).collect(),
-            reported: ids.iter().map(|_| AtomicU64::new(0)).collect(),
+            reported: ids.iter().map(|_| std::array::from_fn(|_| AtomicU64::new(0))).collect(),
+            reports: AtomicU32::new(0),
         }
     }
 
     /// Notes that `value` was reported as an edit of parameter `i`: the session will send it back.
+    /// It takes the place of the oldest report remembered (main thread).
     pub fn reported(&self, i: usize, value: f32) {
-        if let Some(r) = self.reported.get(i) {
-            r.store(PENDING | u64::from(value.to_bits()), Ordering::Release);
+        let Some(slots) = self.reported.get(i) else { return };
+        let number = loop {
+            let n = self.reports.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+            if n != 0 {
+                break n;
+            }
+        };
+        if let Some(oldest) = slots.iter().min_by_key(|r| r.load(Ordering::Acquire) >> 32) {
+            oldest.store(u64::from(number) << 32 | u64::from(value.to_bits()), Ordering::Release);
         }
     }
 
-    /// True when `value` is the last value reported for parameter `i`, i.e. the session sending
-    /// the view's own edit back. Forgets that value either way, so only the first set after a
-    /// report can be its echo (lock-free: the audio thread calls it).
+    /// True when the host's set of `value` for parameter `i` is the session sending a reported
+    /// edit back: `value` is one of the reports whose echo has not come. The session sends them
+    /// back in order, or only the latest, so that report and every older one are answered and
+    /// forgotten. A set that matches none is the host's own: every report is forgotten, and no
+    /// later set can be an echo of one (lock-free: the audio thread calls it).
     pub fn take_echo(&self, i: usize, value: f32) -> bool {
-        self.reported.get(i).is_some_and(|r| r.swap(0, Ordering::AcqRel) == PENDING | u64::from(value.to_bits()))
+        let Some(slots) = self.reported.get(i) else { return false };
+        let bits = u64::from(value.to_bits());
+        let seen = slots.each_ref().map(|r| r.load(Ordering::Acquire));
+        let number = |r: u64| r >> 32;
+        // The oldest report of this value.
+        let echo = seen.iter().filter(|&&r| number(r) != 0 && r & u64::from(u32::MAX) == bits).map(|&r| number(r)).min();
+        let answered = echo.unwrap_or(u64::MAX);
+        for (slot, &r) in slots.iter().zip(&seen) {
+            if number(r) != 0 && number(r) <= answered {
+                // A report made meanwhile (the slot changed) stays.
+                let _ = slot.compare_exchange(r, 0, Ordering::AcqRel, Ordering::Relaxed);
+            }
+        }
+        echo.is_some()
     }
 
     /// Forgets every reported value (after a state load: nothing pending is an echo any more).
     pub fn forget_reported(&self) {
-        for r in &self.reported {
+        for r in self.reported.iter().flatten() {
             r.store(0, Ordering::Release);
         }
     }

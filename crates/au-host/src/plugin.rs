@@ -552,8 +552,8 @@ mod tests {
 
     /// A view's edit comes back as the host's `set_param` once the session holds it (the mixer
     /// applies new values on the audio thread). A drag may have moved the view on by then: the
-    /// echo must not set the unit back. Only the first set after a report can be its echo.
-    /// AUDelay ships with macOS; skipped where missing.
+    /// echo must not set the unit back. An echo is answered once: the same value set again later
+    /// reaches the unit. AUDelay ships with macOS; skipped where missing.
     #[test]
     fn a_views_edit_echoed_back_does_not_step_the_unit_back() {
         let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
@@ -573,6 +573,45 @@ mod tests {
         assert!(p.inst.set_param(time_id, 0.5));
         assert!(p.set_param(time.id, 1.25));
         assert_eq!(p.inst.get_param(time_id), Some(1.25));
+    }
+
+    /// During a drag at a large buffer size the view reports several values before the session
+    /// sends the first back (it applies new values once per audio block). Each echo, in order,
+    /// leaves the unit where the drag is; a session that sends only the latest answers the older
+    /// reports with it, and a value of the host's own is never taken for an echo of one. AUDelay
+    /// ships with macOS; skipped where missing.
+    #[test]
+    fn two_reports_before_their_echoes_do_not_step_the_unit_back() {
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let mut ed = p.editor().expect("every unit has an editor");
+        let Some(time) = p.info.params.get(1) else { panic!("AUDelay has parameters") };
+        let Some(&time_id) = p.ids.get(1) else { panic!("ids") };
+        let reported = |v: f32| vec![(time.id.to_string(), v)];
+        p.inst.link().listen(&p.ids, &p.edits);
+        assert!(p.inst.set_as_view(time_id, 0.75));
+        assert_eq!(ed.idle(), reported(0.75));
+        assert!(p.inst.set_as_view(time_id, 1.0));
+        assert_eq!(ed.idle(), reported(1.0));
+        assert!(p.inst.set_as_view(time_id, 1.25), "the drag goes on");
+        assert!(p.set_param(time.id, 0.75), "the first report's echo");
+        assert_eq!(p.inst.get_param(time_id), Some(1.25), "not stepped back to the first report");
+        assert!(p.set_param(time.id, 1.0), "the second's");
+        assert_eq!(p.inst.get_param(time_id), Some(1.25), "nor to the second");
+        // Two more reports, and the session sends back only the latest: both are answered.
+        assert_eq!(ed.idle(), reported(1.25));
+        assert!(p.inst.set_as_view(time_id, 1.5));
+        assert_eq!(ed.idle(), reported(1.5));
+        assert!(p.set_param(time.id, 1.5));
+        assert_eq!(p.inst.get_param(time_id), Some(1.5));
+        assert!(p.inst.set_param(time_id, 0.5), "the unit moved by other means");
+        assert!(p.set_param(time.id, 1.25), "the host's own value, equal to an answered report");
+        assert_eq!(p.inst.get_param(time_id), Some(1.25), "reaches the unit");
+        // A report, then a value of the host's own: the report's late echo is no echo any more.
+        assert!(p.inst.set_as_view(time_id, 0.25));
+        assert_eq!(ed.idle(), reported(0.25));
+        assert!(p.set_param(time.id, 2.0), "the host's own value");
+        assert!(p.set_param(time.id, 0.25));
+        assert_eq!(p.inst.get_param(time_id), Some(0.25), "reaches the unit");
     }
 
     /// The mode reaches a unit that has one (AURoundTripAAC reports its `OfflineRender`
