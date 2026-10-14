@@ -164,10 +164,10 @@ fn bundle_name(path: &Path) -> String {
 /// written back to it.
 ///
 /// When the helpers fail on SoundCraft's side (cannot start, no scan helper of this protocol), the
-/// bundles they had not scanned are loaded here instead, but only those the scan cache knows to
-/// load (their last outcome, for the same fingerprint, is a list of plugins; looked up on a rescan
-/// too). The others, and any bundle a stuck helper was running, are listed as not scanned
-/// ([`SkippedBundle::helper_failed`]): they may hang, and nothing here can stop that.
+/// bundles they had not scanned are listed from the scan cache when it knows them to load (their
+/// last outcome, for the same fingerprint, is a list of plugins; looked up on a rescan too). No
+/// bundle is loaded here: one may hang, and nothing here could stop that. The others, and any
+/// bundle a stuck helper was running, are listed as not scanned ([`SkippedBundle::helper_failed`]).
 fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
     let mut cache = h.cache.as_deref().map(ScanCache::load);
     let mut pending: Vec<Pending> = paths::find_bundles(dirs)
@@ -223,18 +223,21 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         p.state = State::Done(answer);
     }
     // Known to load: the cache's last outcome for this very build of the bundle is its plugins.
-    let loads = |p: &Pending| match (&cache, p.print) {
-        (Some(c), Some(print)) => matches!(c.lookup(&p.path, print), Some(Outcome::Plugins(_))),
-        _ => false,
+    let known_plugins = |p: &Pending| match (&cache, p.print) {
+        (Some(c), Some(print)) => match c.lookup(&p.path, print) {
+            Some(Outcome::Plugins(ds)) => Some(ds.clone()),
+            _ => None,
+        },
+        _ => None,
     };
     let failed = pending.iter().find_map(|p| match &p.state {
         State::Done(Err(Skip::Host(why) | Skip::HostStuck(why))) => Some(why.clone()),
         _ => None,
     });
     if let Some(why) = &failed {
-        let here = pending.iter().filter(|p| matches!(p.state, State::Done(Err(Skip::Host(_)))) && loads(p)).count();
-        let not = pending.iter().filter(|p| matches!(p.state, State::Done(Err(Skip::Host(_) | Skip::HostStuck(_))))).count() - here;
-        log::warn!("vst3: the scan helper failed ({why}); loading {here} bundles known to load in this process, {not} not scanned");
+        let listed = pending.iter().filter(|p| matches!(p.state, State::Done(Err(Skip::Host(_)))) && known_plugins(p).is_some()).count();
+        let not = pending.iter().filter(|p| matches!(p.state, State::Done(Err(Skip::Host(_) | Skip::HostStuck(_))))).count() - listed;
+        log::warn!("vst3: the scan helper failed ({why}); {listed} bundles listed from the scan cache, {not} not scanned");
     }
     let not_scanned = |path: PathBuf, why: &str| SkippedBundle {
         path,
@@ -244,7 +247,7 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
     };
     let (mut out, mut skipped) = (Vec::new(), Vec::new());
     for p in pending {
-        let known_to_load = loads(&p);
+        let cached = known_plugins(&p);
         match p.state {
             State::Cached(Outcome::Plugins(ds)) | State::Done(Ok(ds)) => merge(&mut out, ds),
             State::Cached(Outcome::Skipped(reason) | Outcome::TimedOut(reason)) => {
@@ -253,14 +256,12 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
             State::Done(Err(Skip::Bundle(reason) | Skip::TimedOut(reason))) => {
                 skipped.push(SkippedBundle { path: p.path, reason, from_cache: false, helper_failed: false })
             }
-            State::Done(Err(Skip::Host(why))) if known_to_load => match load_bundle(&p.path) {
-                Ok(ds) => merge(&mut out, ds),
-                Err(e) => {
-                    log::warn!("{e}");
-                    skipped.push(not_scanned(p.path, &why));
-                }
+            // The answer the helper would have given, as of the last scan of this very build.
+            State::Done(Err(Skip::Host(why))) => match cached {
+                Some(ds) => merge(&mut out, ds),
+                None => skipped.push(not_scanned(p.path, &why)),
             },
-            State::Done(Err(Skip::Host(why) | Skip::HostStuck(why))) => skipped.push(not_scanned(p.path, &why)),
+            State::Done(Err(Skip::HostStuck(why))) => skipped.push(not_scanned(p.path, &why)),
             State::Cached(Outcome::TimedOutOnce(_)) | State::Todo => {}
         }
     }

@@ -25,10 +25,11 @@
 //! creates. The helper's standard error (plugin chatter) goes to the debug log. A helper that
 //! fails on SoundCraft's side (cannot start, or is no scan helper of this protocol: an older
 //! SoundCraft after an update in place) says nothing about the plugins. No further helper is
-//! started for that scan and nothing is cached. Of the bundles it had not scanned, only those the
-//! scan cache knows to load (their last outcome, for the same fingerprint, is a list of plugins)
-//! are loaded in this process; the others, and any bundle a stuck helper was running, are listed
-//! as not scanned ([`SkippedBundle::helper_failed`]) and tried again by the next scan. Without a
+//! started for that scan, nothing is cached, and no bundle is loaded in this process instead. Of
+//! the bundles it had not scanned, those the scan cache knows to load (their last outcome, for the
+//! same fingerprint, is a list of plugins) are listed from the cache; the others, and any bundle a
+//! stuck helper was running, are listed as not scanned ([`SkippedBundle::helper_failed`]) and tried
+//! again by the next scan. Without a
 //! helper (library users, tests) scans load every bundle in this process, as before. The apps set
 //! all this up with `soundcraft_engine::plugin_scan_startup`.
 //!
@@ -411,9 +412,9 @@ pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
 /// Scans in helper processes from now on (`Some`), or in this process again (`None`, the
 /// default). With a helper, [`scan()`], [`rescan`], [`add_search_dir`] and [`scan_paths`] load no
 /// plugin binary here: a bundle that hangs, crashes or fails in its helper is logged and skipped
-/// (see [`skipped`]), and [`instantiate`] loads only the bundle of the plugin it creates. The one
-/// exception: when the helper itself fails on SoundCraft's side, bundles the scan cache knows to
-/// load are loaded here instead (see the crate docs).
+/// (see [`skipped`]), and [`instantiate`] loads only the bundle of the plugin it creates. When the
+/// helper itself fails on SoundCraft's side, bundles the scan cache knows to load are listed from
+/// the cache (see the crate docs).
 pub fn set_scan_helper(helper: Option<ScanHelper>) {
     api::set_scan_helper(helper)
 }

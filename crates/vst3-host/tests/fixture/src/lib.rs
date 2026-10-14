@@ -36,7 +36,9 @@
 //! starts a long-lived child process with no standard streams (its id goes to `child-pid` too),
 //! then loads normally (Unix). `segv-entry` writes through a null pointer, a real crash;
 //! `overflow-entry` overflows the stack; `trap-entry` executes a trap instruction, as a compiler's
-//! `__builtin_trap` or a Swift runtime check does (Unix).
+//! `__builtin_trap` or a Swift runtime check does (Unix). `record-loads` adds the id of every
+//! process that runs the module entry to a `loads` file next to the binary, one per line, and
+//! loads normally.
 //!
 //! Test code: panics are fine here, the host must survive anything anyway.
 
@@ -980,6 +982,11 @@ fn misbehave_on_entry() -> bool {
             let _ = err.write_all(&line);
         }
         let _ = out.flush();
+    }
+    if dir.join("record-loads").exists() {
+        use std::io::Write;
+        let loads = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("loads"));
+        let _ = loads.and_then(|mut f| writeln!(f, "{}", std::process::id()));
     }
     !dir.join("fail-entry").exists()
 }

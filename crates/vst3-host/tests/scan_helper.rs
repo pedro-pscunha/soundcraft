@@ -114,7 +114,13 @@ fn main() {
         let started = Instant::now();
         let plugins = soundcraft_vst3_host::rescan();
         let paths: Vec<&Path> = plugins.iter().map(|d| d.path.as_path()).collect();
-        println!("{}", serde_json::json!({"plugins": paths, "skipped": soundcraft_vst3_host::skipped(), "secs": started.elapsed().as_secs_f64()}));
+        let report = serde_json::json!({
+            "plugins": paths,
+            "skipped": soundcraft_vst3_host::skipped(),
+            "secs": started.elapsed().as_secs_f64(),
+            "pid": std::process::id(),
+        });
+        println!("{report}");
         std::process::exit(0);
     }
     if let [mode, extra, standard] = args.as_slice()
@@ -407,11 +413,12 @@ fn rescan_in_child(exe: &Path, cache: &Path, dir: &Path) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("no report from the rescan through {} ({:?}): {e}", exe.display(), out.status))
 }
 
-/// On a rescan whose helper fails on SoundCraft's side, only bundles the cache knows to load are
-/// loaded in this process. A bundle cached as hanging or crashing, or one a stuck helper was
-/// running, is listed as not scanned instead, and the rescan ends at once.
+/// On a rescan whose helper fails on SoundCraft's side, the bundles the cache knows to load are
+/// listed from the cache, and no bundle is loaded in this process: not one cached as hanging or
+/// crashing (listed as not scanned, and the rescan ends at once), nor even the one known to load.
 fn failures_on_soundcrafts_side_load_only_bundles_known_to_load(dir: &Path, lone: &Path, helpers: &Path) {
-    let (good, _) = install(dir, "Good", None);
+    let (good, recorder) = install(dir, "Good", Some("record-loads"));
+    let loads = recorder.unwrap().with_file_name("loads");
     let (hang, _) = install(dir, "Hang", Some("hang-entry"));
     let (crash, _) = install(dir, "Zcrash", Some("crash-entry"));
     let cache = helpers.join("cache/vst3.json");
@@ -427,7 +434,10 @@ fn failures_on_soundcrafts_side_load_only_bundles_known_to_load(dir: &Path, lone
     };
     for exe in [helpers.join("no-such-helper"), copy("not-a-scan-helper")] {
         let report = rescan_in_child(&exe, &cache, dir);
-        assert_eq!(report["plugins"], serde_json::json!([good, good]), "Good, loaded here: {report}");
+        assert_eq!(report["plugins"], serde_json::json!([good, good]), "Good, from the cache: {report}");
+        let pid = report["pid"].as_u64().unwrap().to_string();
+        let loaded_by = std::fs::read_to_string(&loads).unwrap_or_default();
+        assert!(!loaded_by.lines().any(|l| l == pid), "Good was loaded in the rescanning process {pid}: {loaded_by:?}");
         let skipped = report["skipped"].as_array().unwrap();
         for bundle in [&hang, &crash] {
             let s = skipped.iter().find(|s| s["path"] == bundle.to_str().unwrap()).unwrap_or_else(|| panic!("{report}"));
