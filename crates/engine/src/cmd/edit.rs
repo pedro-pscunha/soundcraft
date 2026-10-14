@@ -851,7 +851,13 @@ fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let n: usize = tracks.iter().map(|t| ops::create_fades(s, *t, r, shape)).sum();
     if n == 0 {
-        return Err(bad("edit.fades_create", "the selection must cover a clip start, end or the boundary between two clips"));
+        let locked = tracks.iter().filter_map(|t| e.session().track(*t)).flat_map(|t| t.clips()).any(|c| c.edit_locked && c.range().overlaps(&r));
+        let why = if locked {
+            "nothing to fade: edit-locked clips in the selection keep their edges, and so do the clips next to them"
+        } else {
+            "the selection must cover a clip start, end or the boundary between two clips"
+        };
+        return Err(bad("edit.fades_create", why));
     }
     Ok(json!({"fades": n}))
 }
@@ -1080,6 +1086,19 @@ mod tests {
             let clip = e.session().find_clip(id).unwrap().1;
             assert_eq!(if side == "in" { clip.fade_in.len } else { clip.fade_out.len }, 1);
         }
+    }
+
+    #[test]
+    fn fades_across_an_edit_locked_cut_say_the_lock_is_why_nothing_happened() {
+        let mut e = crate::demo::demo_engine();
+        let kick = e.session().track_by_name("Kick").unwrap().clips().iter().map(|c| (c.id, c.end())).collect::<Vec<_>>();
+        let (first, cut) = kick[0];
+        let across = json!({"tracks": ["Kick"], "start": cut - 200, "end": cut + 200});
+        e.session_mut().find_clip_mut(first).unwrap().edit_locked = true;
+        let err = e.execute("edit.fades_create", &across).unwrap_err().to_string();
+        assert!(err.contains("edit-locked"), "{err}");
+        e.session_mut().find_clip_mut(first).unwrap().edit_locked = false;
+        assert_eq!(e.execute("edit.fades_create", &across).unwrap()["fades"], 1);
     }
 
     #[test]
