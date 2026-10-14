@@ -1760,6 +1760,16 @@ impl EditorLink {
         }
     }
 
+    /// The controller's value of `id` (`getParamNormalized`, under the lock like
+    /// [`EditorLink::save_state`]). `None` once the instance is gone, or for a non-finite answer.
+    pub fn normalized_value(&self, id: u32) -> Option<f64> {
+        let g = self.lock();
+        let c = g.controller.as_ref()?;
+        // SAFETY: valid controller (the instance clears it under this lock before it terminates).
+        let v = unsafe { c.getParamNormalized(id) };
+        v.is_finite().then(|| v.clamp(0.0, 1.0))
+    }
+
     /// The component state plus the controller state, in SoundCraft's container (see
     /// `STATE_MAGIC`). `None` when the component refuses `getState` or the instance is gone.
     pub fn save_state(&self) -> Option<Vec<u8>> {

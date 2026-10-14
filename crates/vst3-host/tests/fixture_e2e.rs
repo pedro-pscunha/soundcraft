@@ -342,6 +342,41 @@ fn host_set_controller_param_survives_state_round_trip() {
     assert!((r.param("12").unwrap() - 200.0).abs() < 0.01, "a loaded state replaces earlier edits: {:?}", r.param("12"));
 }
 
+/// A preset loaded in the plugin's own editor changes its values without telling the host per
+/// parameter (`restartComponent(kParamValuesChanged)`). The state reader reads the controller's
+/// values, in SoundCraft units, next to the ones the host last set, so a save can tell the
+/// plugin's own changes from the session's overrides.
+#[test]
+fn state_reader_reads_the_values_the_plugin_set_itself() {
+    use soundcraft_dsp::{ParamReading, Plugin};
+    let mut p = soundcraft_vst3_host::instantiate_plugin(&id_of("Fixture Gain")).unwrap();
+    assert!(p.set_param("7", 1.5));
+    assert!(p.set_param("12", 200.0));
+    let mut reader = p.state_reader().expect("every VST3 component has a state");
+    let read = reader.param_values(&["7", "12", "3", "9", "nope"]);
+    assert_eq!(read[0], Some(ParamReading { live: 1.5, host: 1.5 }), "the host's value reached the controller");
+    let freq = read[1].unwrap();
+    assert!((freq.live - 200.0).abs() < 0.01 && freq.host == 200.0, "{freq:?}");
+    assert_eq!(read[2], Some(ParamReading { live: 0.0, host: 0.0 }), "never set: as read when it was made");
+    assert_eq!(read[3..], [None, None], "hidden and unknown ids");
+    // The "preset": Gain 0.25 normalized (0.5 plain) in the component, Freq 1.0 (20 kHz) in the
+    // controller.
+    let mut preset = b"SCV3".to_vec();
+    preset.extend_from_slice(&8u32.to_le_bytes());
+    preset.extend_from_slice(&0.25f64.to_le_bytes());
+    preset.extend_from_slice(&8u32.to_le_bytes());
+    preset.extend_from_slice(&1.0f64.to_le_bytes());
+    assert!(p.load_state_unseen(&preset));
+    let read = reader.param_values(&["7", "12"]);
+    assert_eq!(read[0], Some(ParamReading { live: 0.5, host: 1.5 }));
+    let freq = read[1].unwrap();
+    assert!((freq.live - 20_000.0).abs() < 1.0 && freq.host == 200.0, "{freq:?}");
+    assert!(p.set_param("7", 2.0));
+    assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 2.0, host: 2.0 })]);
+    drop(p);
+    assert_eq!(reader.param_values(&["7"]), vec![None], "the instance is gone");
+}
+
 #[test]
 fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     let id = id_of("Fixture Gain");

@@ -1,9 +1,9 @@
 //! `Vst3Plugin`: a loaded VST3 instance behind the safe `soundcraft_dsp::Plugin` trait.
 
 use crate::ffi::{AFTERTOUCH, BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP, PITCH_BEND};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, RenderMode, Transport, Unit};
+use soundcraft_dsp::{ParamReading, Plugin, PluginEditor, PluginInfo, PluginStateReader, RenderMode, Transport, Unit};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use vst3::ComWrapper;
 
 /// Largest block we set a plugin up for.
@@ -32,7 +32,9 @@ pub struct Vst3Plugin {
     /// VST3 id of each `info.params` entry (same order).
     ids: Vec<u32>,
     maps: Vec<Mapping>,
-    values: Vec<f32>,
+    /// The plain value the host last set or read of each parameter (same order as `ids`; the bits
+    /// of an `f32`), shared with the state reader.
+    values: Arc<[AtomicU32]>,
     /// Normalized values waiting for the next block (coalesced per id; bounded).
     pending: Vec<(u32, f64)>,
     /// Host-set normalized values the controller has not seen yet (same order as `ids`; the bits
@@ -89,7 +91,7 @@ impl Vst3Plugin {
             .collect();
         let mut p = Vst3Plugin {
             info,
-            values: Vec::with_capacity(ids.len()),
+            values: Arc::from(Vec::new()),
             pending: Vec::with_capacity(ids.len().min(PARAM_QUEUE_CAP)),
             unsynced: ids.iter().map(|_| AtomicU64::new(SYNCED)).collect(),
             notes: Vec::with_capacity(EVENT_CAP),
@@ -119,7 +121,7 @@ impl Vst3Plugin {
                 p.inst.normalized_value(id).and_then(|n| p.plain_from_normalized(i, n)).map_or(pi.default, |v| pi.clamp(v))
             })
             .collect();
-        p.values = values;
+        p.values = values.into_iter().map(|v| AtomicU32::new(v.to_bits())).collect();
         p
     }
 
@@ -161,6 +163,14 @@ impl Vst3Plugin {
         self.inst.editor().ok_or_else(|| "this plugin has no editor".to_string())?.open(self.info.name, false)
     }
 
+    /// Loads `data` the way a plugin loads a preset in its own editor: its values change without
+    /// the host being told per parameter (VST3 `restartComponent(kParamValuesChanged)`). For tests
+    /// (the `testing` feature).
+    #[cfg(feature = "testing")]
+    pub fn load_state_unseen(&self, data: &[u8]) -> bool {
+        self.inst.load_state(data)
+    }
+
     /// An edit of parameter `id` (normalized) made the way the plugin's editor makes one
     /// (`performEdit`). For tests (the `testing` feature).
     #[cfg(feature = "testing")]
@@ -174,9 +184,9 @@ impl Vst3Plugin {
         for i in 0..self.ids.len() {
             let (Some(pi), Some(&id)) = (self.info.params.get(i), self.ids.get(i)) else { continue };
             if let Some(v) = self.inst.normalized_value(id).and_then(|n| self.plain_from_normalized(i, n))
-                && let Some(slot) = self.values.get_mut(i)
+                && let Some(slot) = self.values.get(i)
             {
-                *slot = pi.clamp(v);
+                slot.store(pi.clamp(v).to_bits(), Ordering::Relaxed);
             }
         }
         self.pending.clear();
@@ -253,13 +263,16 @@ impl Plugin for Vst3Plugin {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return false };
         let (Some(pi), Some(&vid)) = (self.info.params.get(i), self.ids.get(i)) else { return false };
         let v = pi.clamp(value);
-        if let Some(slot) = self.values.get_mut(i) {
-            *slot = v;
-        }
-        let Some(n) = self.normalized_from_plain(i, v) else { return true };
-        if let Some(u) = self.unsynced.get(i) {
+        let n = self.normalized_from_plain(i, v);
+        // The value for the controller goes first: a state reader that sees the new `values`
+        // entry then also hands the controller this value before reading it back.
+        if let (Some(n), Some(u)) = (n, self.unsynced.get(i)) {
             u.store(n.to_bits(), Ordering::Relaxed);
         }
+        if let Some(slot) = self.values.get(i) {
+            slot.store(v.to_bits(), Ordering::Release);
+        }
+        let Some(n) = n else { return true };
         if let Some(e) = self.pending.iter_mut().find(|(pid, _)| *pid == vid) {
             e.1 = n;
         } else if self.pending.len() < self.pending.capacity() {
@@ -270,7 +283,7 @@ impl Plugin for Vst3Plugin {
 
     fn param(&self, id: &str) -> Option<f32> {
         let i = self.info.params.iter().position(|p| p.id == id)?;
-        self.values.get(i).copied()
+        self.values.get(i).map(|v| f32::from_bits(v.load(Ordering::Relaxed)))
     }
 
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
@@ -433,19 +446,68 @@ impl Plugin for Vst3Plugin {
         Some(Box::new(Vst3Editor { link, host: self.inst.host_ref(), info: self.info, ids: self.ids.clone(), maps: self.maps.clone() }))
     }
 
-    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
-        let (link, ids, unsynced) = (self.inst.state_link(), self.ids.clone(), Arc::clone(&self.unsynced));
-        Some(Box::new(move || {
-            // A parameter only the controller stores (no processor state) would otherwise be
-            // saved with the controller's stale value.
-            for (&id, u) in ids.iter().zip(unsynced.iter()) {
-                let bits = u.swap(SYNCED, Ordering::Relaxed);
-                if bits != SYNCED {
-                    link.sync_param(id, f64::from_bits(bits));
-                }
-            }
-            link.save_state()
+    fn state_reader(&mut self) -> Option<Box<dyn PluginStateReader>> {
+        Some(Box::new(Vst3StateReader {
+            link: self.inst.state_link(),
+            info: self.info,
+            ids: self.ids.clone(),
+            maps: self.maps.clone(),
+            unsynced: Arc::clone(&self.unsynced),
+            values: Arc::clone(&self.values),
         }))
+    }
+}
+
+/// Reads a VST3 instance's state and parameters on the UI thread, the edit controller's thread.
+struct Vst3StateReader {
+    link: Arc<EditorLink>,
+    info: &'static PluginInfo,
+    ids: Vec<u32>,
+    maps: Vec<Mapping>,
+    unsynced: Arc<[AtomicU64]>,
+    values: Arc<[AtomicU32]>,
+}
+
+impl Vst3StateReader {
+    /// Hands the controller the host-set values it has not seen yet: a parameter only the
+    /// controller stores (no processor state) would otherwise be read with its stale value.
+    fn sync(&self) {
+        for (&id, u) in self.ids.iter().zip(self.unsynced.iter()) {
+            let bits = u.swap(SYNCED, Ordering::Relaxed);
+            if bits != SYNCED {
+                self.link.sync_param(id, f64::from_bits(bits));
+            }
+        }
+    }
+}
+
+impl PluginStateReader for Vst3StateReader {
+    fn save_state(&mut self) -> Option<Vec<u8>> {
+        self.sync();
+        self.link.save_state()
+    }
+
+    /// The controller's values (`getParamNormalized`, converted as the editor's edits are). What
+    /// the host knows is read first, so a value the audio thread sets meanwhile is never read as
+    /// the plugin's own (see `set_param`).
+    fn param_values(&mut self, ids: &[&str]) -> Vec<Option<ParamReading>> {
+        let known: Vec<Option<(usize, f32)>> = ids
+            .iter()
+            .map(|id| {
+                let i = self.info.params.iter().position(|p| p.id == *id)?;
+                Some((i, f32::from_bits(self.values.get(i)?.load(Ordering::Acquire))))
+            })
+            .collect();
+        self.sync();
+        known
+            .into_iter()
+            .map(|k| {
+                let (i, host) = k?;
+                let n = self.link.normalized_value(*self.ids.get(i)?)?;
+                let live = plain_via_link(&self.link, self.info, &self.ids, &self.maps, i, n)?;
+                Some(ParamReading { live, host })
+            })
+            .collect()
     }
 }
 
@@ -458,16 +520,21 @@ struct Vst3Editor {
     maps: Vec<Mapping>,
 }
 
+/// Parameter `i`'s normalized value `n` as a plain value, through the controller (main thread).
+fn plain_via_link(link: &EditorLink, info: &PluginInfo, ids: &[u32], maps: &[Mapping], i: usize, n: f64) -> Option<f32> {
+    let pi = info.params.get(i)?;
+    let id = *ids.get(i)?;
+    let v = match maps.get(i)? {
+        Mapping::Stepped(steps) => (n * steps).round(),
+        Mapping::Plain => link.to_plain(id, n)?,
+        Mapping::Linear => f64::from(pi.min) + n * f64::from(pi.max - pi.min),
+    };
+    v.is_finite().then(|| pi.clamp(v as f32))
+}
+
 impl Vst3Editor {
     fn plain(&self, i: usize, n: f64) -> Option<f32> {
-        let pi = self.info.params.get(i)?;
-        let id = *self.ids.get(i)?;
-        let v = match self.maps.get(i)? {
-            Mapping::Stepped(steps) => (n * steps).round(),
-            Mapping::Plain => self.link.to_plain(id, n)?,
-            Mapping::Linear => f64::from(pi.min) + n * f64::from(pi.max - pi.min),
-        };
-        v.is_finite().then(|| pi.clamp(v as f32))
+        plain_via_link(&self.link, self.info, &self.ids, &self.maps, i, n)
     }
 
     fn normalized(&self, i: usize, v: f32) -> Option<f64> {
