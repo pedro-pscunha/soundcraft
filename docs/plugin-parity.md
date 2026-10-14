@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | Editors: Audio Unit edits whose echo never came back stay forgotten after a second, even when the view keeps reporting the parameter, so a later set of one of those values (the plugin panel, Undo) reaches the plugin |
 | 2026-10-14 | trivial | Editors: an Audio Unit view that moves a parameter away and back within one audio block no longer makes a later set of the value in between (Undo, the plugin panel, a command) look like its own edit coming back, which was never applied |
 | 2026-10-14 | trivial | Hosting: a CLAP parameter set just before a save (before the plugin had processed it) is no longer taken for one the plugin set back by itself and saved with its old value |
 | 2026-10-14 | minor | Hosting: a VST3 edit controller gets the values the session sets on the next UI frame, not at the next save, so its editor shows them and a preset loaded in it afterwards is no longer half reverted by the save |

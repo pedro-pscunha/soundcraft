@@ -543,13 +543,23 @@ impl Edits {
     }
 
     /// Notes that `value` was reported as an edit of parameter `i`: the session will send it back.
-    /// It takes the place of the oldest report remembered (main thread).
+    /// It takes the place of the oldest report remembered (main thread). Reports the window has
+    /// already expired (the parameter's newest is [`ECHO_WINDOW_MS`] old) are forgotten first, so
+    /// the new report's time does not make them fresh again.
     pub fn reported(&self, i: usize, value: f32) {
         self.reported_at(i, value, self.now());
     }
 
     fn reported_at(&self, i: usize, value: f32, now: u64) {
         let (Some(slots), Some(newest)) = (self.reported.get(i), self.newest.get(i)) else { return };
+        if now.saturating_sub(newest.load(Ordering::Acquire)) > ECHO_WINDOW_MS {
+            // Before the new time: until then `take_echo` sees these as expired anyway. Clearing a
+            // slot the audio thread clears too is harmless: its compare-exchange of the old report
+            // fails or stores the same 0.
+            for r in slots {
+                r.store(0, Ordering::Release);
+            }
+        }
         // Before the report: a `take_echo` that sees the report sees this time too.
         newest.store(now, Ordering::Release);
         let number = loop {
@@ -2039,6 +2049,27 @@ mod tests {
         assert!(!e.take_echo_at(0, 0.0, 21), "and forgotten");
         e.reported_at(0, 1.0, 5000);
         assert!(e.take_echo_at(0, 1.0, 5000 + ECHO_WINDOW_MS), "within the window");
+    }
+
+    /// Reports whose window has passed stay expired when the parameter is reported again: the new
+    /// report's time does not make them fresh. (An instrument's view cycles a selector through
+    /// 0..3 with no echo coming back; a minute later the user moves it again, then the generic
+    /// panel sets 1, which must reach the unit.)
+    #[test]
+    fn a_new_report_does_not_revive_expired_ones() {
+        let e = Edits::new(&[5], &[0.0]);
+        for (v, t) in [(0.0, 10), (1.0, 11), (2.0, 12), (3.0, 13)] {
+            e.reported_at(0, v, t);
+        }
+        let later = 13 + ECHO_WINDOW_MS + 1;
+        e.reported_at(0, 2.5, later);
+        assert!(!e.take_echo_at(0, 1.0, later), "an expired report is no echo");
+        e.reported_at(0, 2.5, later + 1);
+        assert!(e.take_echo_at(0, 2.5, later + 1), "the fresh report is");
+        // Reports within the window of the one before them stay remembered.
+        e.reported_at(0, 0.5, later + 2);
+        e.reported_at(0, 0.75, later + 3);
+        assert!(e.take_echo_at(0, 0.5, later + 3));
     }
 
     /// Counts notifications into the `AtomicU32` behind `user`.

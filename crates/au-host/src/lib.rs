@@ -60,8 +60,11 @@
 //! reported), so the session gets what the preset changed and nothing else. The session sends a
 //! reported edit back as a host set with a later audio block; that echo is not applied (a drag may
 //! have moved the unit on): a set equal to the newest report of its value answers it and every
-//! older report, any other set is the host's own, and reports left unanswered for a second (the
-//! view went back to the value the session had sent) are forgotten. What a view changes
+//! older report, any other set is the host's own and forgets every report. A parameter's reports
+//! wait for their echo while its newest report is less than a second old; once a second passes
+//! without a new report of it (the view went back to the value the session had sent, and the
+//! session sent nothing), all of them are forgotten, and a later report does not bring them back.
+//! What a view changes
 //! without telling listeners at all, and settings that are no parameters, are only in the unit's
 //! `ClassInfo`, which the app reads from each live instance before it saves, together with the
 //! unit's values of the parameters the session holds a value for: one the unit moved away from by
