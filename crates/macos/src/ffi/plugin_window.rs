@@ -51,18 +51,25 @@ define_class!(
                 return;
             }
             // Tab and ⇧Tab that a focused plugin control passed up move the focus to the plugin's
-            // next (previous) control: AppKit's key-view loop. With no control focused (the window
-            // itself is first responder) they are handed on like any key.
-            if is_tab(event) && self.firstResponder().is_some_and(|r| !std::ptr::addr_eq(Retained::as_ptr(&r), std::ptr::from_ref(self))) {
-                // The controls' own code runs as the focus moves.
-                guarded("moving the focus with Tab", || {
-                    if event.modifierFlags().contains(NSEventModifierFlags::Shift) {
+            // next (previous) control: AppKit's key-view loop. When there is none to move to (no
+            // view focused, or a view outside any loop, as a plugin's root view usually is) they
+            // are handed on like any key.
+            if is_tab(event) {
+                let back = event.modifierFlags().contains(NSEventModifierFlags::Shift);
+                // The controls' own code runs as AppKit asks them whether they take the focus, and
+                // as it moves; if it throws, the key counts as taken.
+                let moved = guarded("moving the focus with Tab", || {
+                    let moves = self.key_view_after_focus(back).is_some();
+                    if moves && back {
                         self.selectPreviousKeyView(None);
-                    } else {
+                    } else if moves {
                         self.selectNextKeyView(None);
                     }
+                    moves
                 });
-                return;
+                if moved != Some(false) {
+                    return;
+                }
             }
             // While SoundCraft has a text field focused, a key handed on would type into it unseen.
             if APP_WANTS_KEYBOARD.load(Ordering::Relaxed) || !forward(self.mtm(), event, Key::Down) {
@@ -159,6 +166,17 @@ impl HostWindow {
                 forward(mtm, &flags, Key::Flags);
             }
         });
+    }
+
+    /// The view Tab (⇧Tab: `back`) would move the focus to: the focused view's next (previous)
+    /// valid key view, when it has one other than itself. `None` with no view focused (the window
+    /// itself is first responder) or a view outside any key-view loop (a plugin's root view
+    /// usually is: VSTGUI's, JUCE's), where `selectNextKeyView:` would do nothing.
+    fn key_view_after_focus(&self, back: bool) -> Option<Retained<NSView>> {
+        let focused = self.firstResponder()?.downcast::<NSView>().ok()?;
+        // SAFETY: the getters retain what they return.
+        let next = unsafe { if back { focused.previousValidKeyView() } else { focused.nextValidKeyView() } }?;
+        (!std::ptr::addr_eq(Retained::as_ptr(&next), Retained::as_ptr(&focused))).then_some(next)
     }
 
     /// ⌘C, ⌘V, ⌘X, ⌘Z, ⇧⌘Z and ⌘A for the plugin's focused control, as another app's Edit menu

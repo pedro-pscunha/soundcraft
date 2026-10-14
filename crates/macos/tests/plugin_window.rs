@@ -516,6 +516,24 @@ mod macos {
             passing.removeFromSuperview();
             next.removeFromSuperview();
 
+            // A focused view outside any key-view loop (a plugin's root view usually is: VSTGUI's,
+            // JUCE's) has nowhere to move the focus to: Tab and ⇧Tab are handed on (SoundCraft's
+            // own Tab).
+            let lone = plugin_view(mtm, false);
+            content.addSubview(&lone);
+            assert!(win.makeFirstResponder(Some(&lone)));
+            type_key(win, NSEventType::KeyDown, TAB, none);
+            type_key(win, NSEventType::KeyUp, TAB, none);
+            type_key(win, NSEventType::KeyDown, TAB, NSEventModifierFlags::Shift);
+            type_key(win, NSEventType::KeyUp, TAB, NSEventModifierFlags::Shift);
+            assert_eq!(
+                seen(),
+                [("soundcraft", "down", TAB), ("soundcraft", "up", TAB), ("soundcraft", "down", TAB), ("soundcraft", "up", TAB)],
+                "no key-view loop: handed on"
+            );
+            assert!(win.firstResponder().is_some_and(|r| std::ptr::addr_eq(Retained::as_ptr(&r), Retained::as_ptr(&lone))), "the focus stays");
+            lone.removeFromSuperview();
+
             // No view has the focus: the window itself is first responder, and hands keys on (Tab
             // too: SoundCraft's own Tab).
             assert!(win.makeFirstResponder(None));

@@ -56,8 +56,11 @@
 //!   (`performClose:`, as its close button does; the editor is taken down at the next idle).
 //!   Handed on, it would close SoundCraft's window. ⌘W with another modifier is handed on.
 //! - Tab and ⇧Tab (⌃ held or not) that a focused plugin control passed up move the focus to the
-//!   plugin's next (previous) control, AppKit's key-view loop, as in any window. With no control
-//!   focused (the window itself is first responder) they are handed on like any key.
+//!   plugin's next (previous) control, AppKit's key-view loop, as in any window: when the focused
+//!   view has a next (previous) valid key view other than itself. Otherwise they are handed on like
+//!   any key (SoundCraft's own Tab): with no view focused (the window itself is first responder),
+//!   and with a focused view outside any key-view loop, as a plugin's root view usually is
+//!   (VSTGUI's and JUCE's take the focus on a click and pass up the keys they do not use).
 //!
 //! The window stays key after it opens (`makeKeyAndOrderFront`), so a plugin's text field can be
 //! typed in at once.
@@ -82,7 +85,9 @@
 //! 5. Press ⌘W with the editor key: the editor closes, SoundCraft's window stays.
 //! 6. Start renaming a track (its name field focused), click the editor's background and type a
 //!    letter: a beep, and the name does not change.
-//! 7. In an editor with several text fields, Tab moves to the next and ⇧Tab back.
+//! 7. In an editor with several text fields, Tab moves to the next and ⇧Tab back. In a VST3 editor
+//!    drawn by VSTGUI or JUCE, click a knob and press Tab: SoundCraft's Tab runs (Tab to
+//!    Transient in the Edit window).
 //! 8. With a CLAP plugin's own floating window open next to an Audio Unit or VST3 editor, press
 //!    Space with the latter key: playback starts (the key never goes to the CLAP window).
 //! 9. Switch to another app and back: the editor hides and comes back, still open.
