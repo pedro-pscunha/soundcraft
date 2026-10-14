@@ -72,5 +72,14 @@ mod macos {
         // Left open: the plugin's drop (in `main`) closes it.
         autoreleasepool(|_| p.open_editor_hidden()).expect("open");
         assert_eq!(windows(mtm).2, 1);
+
+        // An edit made in the open editor, then the editor raised (a click on its slot, the click
+        // that activates SoundCraft) before the next idle: the edit is still reported. The raise
+        // runs on another thread, where the open path stops before touching the window (nothing
+        // may reach the screen here), after the point where it used to drop pending edits.
+        p.edit_as_view(7, 0.25);
+        std::thread::scope(|s| s.spawn(|| ed.open()).join()).expect("joined").expect_err("windows open on the main thread only");
+        assert_eq!(ed.idle(), [("7".to_string(), 0.5)], "the edit made before the raise (0.25 of 0..2)");
+        assert!(ed.is_open());
     }
 }

@@ -630,6 +630,25 @@ impl Default for HostContext {
 }
 
 impl HostContext {
+    /// Queues an edit the editor made (`performEdit`): the latest value per parameter.
+    fn record_edit(&self, id: u32, value: f64) {
+        if value.is_finite() {
+            let mut e = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
+            let v = value.clamp(0.0, 1.0);
+            if let Some(x) = e.iter_mut().find(|(i, _)| *i == id) {
+                x.1 = v;
+            } else if e.len() < EDIT_CAP {
+                e.push((id, v));
+            }
+        }
+    }
+
+    /// An edit made the way the plugin's editor makes one. For tests (the `testing` feature).
+    #[cfg(feature = "testing")]
+    pub fn edit_as_view(&self, id: u32, value: f64) {
+        self.record_edit(id, value);
+    }
+
     /// Takes the queued editor edits.
     pub fn take_edits(&self) -> Vec<(u32, f64)> {
         let mut e = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
@@ -670,15 +689,7 @@ impl IComponentHandlerTrait for HostContext {
         sb::kResultOk
     }
     unsafe fn performEdit(&self, id: sv::ParamID, value: sv::ParamValue) -> sb::tresult {
-        if value.is_finite() {
-            let mut e = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
-            let v = value.clamp(0.0, 1.0);
-            if let Some(x) = e.iter_mut().find(|(i, _)| *i == id) {
-                x.1 = v;
-            } else if e.len() < EDIT_CAP {
-                e.push((id, v));
-            }
-        }
+        self.record_edit(id, value);
         sb::kResultOk
     }
     unsafe fn endEdit(&self, _id: sv::ParamID) -> sb::tresult {

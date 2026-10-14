@@ -161,6 +161,13 @@ impl Vst3Plugin {
         self.inst.editor().ok_or_else(|| "this plugin has no editor".to_string())?.open(self.info.name, false)
     }
 
+    /// An edit of parameter `id` (normalized) made the way the plugin's editor makes one
+    /// (`performEdit`). For tests (the `testing` feature).
+    #[cfg(feature = "testing")]
+    pub fn edit_as_view(&self, id: u32, normalized: f64) {
+        self.inst.host().edit_as_view(id, normalized);
+    }
+
     /// Re-reads every parameter value from the controller (after a state load) and drops
     /// changes still queued from before it.
     fn refresh_values(&mut self) {
@@ -480,8 +487,11 @@ impl Vst3Editor {
 
 impl PluginEditor for Vst3Editor {
     fn open(&mut self) -> Result<(), String> {
-        // Edits reported before the editor opened (e.g. during setup) are stale.
-        let _ = self.host.take_edits();
+        // Edits reported before the editor opened (e.g. during setup) are stale; raising an open
+        // editor keeps the ones made in it since the last idle.
+        if !self.link.is_open() {
+            let _ = self.host.take_edits();
+        }
         self.link.open(self.info.name, true)
     }
 
