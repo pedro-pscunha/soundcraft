@@ -1,7 +1,8 @@
 //! `AuPlugin`: a loaded Audio Unit behind the safe `soundcraft_dsp::Plugin` trait.
 
-use crate::ffi::Instance;
-use soundcraft_dsp::{Plugin, PluginInfo, RenderMode, Transport};
+use crate::ffi::{Edits, Instance, UnitLink};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, RenderMode, Transport};
+use std::sync::Arc;
 
 /// Most MIDI events queued between two blocks (extra events are dropped).
 const EVENT_CAP: usize = 1024;
@@ -39,6 +40,8 @@ pub struct AuPlugin {
     channels: usize,
     latency: usize,
     tail: usize,
+    /// Parameter edits made in the unit's view, taken by its editor handles.
+    edits: Arc<Edits>,
 }
 
 impl AuPlugin {
@@ -46,6 +49,7 @@ impl AuPlugin {
         let ids: Vec<u32> = info.params.iter().map(|p| p.id.parse::<u32>().unwrap_or(u32::MAX)).collect();
         let values = info.params.iter().zip(&ids).map(|(p, &id)| inst.get_param(id).map_or(p.default, |v| p.clamp(v))).collect();
         AuPlugin {
+            edits: Arc::new(Edits::new(&ids)),
             inst,
             info,
             ids,
@@ -60,6 +64,25 @@ impl AuPlugin {
             latency: 0,
             tail: 0,
         }
+    }
+
+    /// The size in pixels of the unit's view (its own, or the generic one): the open editor's, or
+    /// one made in a window that is never shown and closed at once. Main thread only; for
+    /// diagnostics and tests.
+    pub fn editor_size(&self) -> Result<(u32, u32), String> {
+        self.inst.link().editor_size()
+    }
+
+    /// True when the unit publishes a Cocoa view of its own; otherwise its editor is Apple's
+    /// generic view.
+    pub fn has_custom_editor(&self) -> bool {
+        self.inst.link().has_custom_editor()
+    }
+
+    /// Like [`Plugin::open_editor`], but the window is never ordered on screen: the view is made,
+    /// attached and listened to as for a shown one. For tests and diagnostics.
+    pub fn open_editor_hidden(&mut self) -> Result<(), String> {
+        self.inst.link().open_editor(self.info.name, &self.ids, &self.edits, false)
     }
 
     /// Re-reads every parameter value from the unit (after a state load).
@@ -273,9 +296,60 @@ impl Plugin for AuPlugin {
         ok
     }
 
+    fn open_editor(&mut self) -> Result<(), String> {
+        self.inst.link().open_editor(self.info.name, &self.ids, &self.edits, true)
+    }
+
+    fn close_editor(&mut self) {
+        self.inst.link().close_editor();
+    }
+
+    fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
+        let link = Arc::clone(self.inst.link());
+        Some(Box::new(AuEditor { link, edits: Arc::clone(&self.edits), info: self.info, ids: self.ids.clone() }))
+    }
+
     fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
-        let link = self.inst.state_link();
+        let link = Arc::clone(self.inst.link());
         Some(Box::new(move || link.save_state()))
+    }
+}
+
+/// An Audio Unit's editor (its view in a host window), driven from the main thread.
+struct AuEditor {
+    link: Arc<UnitLink>,
+    edits: Arc<Edits>,
+    info: &'static PluginInfo,
+    ids: Vec<u32>,
+}
+
+impl PluginEditor for AuEditor {
+    fn open(&mut self) -> Result<(), String> {
+        if !self.link.editor_open() {
+            // Edits left from an earlier window are stale.
+            let _ = self.edits.take();
+        }
+        self.link.open_editor(self.info.name, &self.ids, &self.edits, true)
+    }
+
+    fn close(&mut self) {
+        self.link.close_editor();
+    }
+
+    fn is_open(&self) -> bool {
+        self.link.editor_open()
+    }
+
+    fn idle(&mut self) -> Vec<(String, f32)> {
+        self.link.editor_idle();
+        self.edits.take().into_iter().filter_map(|(i, v)| self.info.params.get(i).map(|p| (p.id.to_string(), p.clamp(v)))).collect()
+    }
+
+    fn set_param(&mut self, id: &str, value: f32) {
+        let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return };
+        if let (Some(p), Some(&aid)) = (self.info.params.get(i), self.ids.get(i)) {
+            self.link.show_param(aid, p.clamp(value));
+        }
     }
 }
 
@@ -303,6 +377,43 @@ mod tests {
             assert_eq!(p.inst.get_param(host_id), Some(host_value), "{sr}: the unit keeps what the host set");
             assert_eq!(p.inst.get_param(view_id), Some(view_value), "{sr}: and what its view set");
         }
+    }
+
+    /// A value set in the unit's view (with `AUParameterSet`, as views do) reaches the host
+    /// through the editor's `idle`, once and with the latest value. The host's own changes (its
+    /// `set_param`, the editor's `set_param`, a state load) are no edits. The state read for
+    /// saving keeps the view's value too: an instrument's edits reach the session that way. The
+    /// view itself is covered by `tests/editor_main_thread.rs`. AUDelay ships with macOS; skipped
+    /// where missing.
+    #[test]
+    fn view_edits_reach_the_editor_and_the_saved_state() {
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let mut ed = p.editor().expect("every unit has an editor");
+        let (Some(mix), Some(time)) = (p.info.params.first(), p.info.params.get(1)) else { panic!("AUDelay has parameters") };
+        let (Some(&mix_id), Some(&time_id)) = (p.ids.first(), p.ids.get(1)) else { panic!("ids") };
+        // What `open_editor` attaches next to the window.
+        p.inst.link().listen(&p.ids, &p.edits);
+        assert!(ed.idle().is_empty());
+        assert!(p.inst.set_as_view(time_id, 1.25));
+        assert!(p.inst.set_as_view(time_id, 1.5));
+        assert_eq!(ed.idle(), vec![(time.id.to_string(), 1.5)]);
+        assert!(ed.idle().is_empty(), "each edit is reported once");
+
+        assert!(p.set_param(mix.id, 30.0));
+        ed.set_param(mix.id, 40.0);
+        assert_eq!(p.inst.get_param(mix_id), Some(40.0), "the editor's value reaches the unit (and its view)");
+        let state = p.save_state().expect("a state");
+        assert!(p.load_state(&state));
+        assert!(ed.idle().is_empty(), "the host's own changes are no edits");
+
+        let mut q = crate::instantiate_plugin("au:aufx:dely:appl").expect("a second instance");
+        assert!(q.load_state(&state));
+        assert_eq!(q.param(time.id), Some(1.5), "the saved state keeps the view's edit");
+
+        drop(p);
+        assert!(ed.idle().is_empty());
+        ed.set_param(mix.id, 50.0);
+        assert!(!ed.is_open());
     }
 
     /// The mode reaches a unit that has one (AURoundTripAAC reports its `OfflineRender`

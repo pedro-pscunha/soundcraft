@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (offline renders put hosted plugins in their offline mode; previously trivial: mix.instrument sets built-in instrument parameters in params (#265)) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (Audio Units show their own editor, or Apple's generic view; previously minor: offline renders put hosted plugins in their offline mode) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -46,7 +46,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | Create/destroy off the audio thread | ✅ | ✅ | |
 | Editors: CLAP | — | 🟡 floating windows; embedded editors on Windows | Embedded on macOS/Linux missing |
 | Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing |
-| Editors: AU | — | ❌ | Cocoa view hosting missing |
+| Editors: AU | — | 🟡 the unit's own Cocoa view, else Apple's generic view, in a floating window; edits made in the view reach the session (verified off screen with Apple's units and FabFilter Pro-L 2) | The shown window not yet checked by hand in the app. Views that wait for parameter notices (Apple's, the generic one) do not follow automation playback: the mixer sets values without notifying |
 | Multiple editor pages | ✅ | 🟡 | #6 |
 | macOS hardened-runtime entitlement for third-party code | ✅ | ❌ | #153, #149 — signed builds refuse third-party VST3 |
 | Sidechain / key input | ✅ | ❌ | All three hosts |
@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-13 | minor | Editors: Audio Units show their own Cocoa view, or Apple's generic view, with edits reported to the session |
 | 2026-10-13 | minor | Hosting: offline renders put VST3, CLAP and AU plugins in their offline mode |
 | 2026-10-13 | trivial | mix.instrument sets built-in instrument parameters in params (#265) |
 | 2026-10-12 | minor | Editors: VST3 and embedded CLAP editors on Windows |
