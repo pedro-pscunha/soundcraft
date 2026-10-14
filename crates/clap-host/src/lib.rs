@@ -32,7 +32,12 @@
 //! instance dropped on the main thread keeps. One dropped off the main thread with no editor open
 //! is still deactivated and destroyed where it goes, although CLAP makes both main-thread calls:
 //! no GUI runs meanwhile, and runs that never turn the main run loop (headless ones) would
-//! otherwise never destroy it. Values the host sets reach the plugin as
+//! otherwise never destroy it. On Linux and the BSDs (X11, where floating editors open too) every
+//! thread counts as the main thread and there is no main-thread queue: an instance dropped on the
+//! audio thread with its editor open has its GUI, and the plugin, destroyed there, and the GUI's
+//! Xlib calls are then safe only if Xlib runs thread-safe (`XInitThreads`; libX11 1.8 and later
+//! do that by default). Leaking the plugin instead, as Windows does without its job window, would
+//! leave its window on screen. Values the host sets reach the plugin as
 //! events of the next block; the state reader takes a value as the plugin's from then on, and reads
 //! the plugin's own values (`get_value`) after running a pending `on_main_thread`, so a value not
 //! handed over yet is not taken for one the plugin set by itself. A requested `on_main_thread` is

@@ -743,6 +743,8 @@ pub(crate) fn on_main_thread() -> bool {
     std::thread::current().name() == Some("main")
 }
 
+/// Every thread: there is no main-thread queue here, so an editor open when its instance goes on
+/// the audio thread is destroyed there (X11; see the crate doc).
 #[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn on_main_thread() -> bool {
     true
