@@ -78,26 +78,34 @@ fn a_click_opens_a_hosted_plugins_editor_and_the_next_click_closes_it() {
     }
 }
 
-/// macOS hides plugin editors while SoundCraft is in the background and shows them again when it
-/// comes forward: the click that brings it forward must not close the editor it brought back.
+/// Clicks `label`. A real editor's window takes the focus from SoundCraft's when it opens or is
+/// raised: so does `editor`'s here.
+fn click_taking_focus(h: &mut Harness<'static, SoundApp>, label: &str, editor: &StandInEditor) {
+    click(h, label);
+    if editor.took_focus() {
+        h.event(egui::Event::WindowFocused(false));
+        h.run_steps(2);
+    }
+}
+
+/// An open editor's window is key, so the next click on its slot also gives SoundCraft's window
+/// the focus back, in the same frame as the press. SoundCraft was the active application all
+/// along: the click closes the editor, every time. (Only the click that makes SoundCraft the
+/// active application raises instead: `plugin_window`'s tests.)
 #[test]
-fn the_click_that_brings_soundcraft_forward_keeps_the_editor_open() {
+fn a_click_on_the_slot_of_an_editor_in_front_closes_it() {
     let (app, id) = app("audio", true, |t| t.mixer.inserts[C] = Some(Insert::new(HOSTED)));
     let editor = StandInEditor::default();
     adopt(&app, id, C, &editor);
     let mut h = mix(app);
-    click(&mut h, "Insert C");
-    assert_eq!((editor.calls(), editor.shown()), (vec!["open"], true));
-    // SoundCraft comes forward with a click on the slot: the editor is raised, not closed.
-    h.event(egui::Event::WindowFocused(false));
-    h.run_steps(30);
-    h.event(egui::Event::WindowFocused(true));
-    click(&mut h, "Insert C");
-    assert_eq!((editor.calls(), editor.shown()), (vec!["open", "open"], true));
-    // A click a moment later closes it, as ever.
-    h.run_steps(30);
-    click(&mut h, "Insert C");
-    assert_eq!((editor.calls(), editor.shown()), (vec!["open", "open", "close"], false));
+    for round in 1..=2 {
+        click_taking_focus(&mut h, "Insert C", &editor);
+        assert!(editor.shown(), "round {round}: opened");
+        h.event(egui::Event::WindowFocused(true));
+        click_taking_focus(&mut h, "Insert C", &editor);
+        assert!(!editor.shown(), "round {round}: closed");
+    }
+    assert_eq!(editor.calls(), ["open", "close", "open", "close"]);
 }
 
 #[test]

@@ -911,12 +911,14 @@ impl Player {
 }
 
 /// A stand-in for a hosted plugin's own editor ([`Player::adopt_editor`], the `test-util`
-/// feature): its window is a flag, and it records the calls it gets. Clones share both.
+/// feature): its window is a flag, and it records the calls it gets. Clones share these.
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Clone, Debug, Default)]
 pub struct StandInEditor {
     calls: Arc<Mutex<Vec<&'static str>>>,
     shown: Arc<AtomicBool>,
+    /// Its window took the keyboard focus since [`StandInEditor::took_focus`] last looked.
+    focus: Arc<AtomicBool>,
     /// What `open` answers instead of opening.
     refusal: Option<String>,
 }
@@ -937,6 +939,13 @@ impl StandInEditor {
         self.shown.load(Ordering::Relaxed)
     }
 
+    /// Its window took the keyboard focus since the last call. A real editor's window becomes key
+    /// each time it opens or is raised, so SoundCraft's window loses focus then: a UI test hands
+    /// this on as the window's `WindowFocused(false)`.
+    pub fn took_focus(&self) -> bool {
+        self.focus.swap(false, Ordering::Relaxed)
+    }
+
     fn record(&self, call: &'static str) {
         self.calls.lock().unwrap_or_else(PoisonError::into_inner).push(call);
     }
@@ -950,6 +959,7 @@ impl PluginEditor for StandInEditor {
             Some(why) => Err(why.clone()),
             None => {
                 self.shown.store(true, Ordering::Relaxed);
+                self.focus.store(true, Ordering::Relaxed);
                 Ok(())
             }
         }

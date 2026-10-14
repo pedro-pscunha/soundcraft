@@ -258,6 +258,9 @@ fn main() -> eframe::Result {
     graphics::configure(&mut options, eframe::wgpu::Backends::from_env(), eframe::wgpu::Dx12Compiler::from_env());
     // Before the event loop starts, so a document that launches the app is caught (macOS only).
     soundcraft_macos::open_documents::install();
+    // When SoundCraft comes forward: the click that brings it forward only raises a plugin's
+    // editor (macOS only).
+    soundcraft_macos::activation::install();
     eframe::run_native(
         "SoundCraft",
         options,

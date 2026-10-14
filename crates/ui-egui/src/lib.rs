@@ -295,8 +295,8 @@ pub struct SoundApp {
     pub palette: palette::PaletteState,
     /// Bring the separate Mix window to the front on the next frame.
     pub(crate) focus_mix: bool,
-    /// When a SoundCraft window last gained focus and the pointer was pressed, to tell the click
-    /// that brings SoundCraft forward (`plugin_window::slot_click`).
+    /// When the pointer was last pressed, to tell the click that brings SoundCraft forward
+    /// (`plugin_window::slot_click`).
     pub(crate) activation: plugin_window::Activation,
     pub synthetic: Vec<egui::Event>,
     /// Where a dropped audio file loads into a track's sampler (last frame's rects).

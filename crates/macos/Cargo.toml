@@ -1,6 +1,6 @@
 [package]
 name = "soundcraft-macos"
-description = "SoundCraft's macOS app integration: the files opened from Finder, the Dock or `open -a`, and the window plugin editors live in (an isolated unsafe FFI crate; a no-op elsewhere)"
+description = "SoundCraft's macOS app integration: the files opened from Finder, the Dock or `open -a`, when the app last became active, and the window plugin editors live in (an isolated unsafe FFI crate; a no-op elsewhere)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

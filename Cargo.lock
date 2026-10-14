@@ -3783,6 +3783,7 @@ dependencies = [
  "soundcraft-clap-host",
  "soundcraft-dsp",
  "soundcraft-engine",
+ "soundcraft-macos",
  "soundcraft-midi",
  "soundcraft-mix",
  "soundcraft-model",

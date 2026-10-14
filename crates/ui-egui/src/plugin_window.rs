@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use soundcraft_mix::INSTRUMENT_SLOT;
 use soundcraft_model::{INSERT_SLOTS, TrackId};
 use soundcraft_playback::EditorState;
+use std::time::{Duration, Instant};
 
 /// The parameters of `window.plugin`, as `engine.commands` lists them.
 pub const PARAMS: &str = "{track, slot: 0..9 | a..j | \"instrument\", view?: \"editor\" (default: a hosted plugin's own editor, \
@@ -175,38 +176,53 @@ fn slot_param(v: Option<&Value>) -> Option<usize> {
     (slot < INSERT_SLOTS).then_some(slot)
 }
 
-/// How long after a SoundCraft window gains focus a press still counts as the click that brought
-/// SoundCraft forward.
-const ACTIVATING: f64 = 0.15;
+/// How long after SoundCraft becomes the active application a press still counts as the click that
+/// brought it forward.
+const ACTIVATING: Duration = Duration::from_millis(150);
 
-/// When a SoundCraft window last gained focus and when the pointer was last pressed, to tell the
-/// click that brings SoundCraft forward from later ones ([`slot_click`]).
+/// When the pointer was last pressed in a SoundCraft window, to tell the click that brings
+/// SoundCraft forward from later ones ([`slot_click`]).
+///
+/// What counts is SoundCraft becoming the active application, not one of its windows gaining
+/// focus: an editor's window becomes key when it opens or is raised, so the next click on
+/// SoundCraft's window gives that window focus back while SoundCraft was active all along, and
+/// that click must still close the editor.
 #[derive(Debug)]
 pub(crate) struct Activation {
-    focused_at: f64,
-    pressed_at: f64,
+    /// When SoundCraft last became the active application: macOS reports it
+    /// (`soundcraft_macos::activation`); nothing does elsewhere, where editors don't hide with
+    /// the app. Tests stand in for it.
+    became_active: fn() -> Option<Instant>,
+    pressed_at: Option<Instant>,
 }
 
 impl Default for Activation {
     fn default() -> Self {
-        Activation { focused_at: f64::NEG_INFINITY, pressed_at: f64::NEG_INFINITY }
+        Activation::new(soundcraft_macos::activation::last_activated)
     }
 }
 
 impl Activation {
-    /// Call every frame of every SoundCraft window, with that window's input.
+    pub(crate) fn new(became_active: fn() -> Option<Instant>) -> Self {
+        Activation { became_active, pressed_at: None }
+    }
+
+    /// Call every frame of every SoundCraft window, with that window's input. Presses are timed
+    /// only once SoundCraft has been activated: never off macOS, nor in the browser, where
+    /// `Instant::now` panics.
     pub(crate) fn observe(&mut self, i: &egui::InputState) {
-        if i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true))) {
-            self.focused_at = i.time;
-        }
-        if i.pointer.any_pressed() {
-            self.pressed_at = i.time;
+        if i.pointer.any_pressed() && (self.became_active)().is_some() {
+            self.pressed_at = Some(Instant::now());
         }
     }
 
-    /// The last press came with a window gaining focus: it brought SoundCraft forward.
+    /// The last press came as SoundCraft became the active application (either may come first):
+    /// it brought SoundCraft forward.
     pub(crate) fn activating(&self) -> bool {
-        (self.pressed_at - self.focused_at).abs() <= ACTIVATING
+        match (self.pressed_at, (self.became_active)()) {
+            (Some(pressed), Some(active)) => pressed.max(active).duration_since(pressed.min(active)) <= ACTIVATING,
+            _ => false,
+        }
     }
 }
 
@@ -214,6 +230,8 @@ impl Activation {
 /// insert button does with its plug-in window. macOS hides plugin editors while SoundCraft is in
 /// the background and shows them again when it comes forward, so the click that brings SoundCraft
 /// forward lands on an editor that has just come back: that click only opens (raises), never closes.
+/// A click on SoundCraft's window while an editor's window is key is no such click: SoundCraft is
+/// already active, and the click toggles.
 pub(crate) fn slot_click(activating: bool) -> Option<bool> {
     activating.then_some(true)
 }
@@ -232,12 +250,14 @@ fn show_parameters(app: &mut SoundApp, track: TrackId, slot: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AUDIO_OFF, Action, NOT_INSTALLED, Slot, View, action, slot_param};
+    use super::{AUDIO_OFF, Action, Activation, NOT_INSTALLED, Slot, View, action, slot_param};
     use crate::SoundApp;
     use serde_json::json;
     use soundcraft_mix::INSTRUMENT_SLOT;
     use soundcraft_model::{Insert, TrackId};
     use soundcraft_playback::{EditorState, StandInEditor};
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
 
     const STATES: [Option<EditorState>; 6] = [
         None,
@@ -457,14 +477,28 @@ mod tests {
         assert!(h.state().ui.status.is_empty(), "{}", h.state().ui.status);
     }
 
+    thread_local! {
+        /// When SoundCraft last became the active application, as a test has it.
+        static BECAME_ACTIVE: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    /// The tests' stand-in for `soundcraft_macos::activation::last_activated`.
+    fn became_active() -> Option<Instant> {
+        BECAME_ACTIVE.get()
+    }
+
+    /// SoundCraft became the active application `ago` before now.
+    fn activated(ago: Duration) {
+        BECAME_ACTIVE.set(Instant::now().checked_sub(ago));
+    }
+
     #[test]
-    fn the_click_that_brings_soundcraft_forward_only_opens() {
+    fn only_a_press_as_soundcraft_becomes_the_active_application_is_activating() {
         assert_eq!(super::slot_click(true), Some(true));
         assert_eq!(super::slot_click(false), None, "any other click toggles");
-        // Every press and focus change of one frame comes at that frame's time.
-        let frame = |time: f64, events: Vec<egui::Event>| {
+        let frame = |events: Vec<egui::Event>| {
             let ctx = egui::Context::default();
-            let mut out = ctx.run_ui(egui::RawInput { time: Some(time), events, ..Default::default() }, |_| {});
+            let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |_| {});
             out.textures_delta.clear();
             ctx
         };
@@ -474,20 +508,77 @@ mod tests {
             pressed: true,
             modifiers: Default::default(),
         };
-        let mut a = super::Activation::default();
+        // Nothing reports an activation (off macOS): no press is activating, whatever the focus.
+        let mut a = Activation::new(|| None);
         assert!(!a.activating(), "nothing yet");
-        frame(10.0, vec![press()]).input(|i| a.observe(i));
+        frame(vec![egui::Event::WindowFocused(true), press()]).input(|i| a.observe(i));
+        assert!(!a.activating(), "no activation to come with");
+
+        let mut a = Activation::new(became_active);
+        activated(Duration::from_secs(60));
+        frame(vec![press()]).input(|i| a.observe(i));
         assert!(!a.activating(), "SoundCraft was already in front");
-        frame(20.0, vec![egui::Event::WindowFocused(true)]).input(|i| a.observe(i));
-        frame(20.1, vec![press()]).input(|i| a.observe(i));
-        assert!(a.activating(), "pressed as SoundCraft came forward");
-        frame(21.0, vec![press()]).input(|i| a.observe(i));
-        assert!(!a.activating(), "a later press");
-        frame(30.0, vec![press(), egui::Event::WindowFocused(true)]).input(|i| a.observe(i));
-        assert!(a.activating(), "the press and the focus in one frame, either order");
-        frame(40.0, vec![egui::Event::WindowFocused(false)]).input(|i| a.observe(i));
-        frame(40.05, vec![press()]).input(|i| a.observe(i));
-        assert!(!a.activating(), "losing focus brings nothing forward");
+        // An editor's window was key: SoundCraft's window regains focus with the press, but
+        // SoundCraft was the active application all along.
+        frame(vec![egui::Event::WindowFocused(true), press()]).input(|i| a.observe(i));
+        assert!(!a.activating(), "a window regaining focus is no activation");
+        activated(Duration::from_millis(20));
+        frame(vec![press()]).input(|i| a.observe(i));
+        assert!(a.activating(), "pressed as SoundCraft became active");
+        activated(Duration::from_secs(1));
+        assert!(!a.activating(), "pressed long after");
+        // The activation may be reported just after the press is seen.
+        frame(vec![press()]).input(|i| a.observe(i));
+        activated(Duration::ZERO);
+        assert!(a.activating(), "either order");
+        // Each SoundCraft window (the separate Mix window too) has its own egui clock: it plays
+        // no part.
+        for time in [0.0, 1.0e6] {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(time), events: vec![press()], ..Default::default() }, |_| {});
+            out.textures_delta.clear();
+            activated(Duration::from_millis(20));
+            ctx.input(|i| a.observe(i));
+            assert!(a.activating(), "egui time {time}");
+        }
+    }
+
+    #[test]
+    fn the_click_that_brings_soundcraft_forward_raises_the_editor_and_a_later_click_closes_it() {
+        use egui_kittest::kittest::Queryable;
+        let (mut h, vox, _) = session(true);
+        let editor = StandInEditor::default();
+        let app = h.state_mut();
+        assert!(app.player.as_ref().unwrap().adopt_editor(app.engine.session(), vox, 2, Box::new(editor.clone())));
+        app.activation = Activation::new(became_active);
+        app.ui.window = crate::MainWindow::Mix;
+        activated(Duration::from_secs(60));
+        h.run_steps(4);
+        // A click on Vox's slot (the first strip); an editor's window takes the focus from
+        // SoundCraft's when it opens or is raised, as a real one does.
+        let click = |h: &mut egui_kittest::Harness<'static, SoundApp>| {
+            h.get_all_by_label("Insert C").next().unwrap().click();
+            h.run_steps(2);
+            if editor.took_focus() {
+                h.event(egui::Event::WindowFocused(false));
+                h.run_steps(2);
+            }
+        };
+        click(&mut h);
+        assert_eq!((editor.calls(), editor.shown()), (vec!["open"], true));
+        // SoundCraft goes to the background (macOS hides the editor), then comes forward with a
+        // click on the slot, which lands on the editor shown again: it is raised, not closed.
+        h.run_steps(10);
+        activated(Duration::ZERO);
+        h.event(egui::Event::WindowFocused(true));
+        click(&mut h);
+        assert_eq!((editor.calls(), editor.shown()), (vec!["open", "open"], true));
+        // A click a moment later, SoundCraft's window regaining the focus from the editor's,
+        // closes it, as ever.
+        activated(Duration::from_secs(1));
+        h.event(egui::Event::WindowFocused(true));
+        click(&mut h);
+        assert_eq!((editor.calls(), editor.shown()), (vec!["open", "open", "close"], false));
     }
 
     #[test]

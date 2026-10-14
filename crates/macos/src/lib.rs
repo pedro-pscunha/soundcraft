@@ -1,5 +1,7 @@
 //! SoundCraft's macOS app integration.
 //!
+//! - [`activation`]: when SoundCraft last became the active application, to tell the click that
+//!   brings it forward (and its plugin editors with it) from later ones.
 //! - [`open_documents`]: the files macOS opens with SoundCraft (Finder, the Dock, `open -a`) reach
 //!   the app.
 //! - `plugin_window` (macOS only): the window hosted plugin editors live in, shared by the VST3
@@ -18,6 +20,7 @@
 #[allow(unsafe_code)]
 mod ffi;
 
+pub mod activation;
 pub mod open_documents;
 #[cfg(target_os = "macos")]
 pub mod plugin_window;
