@@ -175,6 +175,49 @@ fn slot_param(v: Option<&Value>) -> Option<usize> {
     (slot < INSERT_SLOTS).then_some(slot)
 }
 
+/// How long after a SoundCraft window gains focus a press still counts as the click that brought
+/// SoundCraft forward.
+const ACTIVATING: f64 = 0.15;
+
+/// When a SoundCraft window last gained focus and when the pointer was last pressed, to tell the
+/// click that brings SoundCraft forward from later ones ([`slot_click`]).
+#[derive(Debug)]
+pub(crate) struct Activation {
+    focused_at: f64,
+    pressed_at: f64,
+}
+
+impl Default for Activation {
+    fn default() -> Self {
+        Activation { focused_at: f64::NEG_INFINITY, pressed_at: f64::NEG_INFINITY }
+    }
+}
+
+impl Activation {
+    /// Call every frame of every SoundCraft window, with that window's input.
+    pub(crate) fn observe(&mut self, i: &egui::InputState) {
+        if i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true))) {
+            self.focused_at = i.time;
+        }
+        if i.pointer.any_pressed() {
+            self.pressed_at = i.time;
+        }
+    }
+
+    /// The last press came with a window gaining focus: it brought SoundCraft forward.
+    pub(crate) fn activating(&self) -> bool {
+        (self.pressed_at - self.focused_at).abs() <= ACTIVATING
+    }
+}
+
+/// The `value` a click on a used plugin slot gives `window.plugin`: none, a toggle, as a Pro Tools
+/// insert button does with its plug-in window. macOS hides plugin editors while SoundCraft is in
+/// the background and shows them again when it comes forward, so the click that brings SoundCraft
+/// forward lands on an editor that has just come back: that click only opens (raises), never closes.
+pub(crate) fn slot_click(activating: bool) -> Option<bool> {
+    activating.then_some(true)
+}
+
 /// `slot` (an insert, or [`INSTRUMENT_SLOT`]) as `window.plugin`'s `slot` parameter.
 pub(crate) fn slot_value(slot: usize) -> Value {
     if slot == INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) }
@@ -412,6 +455,39 @@ mod tests {
         h.step();
         assert_eq!(h.state().ui.plugin_windows, vec![(vox, 2)]);
         assert!(h.state().ui.status.is_empty(), "{}", h.state().ui.status);
+    }
+
+    #[test]
+    fn the_click_that_brings_soundcraft_forward_only_opens() {
+        assert_eq!(super::slot_click(true), Some(true));
+        assert_eq!(super::slot_click(false), None, "any other click toggles");
+        // Every press and focus change of one frame comes at that frame's time.
+        let frame = |time: f64, events: Vec<egui::Event>| {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(time), events, ..Default::default() }, |_| {});
+            out.textures_delta.clear();
+            ctx
+        };
+        let press = || egui::Event::PointerButton {
+            pos: egui::pos2(5.0, 5.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        };
+        let mut a = super::Activation::default();
+        assert!(!a.activating(), "nothing yet");
+        frame(10.0, vec![press()]).input(|i| a.observe(i));
+        assert!(!a.activating(), "SoundCraft was already in front");
+        frame(20.0, vec![egui::Event::WindowFocused(true)]).input(|i| a.observe(i));
+        frame(20.1, vec![press()]).input(|i| a.observe(i));
+        assert!(a.activating(), "pressed as SoundCraft came forward");
+        frame(21.0, vec![press()]).input(|i| a.observe(i));
+        assert!(!a.activating(), "a later press");
+        frame(30.0, vec![press(), egui::Event::WindowFocused(true)]).input(|i| a.observe(i));
+        assert!(a.activating(), "the press and the focus in one frame, either order");
+        frame(40.0, vec![egui::Event::WindowFocused(false)]).input(|i| a.observe(i));
+        frame(40.05, vec![press()]).input(|i| a.observe(i));
+        assert!(!a.activating(), "losing focus brings nothing forward");
     }
 
     #[test]

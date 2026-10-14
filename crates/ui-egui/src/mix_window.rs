@@ -27,6 +27,7 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1100.0, 720.0]).with_min_inner_size([480.0, 320.0]);
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("soundcraft.mix"), builder, |ui, _class| {
         ui.set_style(ui.ctx().global_style());
+        ui.ctx().input(|i| app.activation.observe(i));
         if std::mem::take(&mut app.focus_mix) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -615,10 +616,15 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
 }
 
 /// A click on the used plugin slot `slot` (an insert, or the instrument): `window.plugin` toggles
-/// the plugin's own editor (a built-in's parameter window opens), as a Pro Tools insert button
-/// does with its plug-in window. When the editor can't open, the status line says why.
+/// the plugin's own editor (a built-in's parameter window opens), or only opens it on the click
+/// that brings SoundCraft forward ([`crate::plugin_window::slot_click`]). When the editor can't
+/// open, the status line says why.
 fn click_slot(app: &mut SoundApp, id: TrackId, slot: usize) {
-    let _ = app.run("window.plugin", json!({"track": id.0, "slot": crate::plugin_window::slot_value(slot)}));
+    let mut p = json!({"track": id.0, "slot": crate::plugin_window::slot_value(slot)});
+    if let Some(open) = crate::plugin_window::slot_click(app.activation.activating()) {
+        p["value"] = open.into();
+    }
+    let _ = app.run("window.plugin", p);
 }
 
 /// An insert's menu: a search field that takes typing at once, then (until something is typed)

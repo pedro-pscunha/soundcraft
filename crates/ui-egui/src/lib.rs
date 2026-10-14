@@ -295,6 +295,9 @@ pub struct SoundApp {
     pub palette: palette::PaletteState,
     /// Bring the separate Mix window to the front on the next frame.
     pub(crate) focus_mix: bool,
+    /// When a SoundCraft window last gained focus and the pointer was pressed, to tell the click
+    /// that brings SoundCraft forward (`plugin_window::slot_click`).
+    pub(crate) activation: plugin_window::Activation,
     pub synthetic: Vec<egui::Event>,
     /// Where a dropped audio file loads into a track's sampler (last frame's rects).
     pub sample_drop_targets: Vec<(egui::Rect, TrackId)>,
@@ -379,6 +382,7 @@ impl SoundApp {
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
             focus_mix: false,
+            activation: plugin_window::Activation::default(),
             synthetic: Vec::new(),
             sample_drop_targets: Vec::new(),
             sample_reads: Vec::new(),
@@ -1224,6 +1228,7 @@ impl SoundApp {
         let ctx = ui.ctx().clone();
         // The integration creates this Ui before logic resolves the current frame's palette.
         ui.set_style(ctx.global_style());
+        ctx.input(|i| self.activation.observe(i));
         if !self.fonts_ready {
             ctx.request_repaint();
             return;

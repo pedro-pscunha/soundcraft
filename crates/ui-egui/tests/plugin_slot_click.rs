@@ -40,7 +40,7 @@ fn mix(app: SoundApp) -> Harness<'static, SoundApp> {
     let mut app = app;
     app.ui.window = MainWindow::Mix;
     app.run("view.mix_section", json!({"section": "instruments"})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1400.0, 1000.0)).build_ui_state(
+    let mut h = Harness::builder().with_size(vec2(1400.0, 1000.0)).with_step_dt(1.0 / 60.0).build_ui_state(
         |ui, app: &mut SoundApp| {
             app.logic(&ui.ctx().clone());
             app.ui(ui);
@@ -76,6 +76,28 @@ fn a_click_opens_a_hosted_plugins_editor_and_the_next_click_closes_it() {
         assert!(h.state().ui.plugin_windows.is_empty(), "{label}");
         assert!(h.state().ui.status.is_empty(), "{label}: {}", h.state().ui.status);
     }
+}
+
+/// macOS hides plugin editors while SoundCraft is in the background and shows them again when it
+/// comes forward: the click that brings it forward must not close the editor it brought back.
+#[test]
+fn the_click_that_brings_soundcraft_forward_keeps_the_editor_open() {
+    let (app, id) = app("audio", true, |t| t.mixer.inserts[C] = Some(Insert::new(HOSTED)));
+    let editor = StandInEditor::default();
+    adopt(&app, id, C, &editor);
+    let mut h = mix(app);
+    click(&mut h, "Insert C");
+    assert_eq!((editor.calls(), editor.shown()), (vec!["open"], true));
+    // SoundCraft comes forward with a click on the slot: the editor is raised, not closed.
+    h.event(egui::Event::WindowFocused(false));
+    h.run_steps(30);
+    h.event(egui::Event::WindowFocused(true));
+    click(&mut h, "Insert C");
+    assert_eq!((editor.calls(), editor.shown()), (vec!["open", "open"], true));
+    // A click a moment later closes it, as ever.
+    h.run_steps(30);
+    click(&mut h, "Insert C");
+    assert_eq!((editor.calls(), editor.shown()), (vec!["open", "open", "close"], false));
 }
 
 #[test]
