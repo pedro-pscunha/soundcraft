@@ -100,25 +100,33 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
         return None;
     }
     end_with_host();
+    let mut out = answer_channel();
     // Before any plugin code runs: proof that this is a scan helper speaking this protocol.
-    let greeted = {
-        let mut out = std::io::stdout().lock();
-        writeln!(out, "{HELLO}{PROTOCOL}").and_then(|()| out.flush()).is_ok()
-    };
-    if !greeted {
+    if writeln!(out, "{HELLO}{PROTOCOL}").and_then(|()| out.flush()).is_err() {
         return Some(2);
     }
     let (line, ok) = match args.next() {
         Some(path) => answer(Path::new(&path)),
         None => (error_line("no bundle given"), false),
     };
-    let mut out = std::io::stdout().lock();
-    // On a line of its own, even after plugin output that did not end its line.
+    // On a line of its own, even after plugin output that did not end its line (Windows).
     let written = writeln!(out, "\n{line}").and_then(|()| out.flush()).is_ok();
     drop(out);
     // The module exits run here, on the thread that ran the entry, like the apps do at the end.
     crate::shutdown();
     Some(if ok && written { 0 } else { 2 })
+}
+
+/// Where the helper's own lines go. On Unix, a private copy of standard output, which itself now
+/// leads to standard error: plugin code cannot write into the answers, nor lose them by
+/// redirecting standard output. On Windows plugins share standard output with the answers; the
+/// host then reads only lines that start with the marker and parse.
+fn answer_channel() -> Box<dyn Write> {
+    #[cfg(unix)]
+    if let Some(private) = crate::ffi::private_stdout() {
+        return Box::new(private);
+    }
+    Box::new(std::io::stdout())
 }
 
 /// Ends this helper as soon as the host named in [`HOST_ENV`] is gone: on Unix the helper then
@@ -197,8 +205,8 @@ fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, S
 /// How a helper's run ended, before it is judged.
 #[derive(Debug)]
 enum Ended {
-    /// It printed an answer (the text after [`MARKER`]), whatever happened next.
-    Answered(String),
+    /// It printed an answer, whatever happened next (the last one, if several).
+    Answered(Answer),
     /// It exited without an answer.
     Exited(ExitStatus),
     /// It ran past its time limit without an answer, and was killed.
@@ -244,17 +252,17 @@ impl Running {
     /// greeted with, if it did.
     fn await_answer(&mut self, limit: Duration) -> (Ended, Option<String>) {
         let mut deadline = Instant::now() + limit;
-        let mut answer: Option<String> = None;
+        let mut answer: Option<Answer> = None;
         let mut hello: Option<String> = None;
         loop {
-            while answer.is_none()
-                && let Ok(line) = self.lines.try_recv()
-            {
+            while let Ok(line) = self.lines.try_recv() {
                 match line {
                     Line::Hello(v) => hello = Some(v),
                     Line::Answer(a) => {
+                        if answer.is_none() {
+                            deadline = deadline.min(Instant::now() + EXIT_GRACE);
+                        }
                         answer = Some(a);
-                        deadline = deadline.min(Instant::now() + EXIT_GRACE);
                     }
                 }
             }
@@ -262,7 +270,7 @@ impl Running {
                 // A helper that has just exited may still have lines in the pipe (the reader stops
                 // waiting at the end of the output).
                 Ok(Some(st)) => {
-                    let answer = answer.or_else(|| self.rest(&mut hello));
+                    let answer = self.rest(&mut hello).or(answer);
                     return (answer.map_or(Ended::Exited(st), Ended::Answered), hello);
                 }
                 Ok(None) => {}
@@ -274,21 +282,23 @@ impl Running {
             if Instant::now() >= deadline {
                 end(&mut self.child);
                 // An answer that came in since the look above still counts.
-                let answer = answer.or_else(|| self.rest(&mut hello));
+                let answer = self.rest(&mut hello).or(answer);
                 return (answer.map_or(Ended::TimedOut, Ended::Answered), hello);
             }
             std::thread::sleep(POLL);
         }
     }
 
-    /// The lines still to come from a helper that has ended: its answer, if any.
-    fn rest(&self, hello: &mut Option<String>) -> Option<String> {
+    /// The lines still to come from a helper that has ended (until the end of its output, at most
+    /// [`EXIT_GRACE`]): its last answer among them, if any.
+    fn rest(&self, hello: &mut Option<String>) -> Option<Answer> {
         let until = Instant::now() + EXIT_GRACE;
+        let mut answer = None;
         loop {
             match self.lines.recv_timeout(until.saturating_duration_since(Instant::now())) {
                 Ok(Line::Hello(v)) => *hello = Some(v),
-                Ok(Line::Answer(a)) => return Some(a),
-                Err(_) => return None,
+                Ok(Line::Answer(a)) => answer = Some(a),
+                Err(_) => return answer,
             }
         }
     }
@@ -317,21 +327,11 @@ fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limit:
         return Err(Skip::Host(why(format!("{} is not a scan helper of protocol {PROTOCOL} ({greeting}; it {how})", exe.display()))));
     }
     match ended {
-        Ended::Answered(a) => {
-            parse_answer(&a).map(|ds| ds.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()).map_err(Skip::Bundle)
-        }
+        Ended::Answered(Answer::Ok(ds)) => Ok(ds.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()),
+        Ended::Answered(Answer::Error(e)) => Err(Skip::Bundle(e)),
         Ended::TimedOut => Err(Skip::Bundle(why(format!("timed out after {limit:?}")))),
         Ended::Exited(st) => Err(Skip::Bundle(why(ended_reason(st)))),
         Ended::Lost => Err(Skip::Host(why("the scan helper stopped without an answer".into()))),
-    }
-}
-
-/// The plugins in an answer (the text after [`MARKER`]), or why there are none.
-fn parse_answer(json: &str) -> Result<Vec<Vst3Descriptor>, String> {
-    match serde_json::from_str::<Answer>(json) {
-        Ok(Answer::Ok(ds)) => Ok(ds),
-        Ok(Answer::Error(e)) => Err(e),
-        Err(e) => Err(format!("unreadable answer from the scan helper: {e}")),
     }
 }
 
@@ -361,12 +361,21 @@ fn end(child: &mut Child) {
 }
 
 /// A protocol line of a helper.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Line {
     /// Its greeting: the protocol version.
     Hello(String),
-    /// Its answer: the text after [`MARKER`].
-    Answer(String),
+    /// Its answer.
+    Answer(Answer),
+}
+
+/// The protocol line `text` is: only a line that starts with a marker and, for an answer, parses.
+/// (A plugin printing on standard output, on Windows where it shares it, cannot pass for one.)
+fn protocol_line(text: &str) -> Option<Line> {
+    if let Some(v) = text.strip_prefix(HELLO) {
+        return Some(Line::Hello(v.trim_end().to_string()));
+    }
+    serde_json::from_str(text.strip_prefix(MARKER)?.trim_end()).ok().map(Line::Answer)
 }
 
 /// Reads the helper's standard output on a thread; its protocol lines come out of the receiver,
@@ -388,11 +397,8 @@ fn read_lines(child: &mut Child) -> Option<mpsc::Receiver<Line>> {
                     Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
-                let text = String::from_utf8_lossy(&line);
-                if let Some(v) = text.strip_prefix(HELLO) {
-                    let _ = tx.send(Line::Hello(v.trim_end().to_string()));
-                } else if let Some((_, json)) = text.split_once(MARKER) {
-                    let _ = tx.send(Line::Answer(json.trim_end().to_string()));
+                if let Some(line) = protocol_line(&String::from_utf8_lossy(&line)) {
+                    let _ = tx.send(line);
                 }
             }
             // Keep the pipe flowing, so the helper never blocks on a full one.
@@ -453,19 +459,28 @@ mod tests {
         let ds = vec![descriptor("Synth", "/Library/Audio/Plug-Ins/VST3/A b.vst3"), descriptor("Other\nline", "C:\\VST3\\x.vst3")];
         let line = format!("{MARKER}{}", serde_json::to_string(&Answer::Ok(ds.clone())).unwrap());
         assert!(!line.contains('\n'), "one line: {line}");
-        let json = line.split_once(MARKER).unwrap().1;
-        assert_eq!(parse_answer(json), Ok(ds), "every field, the path included");
-        let err = error_line("bundleEntry failed");
-        assert_eq!(parse_answer(err.split_once(MARKER).unwrap().1), Err("bundleEntry failed".to_string()));
-        assert!(parse_answer("{\"ok\":[{\"id\":1}]}").unwrap_err().starts_with("unreadable answer"));
-        assert!(parse_answer("").is_err());
+        assert_eq!(protocol_line(&line), Some(Line::Answer(Answer::Ok(ds))), "every field, the path included");
+        assert_eq!(protocol_line(&error_line("bundleEntry failed")), Some(Line::Answer(Answer::Error("bundleEntry failed".into()))));
+        assert_eq!(protocol_line(&format!("{HELLO}{PROTOCOL}\n")), Some(Line::Hello(PROTOCOL.into())));
+    }
+
+    #[test]
+    fn only_whole_parseable_marker_lines_are_answers() {
+        let good = error_line("x");
+        assert!(protocol_line(&format!("{good}\n")).is_some());
+        // A plugin's chatter that mentions the marker, or imitates it badly, is no answer.
+        assert_eq!(protocol_line(&format!("[plugin] {good}")), None);
+        assert_eq!(protocol_line(&format!("{MARKER}{{not json")), None);
+        assert_eq!(protocol_line(&format!("{MARKER}{{\"ok\":[{{\"id\":1}}]}}")), None);
+        assert_eq!(protocol_line(""), None);
+        assert_eq!(protocol_line(&format!(" {HELLO}{PROTOCOL}")), None);
     }
 
     #[test]
     fn a_missing_bundle_answers_an_error() {
         let (line, ok) = answer(Path::new("/nonexistent/Missing.vst3"));
         assert!(!ok);
-        let e = parse_answer(line.strip_prefix(MARKER).unwrap()).unwrap_err();
+        let Some(Line::Answer(Answer::Error(e))) = protocol_line(&line) else { panic!("{line}") };
         assert!(e.contains("Missing.vst3"), "{e}");
     }
 

@@ -26,7 +26,9 @@
 //! Misbehaving on purpose, for the scan tests: a file next to the binary changes its module entry.
 //! `hang-entry` never returns (like a PACE/iLok-protected plugin whose licence service is
 //! missing), `crash-entry` kills the process (SIGKILL, so no crash report is written) and
-//! `fail-entry` returns false.
+//! `fail-entry` returns false. `noisy-stdout` prints lines on standard output first, one of them
+//! a broken answer line and one an answer in mid-line; `chatty-entry` prints 9 MiB on standard
+//! output and 1 MiB on standard error. `hang-exit` makes the module exit never return.
 //!
 //! Test code: panics are fine here, the host must survive anything anyway.
 
@@ -906,7 +908,33 @@ fn misbehave_on_entry() -> bool {
             unsafe { TerminateProcess(GetCurrentProcess(), 0xC000_0005) };
         }
     }
+    if dir.join("noisy-stdout").exists() {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "[fixture] starting up");
+        let _ = writeln!(out, "soundcraft-vst3-scan: {{not json");
+        let _ = write!(out, "[fixture] mid-line soundcraft-vst3-scan: {{\"error\":\"fake\"}}");
+        let _ = out.flush();
+    }
+    if dir.join("chatty-entry").exists() {
+        use std::io::Write;
+        let mut line = vec![b'x'; 1023];
+        line.push(b'\n');
+        let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+        for _ in 0..9 * 1024 {
+            let _ = out.write_all(&line);
+        }
+        for _ in 0..1024 {
+            let _ = err.write_all(&line);
+        }
+        let _ = out.flush();
+    }
     !dir.join("fail-entry").exists()
+}
+
+/// Whether a scan test asked the module exit to hang (see the crate docs).
+fn hang_on_exit() -> bool {
+    own_path().and_then(|p| p.parent().map(|d| d.join("hang-exit").exists())).unwrap_or(false)
 }
 
 fn module_entry() -> bool {
@@ -934,6 +962,11 @@ extern "C" fn late_state_teardown() {
 }
 
 fn module_exit() -> bool {
+    if hang_on_exit() {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
     let left = ENTERED.fetch_sub(1, Ordering::SeqCst) - 1;
     if left < 0 {
         violation("module exit without a module entry");

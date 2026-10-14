@@ -77,6 +77,7 @@ fn main() {
     hanging_crashing_and_failing_bundles_are_skipped(&root.join("mixed"));
     eight_stuck_helpers_cost_one_time_limit(&root.join("eight"));
     failures_on_soundcrafts_side_are_no_plugin_skips(&root.join("host-failures"));
+    plugin_output_cannot_spoil_or_hide_the_answer(&root.join("noisy"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     #[cfg(unix)]
@@ -156,6 +157,23 @@ fn eight_stuck_helpers_cost_one_time_limit(dir: &Path) {
     let took = started.elapsed();
     assert!(found.is_empty() && skipped.len() == 8, "{skipped:?}");
     assert!(took >= TIMEOUT && took < TIMEOUT * 2, "{took:?}: not all eight ran at once");
+}
+
+/// A plugin printing on standard output, even lines that look like answers or more than the host
+/// reads of it, cannot spoil or hide the helper's answer (on Unix it prints into standard error).
+fn plugin_output_cannot_spoil_or_hide_the_answer(dir: &Path) {
+    let mut bundles = vec![install(dir, "Noisy", Some("noisy-stdout")).0];
+    if cfg!(unix) {
+        bundles.push(install(dir, "Chatty", Some("chatty-entry")).0);
+    }
+    for bundle in bundles {
+        let started = Instant::now();
+        let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &helper());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().all(|d| d.path == bundle));
+        assert!(started.elapsed() < TIMEOUT, "{:?}", started.elapsed());
+    }
 }
 
 /// A helper that cannot start, or a program that is no scan helper of this protocol (an older

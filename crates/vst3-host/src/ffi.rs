@@ -375,6 +375,33 @@ pub(crate) fn exit_now(code: c_int) -> ! {
     unsafe { _exit(code) }
 }
 
+/// Keeps standard output for a scan helper's own lines: returns a private copy of it, and points
+/// standard output (descriptor 1) at standard error, so whatever plugin code prints there goes to
+/// the error stream the host drains. `None` (standard output unchanged) if that fails.
+#[cfg(unix)]
+pub(crate) fn private_stdout() -> Option<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    unsafe extern "C" {
+        fn dup(fd: c_int) -> c_int;
+        fn dup2(from: c_int, to: c_int) -> c_int;
+    }
+    // SAFETY: `dup` is the C library function with this signature; it takes any descriptor number
+    // and returns a new descriptor or -1.
+    let fd = unsafe { dup(1) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `fd` is a fresh descriptor nothing else owns; the `File` takes it over (and closes it
+    // when dropped).
+    let private = unsafe { std::fs::File::from_raw_fd(fd) };
+    // SAFETY: `dup2` is the C library function with this signature; it atomically makes
+    // descriptor 1 a copy of descriptor 2 (standard error) and returns -1 on failure.
+    if unsafe { dup2(2, 1) } < 0 {
+        return None;
+    }
+    Some(private)
+}
+
 /// Registers [`exit_modules`] to run at process exit. Exit handlers run in reverse order of
 /// registration, C++ static destructors included, so registering again after each module load
 /// puts the exits ahead of the destructors of every module loaded so far.
