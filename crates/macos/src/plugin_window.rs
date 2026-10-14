@@ -33,8 +33,9 @@
 //!   AppKit's own handling runs (a beep).
 //! - What plugins keep: every key their views handle: text fields, their own shortcuts, a
 //!   computer-keyboard piano. `performKeyEquivalent:` is not overridden, so AppKit still offers
-//!   ⌘-keys to the plugin's views first and then to the menu bar (Quit, Hide); a ⌘-key nobody
-//!   takes arrives as `keyDown:` and is handed on like any other, so ⌘S saves.
+//!   ⌘-keys to the plugin's views first. SoundCraft's menu bar has no key equivalents (its
+//!   shortcuts are egui's, Quit and Hide included), so every ⌘-key a plugin does not take arrives
+//!   as `keyDown:` and is handed on like any other: ⌘S saves, ⌘Q quits.
 //! - ⌘W (no other modifier) that the plugin does not take closes the editor's own window
 //!   (`performClose:`, as its close button does; the editor is taken down at the next idle).
 //!   Handed on, it would close SoundCraft's window. ⌘W with another modifier is handed on.
