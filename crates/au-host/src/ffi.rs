@@ -1321,7 +1321,8 @@ impl UnitLink {
         }
         // The user closed the window: start over.
         UnitLink::teardown(&mut g, mtm);
-        g.editor = Some(window::Editor::open(mtm, unit, title, show)?);
+        let editor = window::Editor::open(mtm, unit, title, show, &mut g.closed)?;
+        g.editor = Some(editor);
         // SAFETY: the unit is live while the link holds it, and the listener goes (`teardown`)
         // before the instance disposes of the unit.
         g.listener = unsafe { EditListener::new(unit, ids, Arc::clone(edits)) };
@@ -1405,9 +1406,9 @@ impl UnitLink {
         if let Some(e) = &g.editor {
             return Ok(e.size(mtm));
         }
-        let e = window::Editor::open(mtm, unit, "", false)?;
-        let size = e.size(mtm);
         g.closed.retain(|v| v.alive(mtm));
+        let e = window::Editor::open(mtm, unit, "", false, &mut g.closed)?;
+        let size = e.size(mtm);
         g.closed.extend(e.close(mtm));
         Ok(size)
     }
@@ -1552,11 +1553,11 @@ mod window {
     }
 
     /// The unit's own view, else the generic one.
-    fn make_view(_mtm: MainThreadMarker, unit: AudioUnit) -> Result<View, String> {
+    fn make_view(_mtm: MainThreadMarker, unit: AudioUnit, lingering: &mut Vec<ClosedView>) -> Result<View, String> {
         // SAFETY: the caller holds the unit (live) under the link's lock.
         if let Some((url, class)) = unsafe { cocoa_ui(unit) } {
             // Loading the bundle runs its initializers; the factory and the view are its code.
-            let made = guarded("the unit's own view", || cocoa_view(unit, url, class));
+            let made = guarded("the unit's own view", || cocoa_view(unit, url, class, lingering));
             release(url);
             release(class);
             match made {
@@ -1568,8 +1569,9 @@ mod window {
         guarded("the generic view", || generic_view(unit))
     }
 
-    /// Asks the unit's view factory for a view.
-    fn cocoa_view(unit: AudioUnit, url: CFTypeRef, class: CFTypeRef) -> Result<View, String> {
+    /// Asks the unit's view factory for a view. An object it makes that is no view is added to
+    /// `lingering` (it was made for the unit, and may use it while it lives).
+    fn cocoa_view(unit: AudioUnit, url: CFTypeRef, class: CFTypeRef, lingering: &mut Vec<ClosedView>) -> Result<View, String> {
         let name = cf_string(class);
         // SAFETY: `url` is a live CFURL (`cocoa_ui` checked its type), toll-free bridged to
         // NSURL, borrowed for this call.
@@ -1598,7 +1600,10 @@ mod window {
                 UnitArg::Void => msg_send![&*factory, uiViewForAudioUnit: unit, withSize: size],
             }
         };
-        let view = view.ok_or_else(|| format!("`{name}` made no view"))?.downcast::<NSView>().map_err(|_| format!("`{name}` made no NSView"))?;
+        let view = view.ok_or_else(|| format!("`{name}` made no view"))?.downcast::<NSView>().map_err(|other| {
+            lingering.push(ClosedView::of(&other));
+            format!("`{name}` made no NSView")
+        })?;
         Ok(View { view, factory: Some(factory) })
     }
 
@@ -1639,9 +1644,14 @@ mod window {
 
     impl Editor {
         /// Makes the unit's view and puts it in a new host window, ordered on screen when `show`.
-        pub fn open(mtm: MainThreadMarker, unit: AudioUnit, title: &str, show: bool) -> Result<Editor, String> {
-            autoreleasepool(|_| {
-                let View { view, factory } = make_view(mtm, unit)?;
+        /// When that fails after a view was made, the view is released, and added to `lingering`
+        /// if it is still alive (a timer of its own, or the window it half joined, may hold it):
+        /// the unit must outlive it.
+        pub fn open(mtm: MainThreadMarker, unit: AudioUnit, title: &str, show: bool, lingering: &mut Vec<ClosedView>) -> Result<Editor, String> {
+            let mut made = None;
+            let opened = autoreleasepool(|_| {
+                let View { view, factory } = make_view(mtm, unit, lingering)?;
+                made = Some(ClosedView::of(view.as_ref()));
                 // The view's own code runs as it is sized and joins the window.
                 let (window, view) = guarded("the unit's view joining its window", || {
                     // A view may report no size: it gets the window's default.
@@ -1656,6 +1666,8 @@ mod window {
                     content.setAutoresizesSubviews(false);
                     view.setFrameOrigin(NSPoint::new(0.0, 0.0));
                     content.addSubview(&view);
+                    #[cfg(feature = "testing")]
+                    testing::fail_join(&view)?;
                     Ok((window, view))
                 })?;
                 let mut e = Editor { window, view: Retained::into_raw(view), factory: factory.map_or(std::ptr::null_mut(), Retained::into_raw) };
@@ -1665,7 +1677,12 @@ mod window {
                     e.show(mtm);
                 }
                 Ok(e)
-            })
+            });
+            // Checked once the pool has drained: what it held of the view is gone by then.
+            if opened.is_err() {
+                lingering.extend(made.filter(|v| v.alive(mtm)));
+            }
+            opened
         }
 
         fn view(&self, _mtm: MainThreadMarker) -> Option<&NSView> {
@@ -1728,7 +1745,7 @@ mod window {
                 // exactly once (`self` is consumed); main thread (the marker).
                 let (v, factory) = unsafe { (Retained::from_raw(raw_view), Retained::from_raw(factory)) };
                 if let Some(v) = &v {
-                    view = Some(ClosedView(Weak::from_retained(v)));
+                    view = Some(ClosedView::of(v.as_ref()));
                 }
                 // Leaving the window and being released run the view's and the factory's own code.
                 let _ = guarded("the unit's view closing", || {
@@ -1745,16 +1762,52 @@ mod window {
         }
     }
 
-    /// A view that outlived its editor, held weakly until it is gone.
-    pub struct ClosedView(Weak<NSView>);
+    /// A view (or what a view factory made) that outlived its editor, held weakly until it is gone.
+    pub struct ClosedView(Weak<AnyObject>);
 
     // SAFETY: the reference is only loaded on the main thread (`alive` takes the marker); a weak
     // reference itself may be dropped on any thread (the runtime's weak table is thread-safe).
     unsafe impl Send for ClosedView {}
 
     impl ClosedView {
+        fn of(object: &AnyObject) -> ClosedView {
+            ClosedView(Weak::from(object))
+        }
+
         pub fn alive(&self, _mtm: MainThreadMarker) -> bool {
             self.0.load().is_some()
+        }
+    }
+
+    /// A failure injected where a view joins its window (the `testing` feature).
+    #[cfg(feature = "testing")]
+    pub mod testing {
+        use objc2::rc::Retained;
+        use objc2_app_kit::NSView;
+        use std::cell::{Cell, RefCell};
+
+        thread_local! {
+            static FAIL: Cell<bool> = const { Cell::new(false) };
+            static FAILED: RefCell<Option<Retained<NSView>>> = const { RefCell::new(None) };
+        }
+
+        /// Makes the next editor open on this thread fail once its view has joined the window, as
+        /// when the view's own code throws there; the view is kept for [`take_failed_view`].
+        pub fn fail_next_join() {
+            FAIL.with(|f| f.set(true));
+        }
+
+        /// The view of the editor open [`fail_next_join`] made fail.
+        pub fn take_failed_view() -> Option<Retained<NSView>> {
+            FAILED.with(|f| f.borrow_mut().take())
+        }
+
+        pub(super) fn fail_join(view: &Retained<NSView>) -> Result<(), String> {
+            if !FAIL.with(|f| f.replace(false)) {
+                return Ok(());
+            }
+            FAILED.with(|f| *f.borrow_mut() = Some(view.clone()));
+            Err("the view failed to join its window (test)".into())
         }
     }
 }
@@ -1781,6 +1834,9 @@ static LEAKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 
 /// Units waiting for their views to go before they are disposed (see [`units_awaiting_disposal`]).
 static AWAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "testing")]
+pub use window::testing::{fail_next_join as fail_next_editor_join, take_failed_view as take_failed_editor_view};
 
 /// Units whose disposal waits for the main thread (an editor still to close, or a view that
 /// outlived its editor). For tests (the `testing` feature).

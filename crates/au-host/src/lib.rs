@@ -83,7 +83,7 @@ mod plugin;
 mod registry;
 
 #[cfg(all(target_os = "macos", feature = "testing"))]
-pub use ffi::{units_awaiting_disposal, units_leaked};
+pub use ffi::{fail_next_editor_join, take_failed_editor_view, units_awaiting_disposal, units_leaked};
 #[cfg(target_os = "macos")]
 pub use plugin::AuPlugin;
 

@@ -111,6 +111,27 @@ mod macos {
         assert_eq!(windows(mtm).1, 0);
     }
 
+    /// An editor open that fails after the view was made (here as its view joins the window, as
+    /// when the view's own code throws there) while something still holds the view: the unit is
+    /// disposed only once the view is gone, never under it.
+    fn a_failed_open_keeps_its_view(mtm: MainThreadMarker, id: &str) {
+        let (base, _) = windows(mtm);
+        let mut p = soundcraft_au_host::instantiate_plugin(id).expect("instantiate");
+        let ed = p.editor().expect("an editor");
+        soundcraft_au_host::fail_next_editor_join();
+        assert!(autoreleasepool(|_| p.open_editor_hidden()).is_err(), "{id}: the open fails");
+        assert!(!ed.is_open());
+        assert_eq!(windows(mtm), (base, 0), "{id}: no window is left");
+        let view = soundcraft_au_host::take_failed_editor_view().expect("the view made");
+        drop(p);
+        assert_eq!(units_awaiting_disposal(), 1, "{id}: the unit waits for the view of the failed open");
+        spin(0.1);
+        assert_eq!(units_awaiting_disposal(), 1, "{id}: still alive, still waiting");
+        drop(view);
+        let waited = settle();
+        println!("{id}: a failed open; the unit waited for its view and went {waited:.2} s after it");
+    }
+
     /// A view held alive (as a plugin's own timer may hold it) 10 s after its plugin went: the unit
     /// is given up, uninitialized and counted as leaked, and no longer awaited. Last: it leaks.
     fn a_view_that_never_goes(id: &str) {
@@ -226,6 +247,7 @@ mod macos {
         }
         assert!(checked > 0, "no Audio Unit to test");
         if installed.iter().any(|d| d.id == UNITS[0]) {
+            a_failed_open_keeps_its_view(mtm, UNITS[0]);
             a_view_that_never_goes(UNITS[0]);
         }
         println!("editor_main_thread: ok ({checked} units)");
