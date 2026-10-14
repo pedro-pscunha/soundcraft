@@ -402,6 +402,25 @@ pub(crate) fn private_stdout() -> Option<std::fs::File> {
     Some(private)
 }
 
+/// Kills process group `group` (a scan helper and whatever it started) at once. The helper was
+/// started as the leader of a group of its own, and is not reaped yet, so the group is its.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(group: u32) {
+    unsafe extern "C" {
+        fn killpg(group: c_int, signal: c_int) -> c_int;
+    }
+    /// SIGKILL, the same number on every Unix.
+    const SIGKILL: c_int = 9;
+    // Never the caller's own group or a system one.
+    let Ok(group) = c_int::try_from(group) else { return };
+    if group <= 1 {
+        return;
+    }
+    // SAFETY: `killpg` is the C library function with this signature; it only sends a signal and
+    // reports failure through its result, which is not needed here.
+    unsafe { killpg(group, SIGKILL) };
+}
+
 /// Registers [`exit_modules`] to run at process exit. Exit handlers run in reverse order of
 /// registration, C++ static destructors included, so registering again after each module load
 /// puts the exits ahead of the destructors of every module loaded so far.

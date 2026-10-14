@@ -29,6 +29,8 @@
 //! `fail-entry` returns false. `noisy-stdout` prints lines on standard output first, one of them
 //! a broken answer line and one an answer in mid-line; `chatty-entry` prints 9 MiB on standard
 //! output and 1 MiB on standard error. `hang-exit` makes the module exit never return.
+//! `hang-with-child` starts a child process that keeps the module's standard output and error
+//! open (its id goes to a `child-pid` file next to the binary), then hangs (Unix).
 //!
 //! Test code: panics are fine here, the host must survive anything anyway.
 
@@ -884,6 +886,15 @@ fn own_path() -> Option<std::path::PathBuf> {
 /// Misbehaves in the module entry when a scan test asked for it (see the crate docs).
 fn misbehave_on_entry() -> bool {
     let Some(dir) = own_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return true };
+    #[cfg(unix)]
+    if dir.join("hang-with-child").exists() {
+        if let Ok(child) = std::process::Command::new("sleep").arg("600").spawn() {
+            let _ = std::fs::write(dir.join("child-pid"), child.id().to_string());
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
     if dir.join("hang-entry").exists() {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));

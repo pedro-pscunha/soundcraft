@@ -40,6 +40,8 @@ const MAX_LAST_LINE: usize = 200;
 const MAX_REASON: usize = 300;
 /// How long a helper may take to exit once it has answered.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
+/// How long a killed helper is waited for here before a thread of its own reaps it.
+const REAP_WAIT: Duration = Duration::from_secs(1);
 /// How often a running helper is checked.
 const POLL: Duration = Duration::from_millis(10);
 /// Most helpers at once, whatever the setting.
@@ -201,6 +203,7 @@ fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, S
     if !tail.trim().is_empty() {
         log::debug!("vst3 scan helper for {}: {}", bundle.display(), tail.trim_end());
     }
+    running.release();
     classify(ended, hello.as_deref(), &tail, bundle, limit, &helper.exe)
 }
 
@@ -220,6 +223,8 @@ enum Ended {
 /// A helper process and the threads reading its output.
 struct Running {
     child: Child,
+    /// Killed but not reaped yet (see [`end`]).
+    unreaped: bool,
     lines: mpsc::Receiver<Line>,
     err_tail: Arc<Mutex<Vec<u8>>>,
 }
@@ -227,6 +232,9 @@ struct Running {
 impl Running {
     fn spawn(helper: &ScanHelper, bundle: &Path) -> Result<Running, Skip> {
         let mut cmd = Command::new(&helper.exe);
+        // A group of its own: a timeout kills the helper and whatever it started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         cmd.arg(SCAN_HELPER_FLAG)
             .arg(bundle)
             .env(HOST_ENV, std::process::id().to_string())
@@ -243,10 +251,12 @@ impl Running {
         let mut child = cmd.spawn().map_err(|e| Skip::Host(format!("cannot start the scan helper {}: {e}", helper.exe.display())))?;
         let err_tail = drain_stderr(&mut child);
         let Some(lines) = read_lines(&mut child) else {
-            end(&mut child);
+            if !end(&mut child) {
+                reap_later(child);
+            }
             return Err(Skip::Host("cannot read the scan helper's output".into()));
         };
-        Ok(Running { child, lines, err_tail })
+        Ok(Running { child, unreaped: false, lines, err_tail })
     }
 
     /// Waits for the answer, at most `limit`; once it is in, the helper has [`EXIT_GRACE`] to exit
@@ -277,12 +287,12 @@ impl Running {
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    end(&mut self.child);
+                    self.unreaped = !end(&mut self.child);
                     return (answer.map_or(Ended::Lost, Ended::Answered), hello);
                 }
             }
             if Instant::now() >= deadline {
-                end(&mut self.child);
+                self.unreaped = !end(&mut self.child);
                 // An answer that came in since the look above still counts.
                 let answer = self.rest(&mut hello).or(answer);
                 return (answer.map_or(Ended::TimedOut, Ended::Answered), hello);
@@ -302,6 +312,13 @@ impl Running {
                 Ok(Line::Answer(a)) => answer = Some(a),
                 Err(_) => return answer,
             }
+        }
+    }
+
+    /// Done with the helper: one that was killed but is not reaped yet is reaped on a thread.
+    fn release(self) {
+        if self.unreaped {
+            reap_later(self.child);
         }
     }
 
@@ -389,9 +406,29 @@ fn last_line(text: &str) -> Option<String> {
     text.lines().map(str::trim).rfind(|l| !l.is_empty()).map(|l| l.chars().take(MAX_LAST_LINE).collect())
 }
 
-fn end(child: &mut Child) {
+/// Kills a helper and, on Unix, everything it started (its process group: a plugin's own child
+/// must not keep its output open), then reaps it, waiting at most [`REAP_WAIT`]. Returns whether
+/// it was reaped; one that was not (stuck in the kernel, on a hung network volume) is for
+/// [`reap_later`], so it cannot hold up the scan.
+fn end(child: &mut Child) -> bool {
+    #[cfg(unix)]
+    crate::ffi::kill_process_group(child.id());
     let _ = child.kill();
-    let _ = child.wait();
+    let until = Instant::now() + REAP_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) if Instant::now() >= until => return false,
+            Ok(None) => std::thread::sleep(POLL),
+        }
+    }
+}
+
+/// Reaps a killed helper on a thread of its own, whenever it ends.
+fn reap_later(mut child: Child) {
+    let _ = std::thread::Builder::new().name("vst3-scan-reap".into()).spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// A protocol line of a helper.

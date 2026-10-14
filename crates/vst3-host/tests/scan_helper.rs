@@ -79,6 +79,8 @@ fn main() {
     failures_on_soundcrafts_side_are_no_plugin_skips(&root.join("host-failures"));
     plugin_output_cannot_spoil_or_hide_the_answer(&root.join("noisy"));
     an_answer_counts_when_the_module_exit_hangs(&root.join("hang-exit"));
+    #[cfg(unix)]
+    a_timeout_kills_what_the_helper_started(&root.join("with-child"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     #[cfg(unix)]
@@ -313,6 +315,29 @@ fn skipped_bundles_are_remembered_until_rescan(dir: &Path, cache: &Path) {
     let elsewhere: Vec<_> = soundcraft_vst3_host::scan().into_iter().filter(|d| !d.path.starts_with(env!("CARGO_TARGET_TMPDIR"))).collect();
     assert!(elsewhere.is_empty(), "the rescan scanned installed plugins: {elsewhere:?}");
     soundcraft_vst3_host::set_scan_helper(None);
+}
+
+/// A timeout kills the helper and whatever its plugin started: a child of the plugin that keeps
+/// the helper's output open neither survives nor holds the scan up.
+#[cfg(unix)]
+fn a_timeout_kills_what_the_helper_started(dir: &Path) {
+    let (bundle, mode) = install(dir, "WithChild", Some("hang-with-child"));
+    let started = Instant::now();
+    let (_, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &helper());
+    let took = started.elapsed();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    let pid = std::fs::read_to_string(mode.unwrap().with_file_name("child-pid")).unwrap();
+    let alive = || Command::new("kill").args(["-0", pid.trim()]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    let gone = Instant::now();
+    while alive() && gone.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let survived = alive();
+    if survived {
+        let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+    }
+    assert!(!survived, "the plugin's child {} outlived the timeout", pid.trim());
+    assert!(took < TIMEOUT + Duration::from_millis(1500), "{took:?}: its open output held the scan");
 }
 
 /// A host killed mid-scan must not leave its helper stuck in a plugin's module entry for good.
