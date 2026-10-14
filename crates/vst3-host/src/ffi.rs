@@ -384,25 +384,50 @@ pub(crate) const CRASHED_STATUS: c_int = 4;
 /// name for a plugin's fault, and no wait while one is written.
 #[cfg(unix)]
 pub(crate) fn exit_on_crash_signals() {
-    unsafe extern "C" {
-        fn signal(signal: c_int, handler: extern "C" fn(c_int)) -> usize;
-    }
     extern "C" fn crashed(_signal: c_int) {
         exit_now(CRASHED_STATUS);
     }
-    const SIGILL: c_int = 4;
-    const SIGABRT: c_int = 6;
-    const SIGFPE: c_int = 8;
-    const SIGSEGV: c_int = 11;
-    #[cfg(target_os = "linux")]
-    const SIGBUS: c_int = 7;
-    #[cfg(not(target_os = "linux"))]
-    const SIGBUS: c_int = 10;
-    for sig in [SIGILL, SIGABRT, SIGFPE, SIGSEGV, SIGBUS] {
-        // SAFETY: `signal` is the C library function with this signature (its handler is a plain C
-        // function of one int); `crashed` only calls `_exit`, which is async-signal-safe.
-        unsafe { signal(sig, crashed) };
+    // A stack overflow leaves no stack to run the handler on: it runs on an alternate one.
+    ensure_alternate_signal_stack();
+    let handler = crashed as extern "C" fn(c_int);
+    for sig in [libc::SIGILL, libc::SIGTRAP, libc::SIGABRT, libc::SIGFPE, libc::SIGSEGV, libc::SIGBUS, libc::SIGSYS] {
+        // SAFETY: an all-zero `sigaction` is a valid value of that plain C struct; its fields are
+        // set below.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = handler as libc::sighandler_t;
+        action.sa_flags = libc::SA_ONSTACK;
+        // SAFETY: `sa_mask` is a valid `sigset_t` to empty; `sig` is a signal number and `action`
+        // a valid action that outlives the call (the old action is not wanted: null). `crashed`
+        // only calls `_exit`, which is async-signal-safe.
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(sig, &action, std::ptr::null_mut());
+        }
     }
+}
+
+/// Gives this thread an alternate signal stack unless it has one (Rust gives the main thread
+/// one; plugin code may have taken it down).
+#[cfg(unix)]
+fn ensure_alternate_signal_stack() {
+    /// Room for the crash handler, which only calls `_exit`, with a wide margin.
+    const SIZE: usize = 256 << 10;
+    // SAFETY: an all-zero `stack_t` is a valid value of that plain C struct.
+    let mut current: libc::stack_t = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new stack only reads the current one into `current`, a valid `stack_t`.
+    let read = unsafe { libc::sigaltstack(std::ptr::null(), &mut current) };
+    if read == 0 && current.ss_flags & libc::SS_DISABLE == 0 {
+        return;
+    }
+    // Never freed: the stack must outlive every signal this thread may take.
+    let stack: &'static mut [u8] = Box::leak(vec![0u8; SIZE].into_boxed_slice());
+    // SAFETY: as above.
+    let mut alternate: libc::stack_t = unsafe { std::mem::zeroed() };
+    alternate.ss_sp = stack.as_mut_ptr().cast();
+    alternate.ss_size = SIZE;
+    // SAFETY: `alternate` describes `SIZE` bytes of memory that live as long as the process; the
+    // old stack is not wanted (null).
+    unsafe { libc::sigaltstack(&alternate, std::ptr::null_mut()) };
 }
 
 /// Keeps standard output for a scan helper's own lines: returns a private copy of it, and points

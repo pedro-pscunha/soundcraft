@@ -32,8 +32,9 @@
 //! `hang-with-child` starts a child process that keeps the module's standard output and error
 //! open (its id goes to a `child-pid` file next to the binary), then hangs (Unix). `child-entry`
 //! starts a long-lived child process with no standard streams (its id goes to `child-pid` too),
-//! then loads normally (Unix). `segv-entry`
-//! writes through a null pointer, a real crash (Unix).
+//! then loads normally (Unix). `segv-entry` writes through a null pointer, a real crash;
+//! `overflow-entry` overflows the stack; `trap-entry` executes a trap instruction, as a compiler's
+//! `__builtin_trap` or a Swift runtime check does (Unix).
 //!
 //! Test code: panics are fine here, the host must survive anything anyway.
 
@@ -914,6 +915,27 @@ fn misbehave_on_entry() -> bool {
     if dir.join("segv-entry").exists() {
         // A real fault: a write through a null pointer.
         unsafe { std::ptr::write_volatile(std::ptr::null_mut::<u8>(), 1) };
+    }
+    #[cfg(unix)]
+    if dir.join("overflow-entry").exists() {
+        #[inline(never)]
+        #[allow(unconditional_recursion)]
+        fn deeper(n: u64) -> u64 {
+            let pad = std::hint::black_box([n as u8; 4096]);
+            deeper(n + 1).wrapping_add(u64::from(pad[(n % 4096) as usize]))
+        }
+        std::hint::black_box(deeper(0));
+    }
+    #[cfg(unix)]
+    if dir.join("trap-entry").exists() {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            std::arch::asm!("brk #0x1")
+        };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            std::arch::asm!("int3")
+        };
     }
     if dir.join("crash-entry").exists() {
         #[cfg(unix)]

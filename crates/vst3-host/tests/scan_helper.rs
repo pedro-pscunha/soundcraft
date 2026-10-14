@@ -242,10 +242,13 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     }
     #[cfg(unix)]
     {
-        // A real crash (SIGSEGV) ends the helper at once, with no crash report under its name.
-        let segv = install(dir, "Segv", Some("segv-entry")).0;
-        let (_, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&segv), &helper());
-        assert!(reason(&skipped, &segv).starts_with("the scan helper crashed (a fatal signal in plugin code)"), "{skipped:?}");
+        // Real crashes (a bad pointer, a stack overflow, a trap) end the helper at once, with no
+        // crash report under its name.
+        for (name, mode) in [("Segv", "segv-entry"), ("Overflow", "overflow-entry"), ("Trap", "trap-entry")] {
+            let bundle = install(dir, name, Some(mode)).0;
+            let (_, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &helper());
+            assert!(reason(&skipped, &bundle).starts_with("the scan helper crashed (a fatal signal in plugin code)"), "{mode}: {skipped:?}");
+        }
     }
     let failed = reason(&skipped, &fail);
     assert!(failed.contains("Fail.vst3") && failed.contains("failed"), "{failed}");
