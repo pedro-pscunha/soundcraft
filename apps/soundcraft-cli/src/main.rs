@@ -369,30 +369,32 @@ fn describe(args: &[String]) -> ExitCode {
     }
 }
 
-/// Control-channel methods. Every other dotted id is an engine command.
+/// The control channel's methods (the arms of `handle` in crates/ui-egui/src/control.rs; a test
+/// keeps the two the same). Every other dotted id is an engine command.
+const CONTROL_METHODS: &[&str] = &[
+    "engine.execute",
+    "command",
+    "engine.commands",
+    "engine.parity",
+    "session.inspect",
+    "document.inspect",
+    "ui.inspect",
+    "ui.menu.list",
+    "ui.menu.invoke",
+    "ui.set",
+    "ui.move",
+    "ui.click",
+    "ui.drag",
+    "ui.scroll",
+    "ui.zoom",
+    "ui.key",
+    "ui.text",
+    "ui.screenshot",
+    "app.quit",
+];
+
 fn is_control_method(method: &str) -> bool {
-    matches!(
-        method,
-        "engine.execute"
-            | "command"
-            | "engine.commands"
-            | "engine.parity"
-            | "session.inspect"
-            | "document.inspect"
-            | "ui.inspect"
-            | "ui.menu.list"
-            | "ui.menu.invoke"
-            | "ui.set"
-            | "ui.move"
-            | "ui.click"
-            | "ui.drag"
-            | "ui.key"
-            | "ui.text"
-            | "ui.scroll"
-            | "ui.zoom"
-            | "ui.screenshot"
-            | "app.quit"
-    )
+    CONTROL_METHODS.contains(&method)
 }
 
 /// A command id is shorthand for `engine.execute`. Documented control methods stay methods.
@@ -560,23 +562,35 @@ mod tests {
         }
     }
 
-    /// Every method the app's control channel answers stays a method here, not an engine command:
-    /// the list is read from the channel's own `match` (a method missing here was sent as
-    /// `engine.execute` and failed, as `ui.scroll` and `ui.zoom` once were).
+    /// The methods sent as methods are exactly the ones the app's control channel answers, read
+    /// from the arms of `handle`'s `match` in crates/ui-egui/src/control.rs. One missing here was
+    /// sent as `engine.execute` and failed (as `ui.scroll` and `ui.zoom` once were); one listed here
+    /// but gone there would get "unknown method". An arm this reading cannot take apart (a guard, a
+    /// binding) makes the two lists differ, so it fails loudly instead of going unchecked.
     #[test]
-    fn every_control_channel_method_is_sent_as_a_method() {
+    fn control_methods_are_exactly_the_control_channels() {
         let control = include_str!("../../../crates/ui-egui/src/control.rs");
-        let methods: Vec<&str> = control
+        let handle = &control[control.find("\nfn handle(").expect("control.rs has `fn handle`")..];
+        let handle = &handle[..handle.find("other => err(format!(\"unknown method").expect("`handle` ends with its unknown-method arm")];
+        // Lines at the match's own indent that start a pattern (or continue an or-pattern), up to `=>`.
+        let patterns: Vec<&str> = handle
             .lines()
-            .filter_map(|l| l.trim_start().strip_prefix('"').and_then(|_| l.split_once("=>")).map(|(arms, _)| arms))
-            .flat_map(|arms| arms.split('|'))
-            .filter_map(|arm| arm.trim().strip_prefix('"')?.strip_suffix('"'))
-            .filter(|m| m.contains('.'))
+            .filter(|l| l.len() - l.trim_start().len() == 8)
+            .map(str::trim_start)
+            .filter(|l| l.starts_with('"') || l.starts_with("| \""))
+            .map(|l| l.split_once("=>").map_or(l, |(pattern, _)| pattern))
             .collect();
-        assert!(methods.len() > 10 && methods.contains(&"ui.scroll"), "the channel's methods were not found: {methods:?}");
-        for method in methods {
-            assert!(is_control_method(method), "{method} would be sent as an engine command");
-        }
+        let mut found: Vec<&str> = patterns
+            .iter()
+            .flat_map(|p| p.split('|'))
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(|a| a.strip_prefix('"').and_then(|a| a.strip_suffix('"')).unwrap_or(a))
+            .collect();
+        found.sort_unstable();
+        let mut ours = CONTROL_METHODS.to_vec();
+        ours.sort_unstable();
+        assert_eq!(found, ours, "the control channel's methods (left) and the CLI's (right)");
     }
 
     #[test]
