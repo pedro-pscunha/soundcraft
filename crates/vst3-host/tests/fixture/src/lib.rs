@@ -33,8 +33,10 @@
 //! output and 1 MiB on standard error. `hang-exit` makes the module exit never return.
 //! `hang-with-child` starts a child process that keeps the module's standard output and error
 //! open (its id goes to a `child-pid` file next to the binary), then hangs (Unix). `child-entry`
-//! starts a long-lived child process with no standard streams (its id goes to `child-pid` too),
-//! then loads normally (Unix). `segv-entry` writes through a null pointer, a real crash;
+//! starts a long-lived child process with no standard streams, in a process group of its own (so
+//! nothing that ends the helper's group ends it; its id goes to `child-pid` too), then loads
+//! normally (Unix). `stdio-child-entry` starts a long-lived child that keeps the module's standard
+//! output and error (its id goes to `child-pid`), then loads normally (Unix). `segv-entry` writes through a null pointer, a real crash;
 //! `overflow-entry` overflows the stack; `trap-entry` executes a trap instruction, as a compiler's
 //! `__builtin_trap` or a Swift runtime check does (Unix). `record-loads` adds the id of every
 //! process that runs the module entry to a `loads` file next to the binary, one per line, and
@@ -896,8 +898,17 @@ fn misbehave_on_entry() -> bool {
     let Some(dir) = own_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return true };
     #[cfg(unix)]
     if dir.join("child-entry").exists() {
+        use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
-        if let Ok(child) = Command::new("sleep").arg("600").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        let mut child = Command::new("sleep");
+        child.arg("600").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
+        if let Ok(child) = child.spawn() {
+            let _ = std::fs::write(dir.join("child-pid"), child.id().to_string());
+        }
+    }
+    #[cfg(unix)]
+    if dir.join("stdio-child-entry").exists() {
+        if let Ok(child) = std::process::Command::new("sleep").arg("600").spawn() {
             let _ = std::fs::write(dir.join("child-pid"), child.id().to_string());
         }
     }

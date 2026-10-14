@@ -336,7 +336,7 @@ impl Running {
                     }
                 }
             }
-            match self.child.try_wait() {
+            match self.exited() {
                 // A helper that has just exited may still have lines in the pipe (the reader stops
                 // waiting at the end of the output).
                 Ok(Some(st)) => {
@@ -357,6 +357,33 @@ impl Running {
             }
             std::thread::sleep(POLL);
         }
+    }
+
+    /// The helper's exit status, once it has exited. Then whatever its plugin started and left
+    /// running is killed too (its process group on Unix, its job on Windows): it would live on,
+    /// orphaned, keeping the helper's standard error open, and with it the thread draining it.
+    ///
+    /// On Unix the group is killed before the helper is reaped, not after. Until it is reaped, the
+    /// helper is a zombie: its id, which is its group's id, cannot be taken by another process, so
+    /// the group killed is surely the helper's. Once it is reaped, and its group empty, a new
+    /// process may get that id, and lead a group of that id too. So the exit is first seen
+    /// without reaping (`waitid` with WNOWAIT), then the group killed, then the helper reaped.
+    fn exited(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        #[cfg(unix)]
+        match crate::ffi::has_exited(self.child.id()) {
+            Some(false) => return Ok(None),
+            Some(true) => crate::ffi::kill_process_group(self.child.id()),
+            // Cannot tell: reaped below without the kill, which could otherwise miss its group.
+            None => {}
+        }
+        let st = self.child.try_wait()?;
+        #[cfg(windows)]
+        if st.is_some()
+            && let Some(job) = &self.job
+        {
+            job.end();
+        }
+        Ok(st)
     }
 
     /// The lines still to come from a helper that has ended (until the end of its output, at most

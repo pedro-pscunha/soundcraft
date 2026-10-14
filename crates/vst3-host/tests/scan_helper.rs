@@ -188,6 +188,8 @@ fn main() {
     a_timeout_kills_what_the_helper_started(&root.join("with-child"));
     #[cfg(unix)]
     a_process_the_plugin_leaves_running_does_not_hold_the_answer(&root.join("leaves-child"));
+    #[cfg(unix)]
+    what_the_plugin_leaves_running_ends_with_its_scan(&root.join("stdio-child"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     a_timeout_is_cached_only_when_it_happens_twice(&root.join("twice"), &root.join("twice-cache/vst3.json"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
@@ -796,6 +798,19 @@ fn a_process_the_plugin_leaves_running_does_not_hold_the_answer(dir: &Path) {
     processes::end(pid_in(&mode.unwrap().with_file_name("child-pid")));
     assert!(skipped.is_empty() && found.len() == 2, "{skipped:?}");
     assert!(took < Duration::from_millis(1500), "{took:?}: the answer was held open by the plugin's process");
+}
+
+/// What the plugin starts and leaves running in its helper's process group ends with a scan that
+/// answered normally: it would live on as an orphan, here keeping the helper's standard error open
+/// (as a child that inherits the plugin's streams does), and with it the thread draining it.
+#[cfg(unix)]
+fn what_the_plugin_leaves_running_ends_with_its_scan(dir: &Path) {
+    let (bundle, mode) = install(dir, "StdioChild", Some("stdio-child-entry"));
+    let generous = ScanHelper { timeout: Duration::from_secs(10), ..helper() };
+    let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &generous);
+    assert!(skipped.is_empty() && found.len() == 2, "{skipped:?}");
+    let pid = pid_in(&mode.unwrap().with_file_name("child-pid"));
+    assert!(!processes::outlives(pid, Duration::from_secs(2)), "the plugin's child {pid} outlived a scan that answered");
 }
 
 /// A helper started by hand, by a script in the script's process group, that is handed a host id

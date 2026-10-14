@@ -482,6 +482,24 @@ pub(crate) fn private_stdout() -> Option<std::fs::File> {
     Some(private)
 }
 
+/// Whether child `pid` has exited, without reaping it: its id, and so its process group's, stays
+/// taken until it is reaped. `None` when that cannot be told.
+#[cfg(unix)]
+pub(crate) fn has_exited(pid: u32) -> Option<bool> {
+    let pid = libc::id_t::try_from(pid).ok()?;
+    // SAFETY: siginfo_t is plain data (integers, and pointers never followed here), so all zeros is
+    // a valid value of it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waitid(2) with WNOWAIT only reports the child's state, which stays waitable, and with
+    // WNOHANG returns at once; it writes into `info`, a valid siginfo_t, and returns -1 on failure.
+    if unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) } != 0 {
+        return None;
+    }
+    // SAFETY: `info` is initialised; waitid set si_pid to the child's id if it has exited, and
+    // left it 0 if not.
+    Some(unsafe { info.si_pid() } != 0)
+}
+
 /// Kills process group `group` (a scan helper and whatever it started) at once. The helper was
 /// started as the leader of a group of its own, and is not reaped yet, so the group is its.
 #[cfg(unix)]
