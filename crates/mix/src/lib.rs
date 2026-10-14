@@ -1342,7 +1342,9 @@ fn run_strips<T: Send>(work: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
     work.iter_mut().for_each(f);
 }
 
-fn strip_channels(t: &Track, main_ch: usize) -> usize {
+/// The channels a track's strip renders (`main_ch`: [`main_channels`]); hosted plugins on it are
+/// made for that many (an instrument for at least two).
+pub fn strip_channels(t: &Track, main_ch: usize) -> usize {
     match t.kind {
         TrackKind::Master => main_ch,
         TrackKind::Instrument => t.channels().clamp(2, MAX_CHANNELS),

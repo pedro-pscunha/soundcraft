@@ -6,7 +6,7 @@
 
 use super::*;
 use serde_json::json;
-use soundcraft_model::{INSERT_SLOTS, Insert, Session, b64};
+use soundcraft_model::{INSERT_SLOTS, Session, b64};
 use std::sync::Arc;
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -66,9 +66,8 @@ fn insert_state(e: &mut Engine, p: &Value) -> Result<Value> {
             .collect::<Result<_>>()?,
         Some(_) => return Err(bad(CMD, "`params` must be an object of parameter values")),
     };
-    let s = e.session_mut();
-    s.track(t).ok_or_else(|| bad(CMD, "no track"))?;
-    let ins = insert_at(s, t, slot).ok_or_else(|| bad(CMD, "empty slot"))?;
+    let tr = e.session_mut().track_mut(t).ok_or_else(|| bad(CMD, "no track"))?;
+    let ins = tr.insert_at_mut(slot).ok_or_else(|| bad(CMD, "empty slot"))?;
     if !params.is_empty() && !soundcraft_mix::is_third_party(&ins.plugin) {
         return Err(bad(CMD, "`params` are for hosted plugins (a built-in insert holds every parameter itself)"));
     }
@@ -92,42 +91,55 @@ fn insert_state(e: &mut Engine, p: &Value) -> Result<Value> {
         }
     }
     if !moved.is_empty() {
-        let (plugin, epoch) = (ins.plugin.clone(), ins.state_epoch());
-        refresh_history(e, t, slot, &plugin, epoch, &moved);
+        refresh_history(e, t, slot, &moved);
     }
     Ok(json!({"bytes": n, "params": replaced}))
 }
 
-/// The insert in `slot` of track `t` (`None` = the instrument slot).
-fn insert_at(s: &mut Session, t: TrackId, slot: Option<usize>) -> Option<&mut Insert> {
-    let tr = s.track_mut(t)?;
-    match slot {
-        Some(i) => tr.mixer.inserts.get_mut(i).and_then(Option::as_mut),
-        None => tr.instrument.as_mut(),
-    }
+/// What live playback keeps one instance for: the plugin and its state epoch in a slot, on a strip
+/// of one channel count (it makes the instance again when any of them changes).
+#[derive(PartialEq)]
+struct Instance {
+    plugin: String,
+    epoch: u64,
+    ch: usize,
+}
+
+fn instance_at(s: &Session, t: TrackId, slot: Option<usize>) -> Option<Instance> {
+    let tr = s.track(t)?;
+    let ins = tr.insert_at(slot)?;
+    let ch = soundcraft_mix::strip_channels(tr, soundcraft_mix::main_channels(s));
+    Some(Instance { plugin: ins.plugin.clone(), epoch: ins.state_epoch(), ch })
 }
 
 /// Values read from the playing instance are facts about it, not edits, so no Undo or Redo step
 /// may take them back: the mixer would send the plugin the old value of a preset loaded in its
-/// editor. Every step that holds the same instance (plugin and state epoch) with the value a
-/// capture replaced gets the new one; a step with another value keeps it (an edit of the user's
-/// own, which undoing should restore), and so does another instance in that slot.
-fn refresh_history(e: &mut Engine, t: TrackId, slot: Option<usize>, plugin: &str, epoch: u64, moved: &[(String, f32, f32)]) {
-    let same = |ins: &Insert| ins.plugin == plugin && ins.state_epoch() == epoch;
-    for h in e.undo.iter_mut().chain(e.redo.iter_mut()) {
-        let ins = h.doc.track(t).and_then(|tr| match slot {
-            Some(i) => tr.mixer.inserts.get(i).and_then(Option::as_ref),
-            None => tr.instrument.as_ref(),
-        });
-        if !ins.is_some_and(|ins| same(ins) && moved.iter().any(|(k, from, _)| ins.params.get(k) == Some(from))) {
-            continue;
-        }
-        let Some(ins) = insert_at(Arc::make_mut(&mut h.doc), t, slot) else { continue };
-        for (k, from, to) in moved {
-            if let Some(v) = ins.params.get_mut(k)
-                && *v == *from
-            {
-                *v = *to;
+/// editor. From the present outward, each step that holds the same instance gets the new value of
+/// a parameter while it holds the value the capture replaced. The walk stops for a parameter at
+/// its first other value (an edit of the user's own, which undoing restores, and everything
+/// before it), and for all of them at the first step without the instance (another plugin or
+/// state, the slot empty, another channel count: undoing there makes a new instance from that
+/// step's own settings).
+fn refresh_history(e: &mut Engine, t: TrackId, slot: Option<usize>, moved: &[(String, f32, f32)]) {
+    let Some(live) = instance_at(&e.doc, t, slot) else { return };
+    for stack in [&mut e.undo, &mut e.redo] {
+        let mut open = vec![true; moved.len()];
+        for h in stack.iter_mut().rev() {
+            if instance_at(&h.doc, t, slot).as_ref() != Some(&live) {
+                break;
+            }
+            let Some(ins) = h.doc.track(t).and_then(|tr| tr.insert_at(slot)) else { break };
+            for (o, (k, from, _)) in open.iter_mut().zip(moved) {
+                *o = *o && ins.params.get(k) == Some(from);
+            }
+            if !open.contains(&true) {
+                break;
+            }
+            let Some(ins) = Arc::make_mut(&mut h.doc).track_mut(t).and_then(|tr| tr.insert_at_mut(slot)) else { break };
+            for (_, (k, _, to)) in open.iter().zip(moved).filter(|(o, _)| **o) {
+                if let Some(v) = ins.params.get_mut(k) {
+                    *v = *to;
+                }
             }
         }
     }
@@ -219,44 +231,93 @@ mod tests {
         assert_eq!(inserts(&e), before);
     }
 
+    /// A hosted plugin with overrides `mix` and `drive` put into `slot` of the first track as an
+    /// undo step of its own: a new insert, so a new instance.
+    fn put_hosted(e: &mut Engine, slot: Option<usize>, mix: f32) {
+        let mut ins = soundcraft_model::Insert::new("clap:not.installed");
+        ins.params.extend([("mix".to_string(), mix), ("drive".to_string(), 0.25)]);
+        edit(e, slot, |s| *s = Some(ins));
+    }
+
+    /// Changes `slot` of the first track (`None`: its instrument) as an undo step.
+    fn edit(e: &mut Engine, slot: Option<usize>, f: impl FnOnce(&mut Option<soundcraft_model::Insert>)) {
+        let before = e.session_arc();
+        let tr = &mut e.session_mut().tracks[0];
+        f(match slot {
+            Some(i) => &mut tr.mixer.inserts[i],
+            None => &mut tr.instrument,
+        });
+        e.push_undo("Edit", before);
+    }
+
+    fn params(e: &Engine, slot: Option<usize>) -> (f32, f32) {
+        let p = &e.session().tracks[0].insert_at(slot).unwrap().params;
+        (p["mix"], p["drive"])
+    }
+
+    fn capture(e: &mut Engine, slot: &str, mix: f32, drive: f32) {
+        let t = e.session().tracks[0].id.0;
+        let live = json!({"track": t, "slot": slot, "state": b64::encode(b"preset"), "live": true, "params": {"mix": mix, "drive": drive}});
+        e.execute("mix.insert_state", &live).unwrap();
+    }
+
     /// A value read from the playing instance (a preset loaded in its editor) is a fact about it:
     /// Undo and Redo of earlier edits keep it, or the mixer would send the plugin the old value.
-    /// A step with another value (the user's own edit) or another instance keeps its own.
+    /// That holds back to the user's own edit of the parameter (undoing it restores its value) and
+    /// to a step without the instance: a step before the plugin left its slot and came back keeps
+    /// the value it had, even the one the capture replaced (undoing there makes a new instance).
     #[test]
     fn undo_and_redo_keep_the_values_read_from_the_playing_instance() {
         let mut e = Engine::default();
         e.execute("track.new", &json!({})).unwrap();
-        let t = e.session().tracks[0].id;
-        let hosted = |e: &mut Engine, mix: f32| {
-            let mut ins = soundcraft_model::Insert::new("clap:not.installed");
-            ins.params.extend([("mix".to_string(), mix), ("drive".to_string(), 0.25)]);
-            let before = e.session_arc();
-            e.session_mut().track_mut(t).unwrap().mixer.inserts[0] = Some(ins);
-            e.push_undo("Insert", before);
-        };
-        hosted(&mut e, 0.1); // another instance, replaced next
-        hosted(&mut e, 0.3);
-        let before = e.session_arc();
-        e.session_mut().track_mut(t).unwrap().mixer.inserts[0].as_mut().unwrap().params.insert("drive".into(), 0.5);
-        e.push_undo("Drive", before);
+        put_hosted(&mut e, Some(0), 0.3);
+        let away = |s: &mut Option<soundcraft_model::Insert>| *s = None;
+        let held = e.session().tracks[0].mixer.inserts[0].clone();
+        edit(&mut e, Some(0), away); // moved to another slot…
+        edit(&mut e, Some(0), |s| *s = held); // …and back: the same insert, a new instance
+        edit(&mut e, Some(0), |s| _ = s.as_mut().unwrap().params.insert("drive".into(), 0.5));
         e.execute("track.new", &json!({})).unwrap();
         e.undo();
-        let live = json!({"track": t.0, "slot": 0, "state": b64::encode(b"preset"), "live": true, "params": {"mix": 0.8, "drive": 0.9}});
-        e.execute("mix.insert_state", &live).unwrap();
-        let params = |e: &Engine| {
-            let p = &e.session().tracks[0].mixer.inserts[0].as_ref().unwrap().params;
-            (p["mix"], p["drive"])
-        };
+        capture(&mut e, "a", 0.8, 0.9);
         e.redo(); // the track.new step, made before the capture
-        assert_eq!(params(&e), (0.8, 0.9));
+        assert_eq!(params(&e, Some(0)), (0.8, 0.9));
         e.undo();
-        e.undo(); // the Drive edit: its own earlier value comes back, the plugin's mix stays
-        assert_eq!(params(&e), (0.8, 0.25));
-        e.undo(); // the other instance
-        assert_eq!(params(&e), (0.1, 0.25));
+        e.undo(); // the drive edit: its own earlier value comes back, the plugin's mix stays
+        assert_eq!(params(&e, Some(0)), (0.8, 0.25));
+        e.undo();
+        e.undo(); // before the plugin left the slot: as it was
+        assert_eq!(params(&e, Some(0)), (0.3, 0.25));
         e.redo();
         e.redo();
-        assert_eq!(params(&e), (0.8, 0.9));
+        assert_eq!(params(&e, Some(0)), (0.8, 0.25));
+        e.redo();
+        assert_eq!(params(&e, Some(0)), (0.8, 0.9));
+    }
+
+    /// The instrument slot too. A step with another instance there keeps its values, the one the
+    /// capture replaced included, and so does a step before the user's own edits of a parameter
+    /// even where it holds that value again by chance.
+    #[test]
+    fn another_instance_or_the_users_own_edits_keep_their_values() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({})).unwrap();
+        put_hosted(&mut e, None, 0.3); // another instance, replaced next
+        put_hosted(&mut e, None, 0.3);
+        capture(&mut e, "instrument", 0.8, 0.25);
+        e.undo();
+        assert_eq!(params(&e, None), (0.3, 0.25), "another instance");
+        e.redo();
+        let set = |v: f32| move |s: &mut Option<soundcraft_model::Insert>| _ = s.as_mut().unwrap().params.insert("mix".into(), v);
+        edit(&mut e, None, set(0.5));
+        edit(&mut e, None, set(0.8)); // the plugin's own value, set again by the user
+        edit(&mut e, None, set(0.3));
+        capture(&mut e, "instrument", 0.9, 0.25);
+        e.undo();
+        assert_eq!(params(&e, None).0, 0.8);
+        e.undo();
+        assert_eq!(params(&e, None).0, 0.5);
+        e.undo();
+        assert_eq!(params(&e, None).0, 0.8, "the same value by chance, before the user's own edits");
     }
 
     #[test]
