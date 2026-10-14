@@ -28,9 +28,10 @@
 //! started for that scan, nothing is cached, and no bundle is loaded in this process instead. Of
 //! the bundles it had not scanned, those the scan cache knows to load (their last outcome, for the
 //! same fingerprint, is a list of plugins) are listed from the cache; the others, and any bundle a
-//! stuck helper was running, are listed as not scanned ([`SkippedBundle::helper_failed`]) and tried
-//! again by the next scan. Without a
-//! helper (library users, tests) scans load every bundle in this process, as before. The apps set
+//! stuck helper was running, are listed as not scanned ([`SkippedBundle::helper_failed`]). That
+//! scan's result stands for the run: their plugins are missing until the next rescan or the next
+//! start tries them again. Without a helper (library users, tests) scans load every bundle in this
+//! process, as before. The apps set
 //! all this up with `soundcraft_engine::plugin_scan_startup`.
 //!
 //! Scans run without the registry lock, so the registry answers other calls while helpers work; a
@@ -244,7 +245,8 @@ pub struct SkippedBundle {
     /// Skipped by an earlier scan, kept in the scan cache (not tried again in this one).
     pub from_cache: bool,
     /// Not scanned at all: the scan helper failed on SoundCraft's side (see the reason). No verdict
-    /// on the bundle: neither cached nor remembered, so the next scan tries it again.
+    /// on the bundle: neither cached nor remembered, so the next rescan or the next start tries it
+    /// again.
     pub helper_failed: bool,
 }
 

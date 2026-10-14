@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (the VST3 scan cache names the scanning code and retries a timeout once; a failing helper loads in-process only bundles known to load; previously minor: one plugin-scan startup call for both apps; previously minor: the VST3 scan is cached per bundle across runs, in the settings folder the engine now resolves for both apps; previously minor: the apps scan VST3 plugins in helper processes, their own executable run with `--soundcraft-scan-vst3`; previously trivial: macos also runs the hosts' main-queue jobs, the CLAP host's too, and records app activation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (bundles a failing helper did not scan wait for the next rescan or the next start; previously minor: the VST3 scan cache names the scanning code and retries a timeout once; a failing helper loads in-process only bundles known to load; previously minor: one plugin-scan startup call for both apps; previously minor: the VST3 scan is cached per bundle across runs, in the settings folder the engine now resolves for both apps; previously minor: the apps scan VST3 plugins in helper processes, their own executable run with `--soundcraft-scan-vst3`; previously trivial: macos also runs the hosts' main-queue jobs, the CLAP host's too, and records app activation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a Cargo workspace of small crates with enforced layering (`cargo xtask layers`).
 Nothing below the UI knows about egui, so the interface can be replaced.
@@ -79,7 +79,7 @@ fingerprint of the bundle and named after the scanning code, so later runs start
 new or changed bundles and an update starts cold. A timeout is retried once on the next run
 before it is cached as a skip. A helper that fails on SoundCraft's side (cannot start, or speaks
 another scan protocol) skips nothing: the bundles the cache knows to load are loaded in-process
-instead, the others listed as not scanned. CLAP scans still load every plugin binary in-process;
+instead, the others listed as not scanned until the next rescan or the next start. CLAP scans still load every plugin binary in-process;
 the Audio Unit scan loads none (it only lists the system's component registry).
 
 The cpal callbacks mark their thread (`soundcraft_playback::mark_audio_thread`). Code that may run
@@ -98,6 +98,7 @@ app as an MCP server. See `control-protocol.md` and `mcp.md`.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | Bundles a failing scan helper did not scan are tried again by the next rescan or the next start, not by a later scan in the same run |
 | 2026-10-14 | minor | The VST3 scan cache is named after the scanning code (an update starts cold) and retries a timeout once; a failing helper loads in-process only bundles known to load |
 | 2026-10-14 | minor | One startup call (`plugin_scan_startup`) for both apps; a helper failing on SoundCraft's side falls back to in-process loads; the Audio Unit scan loads no binary (corrected) |
 | 2026-10-14 | minor | The VST3 scan is cached per bundle across runs; the settings folder rule moved into the engine (`settings`) so the CLI uses it too |

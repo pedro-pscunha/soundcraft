@@ -28,7 +28,8 @@ struct Registry {
     /// Bundles a helper could not scan, not tried again until `rescan`.
     skipped: Vec<SkippedBundle>,
     /// Bundles not scanned because the scan helper failed on SoundCraft's side, as the last scans
-    /// left them: listed with `skipped`, but tried again by the next scan.
+    /// left them: listed with `skipped`, but tried again by the next rescan or the next start (the
+    /// scan's result, stored, stands until then).
     not_scanned: Vec<SkippedBundle>,
     /// Replaces the standard folders (tests: see `set_default_search_paths`).
     default_paths: Option<Vec<PathBuf>>,
