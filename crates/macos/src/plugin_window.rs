@@ -41,7 +41,7 @@
 //!    modifier state it would see with its own window key.
 //! 4. Switch to another app and back: the editor hides and comes back, still open.
 
-pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, PluginWindow, fit_content};
+pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, PluginWindow, content_size, fit_content};
 
 /// Test seams (the `testing` feature, never on in the app).
 #[cfg(feature = "testing")]

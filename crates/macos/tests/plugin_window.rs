@@ -24,7 +24,7 @@ mod macos {
         NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-    use soundcraft_macos::plugin_window::{PluginWindow, testing};
+    use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
     use std::cell::{Cell, RefCell};
 
     /// Space and left Shift (virtual key codes).
@@ -280,6 +280,14 @@ mod macos {
             w.fit(mtm, NSSize::new(f64::NAN, 10.0));
             assert_eq!(w.window(mtm).frame(), after, "no size, no change");
         });
+
+        // The content size rule, shared with the Audio Unit host: rounded, at most 16 384 points a
+        // side, and no size for what is not one.
+        assert_eq!(content_size(NSSize::new(320.4, 239.6)), Some(NSSize::new(320.0, 240.0)));
+        assert_eq!(content_size(NSSize::new(50_000.0, 10.0)), Some(NSSize::new(16_384.0, 10.0)));
+        for none in [NSSize::new(f64::NAN, 10.0), NSSize::new(0.5, 10.0), NSSize::new(10.0, f64::INFINITY), NSSize::new(0.0, 0.0)] {
+            assert_eq!(content_size(none), None, "{none:?}");
+        }
 
         w.close(mtm);
         assert_eq!(windows(mtm), (base + 1, 0), "the plugin window is gone");

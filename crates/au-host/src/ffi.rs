@@ -1478,7 +1478,7 @@ mod window {
     use objc2::{MainThreadMarker, msg_send, sel};
     use objc2_app_kit::NSView;
     use objc2_foundation::{NSBundle, NSPoint, NSSize, NSString, NSURL};
-    use soundcraft_macos::plugin_window::{DEFAULT_CONTENT, PluginWindow};
+    use soundcraft_macos::plugin_window::{DEFAULT_CONTENT, PluginWindow, content_size};
 
     /// Runs `f`, which calls into a plugin's own Objective-C code, catching an exception it throws
     /// (logged; an error then). Uncaught, the exception would unwind into AppKit or Rust and abort
@@ -1624,11 +1624,6 @@ mod window {
         Ok(View { view, factory: None })
     }
 
-    /// True when a view's frame size is a size (a view may report none).
-    fn has_size(s: NSSize) -> bool {
-        s.width.is_finite() && s.height.is_finite() && s.width >= 1.0 && s.height >= 1.0
-    }
-
     /// An open editor: the view in its window. Holds the window and one retain each of the view
     /// and the view's factory, released in [`Editor::close`].
     pub struct Editor {
@@ -1649,11 +1644,11 @@ mod window {
                 let View { view, factory } = make_view(mtm, unit)?;
                 // The view's own code runs as it is sized and joins the window.
                 let (window, view) = guarded("the unit's view joining its window", || {
-                    let mut size = view.frame().size;
-                    if !has_size(size) {
+                    // A view may report no size: it gets the window's default.
+                    let size = content_size(view.frame().size).unwrap_or_else(|| {
                         view.setFrameSize(DEFAULT_CONTENT);
-                        size = DEFAULT_CONTENT;
-                    }
+                        DEFAULT_CONTENT
+                    });
                     let window = PluginWindow::new(mtm, title, size);
                     // The window goes (closed and released) when it is dropped on these early returns.
                     let content = window.content_view(mtm).ok_or_else(|| "the editor window has no content view".to_string())?;
@@ -1709,7 +1704,7 @@ mod window {
                 // Resizing redraws the view (its own code).
                 let _ = guarded("the unit's view resizing", || {
                     let f = v.frame();
-                    if !has_size(f.size) {
+                    if content_size(f.size).is_none() {
                         return Ok(());
                     }
                     if f.origin.x != 0.0 || f.origin.y != 0.0 {

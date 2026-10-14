@@ -128,8 +128,10 @@ fn is_plugin_window(w: &NSWindow) -> bool {
     w.isKindOfClass(HostWindow::class())
 }
 
-/// A content size clamped to a sane window (`None` when it is not a size).
-fn clamp(s: NSSize) -> Option<NSSize> {
+/// The content size a plugin window gives a view of size `s`: rounded, each side at most 16 384
+/// points; `None` when `s` is no size (not finite, or a side under one point), as a view may
+/// report.
+pub fn content_size(s: NSSize) -> Option<NSSize> {
     (s.width.is_finite() && s.height.is_finite() && s.width >= 1.0 && s.height >= 1.0)
         .then(|| NSSize::new(s.width.min(MAX_SIDE).round(), s.height.min(MAX_SIDE).round()))
 }
@@ -137,7 +139,7 @@ fn clamp(s: NSSize) -> Option<NSSize> {
 /// Resizes `window`'s content to `content`, keeping the window's top-left corner where it is
 /// (no-op when the size is already that, or `content` is no size).
 pub fn fit_content(window: &NSWindow, content: NSSize) {
-    let Some(size) = clamp(content) else { return };
+    let Some(size) = content_size(content) else { return };
     autoreleasepool(|_| {
         let now = window.contentRectForFrameRect(window.frame());
         if (now.size.width - size.width).abs() < 0.5 && (now.size.height - size.height).abs() < 0.5 {
@@ -163,10 +165,10 @@ pub struct PluginWindow {
 unsafe impl Send for PluginWindow {}
 
 impl PluginWindow {
-    /// A new window with `content` as its content size (clamped; [`DEFAULT_CONTENT`] when it is
-    /// no size), not on screen until [`PluginWindow::show`].
+    /// A new window with `content` as its content size ([`content_size`]; [`DEFAULT_CONTENT`]
+    /// when it is no size), not on screen until [`PluginWindow::show`].
     pub fn new(mtm: MainThreadMarker, title: &str, content: NSSize) -> PluginWindow {
-        let size = clamp(content).unwrap_or(DEFAULT_CONTENT);
+        let size = content_size(content).unwrap_or(DEFAULT_CONTENT);
         let rect = NSRect::new(NSPoint::new(200.0, 200.0), size);
         // Plugin editors are transient windows; in particular not minimizable (a minimized window
         // becomes a Dock thumbnail, which made every editor visited look like another app).
