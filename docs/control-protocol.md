@@ -75,13 +75,14 @@ would move or restart the transport, or replace the session under the take, fail
 `transport.half_speed`, `transport.play` with `from`, `edit.play_timeline`, `markers.recall`,
 `markers.next`, `markers.previous`, `edit.tab` (with `extend` it only extends the selection and
 runs), `session.new`, `session.open`, `session.close`, `session.revert` and the `app.quit`
-command. Stopping, and `transport.play` without `from`, go on. This holds headless too (the engine
-refuses them). The control channel's `app.quit` method still quits: the take is finished and kept
-in the session's autosave.
+command. Stopping, and `transport.play` without `from`, go on. The refusal is the engine's
+(`Engine::blocked_while_recording`), so every front end that embeds it gets it; only the app
+records (the CLI and the MCP server queue `transport.record` but never record). The control
+channel's `app.quit` method still quits: the take is finished and kept in the session's autosave.
 
 In the app, `session.open` of the session that is already open does not reload it: it returns
-`{"name": …, "already_open": true}` (the headless engine has no open session to compare with and
-opens the file).
+`{"name": …, "already_open": true}`, recording or not, since nothing changes. That check is the
+app's; headless, `session.open` opens the file again.
 
 ## Examples
 
