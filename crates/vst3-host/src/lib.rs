@@ -167,8 +167,9 @@ pub const SCAN_HELPER_FLAG: &str = "--soundcraft-scan-vst3";
 /// (the slowest plugins seen, Omnisphere and Keyscape, take a few seconds).
 pub const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How many scan helpers run at once.
-pub const HELPER_PARALLEL: usize = 4;
+/// How many scan helpers run at once. A helper stuck in a plugin is idle, so several stuck ones
+/// cost one time limit rather than one each.
+pub const HELPER_PARALLEL: usize = 8;
 
 /// Scanning in helper processes (see [`set_scan_helper`]).
 #[derive(Debug, Clone, PartialEq, Eq)]

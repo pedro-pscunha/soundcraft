@@ -50,6 +50,7 @@ fn main() {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("vst3-scan-helper-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     hanging_crashing_and_failing_bundles_are_skipped(&root.join("mixed"));
+    eight_stuck_helpers_cost_one_time_limit(&root.join("eight"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     #[cfg(unix)]
@@ -117,6 +118,18 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     // The helpers ran side by side: the hanging one was waited for once, not once per bundle.
     assert!(took >= TIMEOUT && took < TIMEOUT * 4, "{took:?}");
     assert!(soundcraft_vst3_host::skipped().is_empty(), "scan_paths_with leaves the registry alone");
+}
+
+/// Helpers stuck in a plugin are idle: eight of them, the default parallelism, cost one time limit.
+fn eight_stuck_helpers_cost_one_time_limit(dir: &Path) {
+    for i in 0..8 {
+        install(dir, &format!("Stuck{i}"), Some("hang-entry"));
+    }
+    let started = Instant::now();
+    let (found, skipped) = soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &helper());
+    let took = started.elapsed();
+    assert!(found.is_empty() && skipped.len() == 8, "{skipped:?}");
+    assert!(took >= TIMEOUT && took < TIMEOUT * 2, "{took:?}: not all eight ran at once");
 }
 
 fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cache_dir: &Path) {
