@@ -17,7 +17,7 @@ mod macos {
     use objc2::MainThreadMarker;
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSApplication;
-    use objc2_foundation::{NSDate, NSRunLoop};
+    use objc2_foundation::{NSDate, NSRunLoop, NSSize};
     use soundcraft_au_host::{units_awaiting_disposal, units_leaked};
     use soundcraft_dsp::Plugin;
 
@@ -73,6 +73,37 @@ mod macos {
     fn rss_kib() -> u64 {
         let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().expect("ps");
         String::from_utf8_lossy(&out.stdout).trim().parse().expect("rss")
+    }
+
+    /// The view resizes itself: the editor's idle fits the window to it, keeping the window's
+    /// top-left corner.
+    fn view_resizes(mtm: MainThreadMarker, id: &str) {
+        let mut p = soundcraft_au_host::instantiate_plugin(id).expect("instantiate");
+        let mut ed = p.editor().expect("an editor");
+        p.open_editor_hidden().expect("open");
+        autoreleasepool(|_| {
+            let view = p.editor_view().expect("the view");
+            let window = view.window().expect("in its window");
+            let before = window.frame();
+            let old = window.contentRectForFrameRect(before).size;
+            view.setFrameSize(NSSize::new(old.width + 40.0, old.height + 30.0));
+            let want = view.frame().size;
+            if (want.width, want.height) == (old.width, old.height) {
+                println!("{id}: the view keeps its size");
+                return;
+            }
+            assert!(ed.idle().is_empty());
+            let after = window.frame();
+            let content = window.contentRectForFrameRect(after).size;
+            assert_eq!((content.width, content.height), (want.width.round(), want.height.round()), "{id}: the window follows the view");
+            assert_eq!(after.origin.x, before.origin.x, "{id}: the left edge stays");
+            assert_eq!(after.origin.y + after.size.height, before.origin.y + before.size.height, "{id}: the top edge stays");
+            println!("{id}: the view grew to {}x{}; the window followed", want.width, want.height);
+        });
+        ed.close();
+        drop(p);
+        settle();
+        assert_eq!(windows(mtm).1, 0);
     }
 
     /// A view held alive (as a plugin's own timer may hold it) 10 s after its plugin went: the unit
@@ -170,6 +201,22 @@ mod macos {
             assert!(ed.idle().is_empty());
             ed.set_param("0", 0.5);
             assert_eq!(windows(mtm).1, 0, "{id}: nothing on screen");
+
+            // Dropped on another thread while open (the audio thread drops retired instances):
+            // the editor is closed on the main thread, then the unit goes once the view has.
+            let mut p = soundcraft_au_host::instantiate_plugin(id).expect("instantiate");
+            let ed = p.editor().expect("an editor");
+            p.open_editor_hidden().expect("open");
+            spin(0.02);
+            assert_eq!(windows(mtm), (base + 1, 0));
+            std::thread::spawn(move || drop(p)).join().expect("dropped on another thread");
+            assert_eq!(units_awaiting_disposal(), 1, "{id}: waits for the main thread");
+            let waited = settle();
+            assert!(!ed.is_open(), "{id}: closed with its plugin");
+            assert_eq!(windows(mtm), (base, 0), "{id}: the window went on the main thread");
+            println!("{id}: dropped on another thread while open; disposed after {waited:.2} s");
+
+            view_resizes(mtm, id);
             checked += 1;
         }
         assert!(checked > 0, "no Audio Unit to test");
