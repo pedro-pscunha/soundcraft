@@ -3818,6 +3818,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "serde",
+ "serde_json",
  "soundcraft-dsp",
  "soundcraft-macos",
  "soundcraft-vst3-host",

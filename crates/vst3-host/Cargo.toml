@@ -14,6 +14,8 @@ testing = []
 [dependencies]
 soundcraft-dsp.workspace = true
 serde.workspace = true
+# The scan helper's answer (one line of JSON on standard output).
+serde_json.workspace = true
 thiserror.workspace = true
 log.workspace = true
 
@@ -62,6 +64,10 @@ harness = false
 
 [[test]]
 name = "module_exit_shutdown"
+harness = false
+
+[[test]]
+name = "scan_helper"
 harness = false
 
 # An isolated unsafe helper crate (craftrules never-crash), like soundcraft-clap-host: this crate

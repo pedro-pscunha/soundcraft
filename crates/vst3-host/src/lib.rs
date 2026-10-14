@@ -13,6 +13,18 @@
 //! safe, returns `Result`/`Option` and never panics. Limits of in-process hosting: a plugin that
 //! itself crashes (segfault) takes the process down with it; we cannot sandbox native code.
 //!
+//! Scanning can run out of process ([`set_scan_helper`]), as the SoundCraft apps do: each bundle is
+//! loaded in a helper process (the app's own executable, run as
+//! `<exe> --soundcraft-scan-vst3 <bundle>` and answering through [`run_scan_helper`]), at most
+//! [`HELPER_PARALLEL`] at a time, which prints the bundle's plugins as one line of JSON. A helper
+//! that takes longer than [`HELPER_TIMEOUT`] is killed; a bundle whose helper times out, crashes
+//! or fails is logged once with the reason and skipped, and remembered ([`skipped`]) so later scans
+//! do not try it again until [`rescan`]. A plugin that hangs in its module entry (a PACE/iLok-
+//! protected one without its licence service) or crashes while being scanned therefore no longer
+//! hangs or kills SoundCraft, and SoundCraft's own process loads only the bundles of the plugins it
+//! creates. The helper's standard error (plugin chatter) goes to the debug log. Without a helper
+//! (library users, tests) scans load every bundle in this process, as before.
+//!
 //! `PluginInfo` must be `&'static`: the registry leaks exactly one `PluginInfo` (with its param
 //! table) per plugin *type* the first time that type is instantiated, and caches it. The leak is
 //! bounded by the number of distinct installed plugins actually used. Loaded binaries likewise
@@ -63,6 +75,8 @@ pub mod scan;
 #[allow(unsafe_code)]
 mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
+mod helper;
+#[cfg(not(target_arch = "wasm32"))]
 mod plugin;
 #[cfg(not(target_arch = "wasm32"))]
 mod registry;
@@ -74,7 +88,9 @@ pub use plugin::Vst3Plugin;
 pub use ffi::instances_awaiting_main_thread;
 
 use soundcraft_dsp::{Category, Plugin, PluginInfo};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Prefix of every hosted-VST3 plugin id.
 pub const ID_PREFIX: &str = "vst3:";
@@ -97,7 +113,7 @@ pub fn parse_id(id: &str) -> Option<[u8; 16]> {
 }
 
 /// One plugin found by a scan.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Vst3Descriptor {
     /// SoundCraft id: `vst3:<class_id>`.
     pub id: String,
@@ -131,6 +147,45 @@ pub enum Vst3Error {
     Unsupported,
 }
 
+/// The argument that runs a SoundCraft executable as a scan helper:
+/// `<exe> --soundcraft-scan-vst3 <bundle>` (see [`run_scan_helper`]).
+pub const SCAN_HELPER_FLAG: &str = "--soundcraft-scan-vst3";
+
+/// How long a scan helper may take over one bundle before it is killed and the bundle skipped
+/// (the slowest plugins seen, Omnisphere and Keyscape, take a few seconds).
+pub const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many scan helpers run at once.
+pub const HELPER_PARALLEL: usize = 4;
+
+/// Scanning in helper processes (see [`set_scan_helper`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanHelper {
+    /// The executable to run as `<exe> --soundcraft-scan-vst3 <bundle>`: a SoundCraft app that
+    /// answers through [`run_scan_helper`].
+    pub exe: PathBuf,
+    /// How long one bundle may take ([`HELPER_TIMEOUT`]).
+    pub timeout: Duration,
+    /// How many helpers run at once ([`HELPER_PARALLEL`]).
+    pub parallel: usize,
+}
+
+impl ScanHelper {
+    /// Helpers started from `exe`, with the default time limit and parallelism.
+    pub fn new(exe: PathBuf) -> ScanHelper {
+        ScanHelper { exe, timeout: HELPER_TIMEOUT, parallel: HELPER_PARALLEL }
+    }
+}
+
+/// A bundle a scan helper could not scan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkippedBundle {
+    /// The `.vst3` bundle or file.
+    pub path: PathBuf,
+    /// Why: the helper timed out, crashed, or the bundle failed to load.
+    pub reason: String,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod api {
     use super::*;
@@ -161,6 +216,21 @@ mod api {
     }
     pub fn shutdown() {
         ffi::exit_modules();
+    }
+    pub fn set_scan_helper(helper: Option<ScanHelper>) {
+        registry::set_scan_helper(helper)
+    }
+    pub fn skipped() -> Vec<SkippedBundle> {
+        registry::skipped()
+    }
+    pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+        registry::scan_paths_with(dirs, helper)
+    }
+    pub fn scan_bundle_for_helper(path: &Path) -> (String, bool) {
+        helper::answer(path)
+    }
+    pub fn run_scan_helper(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
+        helper::run(args)
     }
 }
 
@@ -193,16 +263,30 @@ mod api {
         None
     }
     pub fn shutdown() {}
+    pub fn set_scan_helper(_helper: Option<ScanHelper>) {}
+    pub fn skipped() -> Vec<SkippedBundle> {
+        Vec::new()
+    }
+    pub fn scan_paths_with(_dirs: &[PathBuf], _helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+        (Vec::new(), Vec::new())
+    }
+    pub fn scan_bundle_for_helper(_path: &Path) -> (String, bool) {
+        (String::new(), false)
+    }
+    pub fn run_scan_helper(_args: impl IntoIterator<Item = OsString>) -> Option<i32> {
+        None
+    }
 }
 
 /// Every plugin in the standard VST3 folders, `VST3_PATH` and folders added with
 /// [`add_search_dir`]. Scanned on first call (loads each binary and reads its factory, but
-/// creates no plugin instances), then cached in memory.
+/// creates no plugin instances; in helper processes when [`set_scan_helper`] set one), then cached
+/// in memory.
 pub fn scan() -> Vec<Vst3Descriptor> {
     api::scan()
 }
 
-/// Forgets the cached scan (and remembered failures) and scans again.
+/// Forgets the cached scan (and remembered failures and [`skipped`] bundles) and scans again.
 pub fn rescan() -> Vec<Vst3Descriptor> {
     api::rescan()
 }
@@ -266,6 +350,41 @@ pub fn create(id: &str) -> Option<Box<dyn Plugin>> {
 /// to read its parameters; the result is cached (and leaked, see the crate docs).
 pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
     api::plugin_info(id)
+}
+
+/// Scans in helper processes from now on (`Some`), or in this process again (`None`, the
+/// default). With a helper, [`scan()`], [`rescan`], [`add_search_dir`] and [`scan_paths`] never load
+/// a plugin binary here: a bundle that hangs, crashes or fails in its helper is logged and skipped
+/// (see [`skipped`]), and [`instantiate`] loads only the bundle of the plugin it creates.
+pub fn set_scan_helper(helper: Option<ScanHelper>) {
+    api::set_scan_helper(helper)
+}
+
+/// The bundles scan helpers could not scan since the last [`rescan`] (which retries them); later
+/// scans skip them without starting a helper.
+pub fn skipped() -> Vec<SkippedBundle> {
+    api::skipped()
+}
+
+/// Scans `dirs` in helper processes, whatever [`set_scan_helper`] says, without touching the cache
+/// or the remembered [`skipped`] bundles: the plugins found (first id wins, sorted by name) and the
+/// bundles skipped.
+pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+    api::scan_paths_with(dirs, helper)
+}
+
+/// What a scan helper prints for one bundle (loaded in this process): one line, and whether the
+/// bundle loaded. [`run_scan_helper`] prints it.
+pub fn scan_bundle_for_helper(path: &Path) -> (String, bool) {
+    api::scan_bundle_for_helper(path)
+}
+
+/// Answers a scan request when `args` (the process arguments after the executable) are
+/// `--soundcraft-scan-vst3 <bundle>`: prints the bundle's plugins on standard output, shuts plugin
+/// hosting down and returns the exit status for `std::process::exit`. `None` for any other
+/// arguments. Apps call it first thing in `main`, before logging, windows or audio.
+pub fn run_scan_helper(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
+    api::run_scan_helper(args)
 }
 
 #[cfg(test)]

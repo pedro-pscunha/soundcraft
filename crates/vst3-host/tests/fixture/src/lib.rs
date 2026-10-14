@@ -23,6 +23,11 @@
 //! The module checks the host's module lifecycle the way real plugins depend on it (see "module
 //! lifecycle" below) and aborts the process when it is broken.
 //!
+//! Misbehaving on purpose, for the scan tests: a file next to the binary changes its module entry.
+//! `hang-entry` never returns (like a PACE/iLok-protected plugin whose licence service is
+//! missing), `crash-entry` kills the process (SIGKILL, so no crash report is written) and
+//! `fail-entry` returns false.
+//!
 //! Test code: panics are fine here, the host must survive anything anyway.
 
 #![allow(non_snake_case, clippy::missing_safety_doc)]
@@ -833,7 +838,81 @@ fn os_thread() -> usize {
     }
 }
 
+/// The path of this binary (the scan tests switch its module entry with files next to it).
+fn own_path() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        #[repr(C)]
+        struct DlInfo {
+            fname: *const c_char,
+            fbase: *mut c_void,
+            sname: *const c_char,
+            saddr: *mut c_void,
+        }
+        unsafe extern "C" {
+            fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
+        }
+        let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+        if unsafe { dladdr(own_path as *const c_void, &mut info) } == 0 || info.fname.is_null() {
+            return None;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr(info.fname) };
+        Some(std::ffi::OsStr::from_bytes(name.to_bytes()).into())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut *mut c_void) -> c_int;
+            fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, size: u32) -> u32;
+        }
+        // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
+        let mut module = std::ptr::null_mut();
+        if unsafe { GetModuleHandleExW(0x4 | 0x2, own_path as *const u16, &mut module) } == 0 {
+            return None;
+        }
+        let mut buf = [0u16; 4096];
+        let n = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        (n > 0 && n < buf.len()).then(|| std::ffi::OsString::from_wide(&buf[..n]).into())
+    }
+}
+
+/// Misbehaves in the module entry when a scan test asked for it (see the crate docs).
+fn misbehave_on_entry() -> bool {
+    let Some(dir) = own_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return true };
+    if dir.join("hang-entry").exists() {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
+    if dir.join("crash-entry").exists() {
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn kill(pid: c_int, sig: c_int) -> c_int;
+            }
+            unsafe { kill(std::process::id() as c_int, 9) };
+        }
+        #[cfg(windows)]
+        {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetCurrentProcess() -> *mut c_void;
+                fn TerminateProcess(process: *mut c_void, code: u32) -> c_int;
+            }
+            // STATUS_ACCESS_VIOLATION, the exit code of a crash.
+            unsafe { TerminateProcess(GetCurrentProcess(), 0xC000_0005) };
+        }
+    }
+    !dir.join("fail-entry").exists()
+}
+
 fn module_entry() -> bool {
+    if !misbehave_on_entry() {
+        return false;
+    }
     if ENTERED.fetch_add(1, Ordering::SeqCst) == 0 {
         ENTRY_THREAD.store(os_thread(), Ordering::SeqCst);
     }
