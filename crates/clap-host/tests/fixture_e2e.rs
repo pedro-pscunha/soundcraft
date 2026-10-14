@@ -338,10 +338,11 @@ fn the_host_value_is_the_one_the_plugin_was_handed() {
 #[test]
 fn editors_refuse_to_open_off_the_main_thread() {
     fixture_dir();
-    // Test threads are never the process main thread.
+    // Test threads are never the process main thread (on Windows: the thread Rust names "main").
+    // Elsewhere every thread counts as the main thread.
     let mut p = soundcraft_clap_host::create(GAIN).unwrap();
     let mut ed = p.editor().expect("the gain fixture has clap.gui");
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         assert!(ed.open().unwrap_err().contains("main thread"));
         assert!(p.open_editor().is_err());
         assert!(!ed.is_open());
