@@ -88,9 +88,19 @@ impl log::Log for StderrLogger {
 static LOGGER: std::sync::OnceLock<StderrLogger> = std::sync::OnceLock::new();
 
 fn main() -> ExitCode {
+    // Internal, not in the help: this executable started as a plugin scan helper by another
+    // SoundCraft process. Answered before anything else is set up.
+    if let Some(code) = soundcraft_engine::run_plugin_scan_helper(std::env::args_os().skip(1)) {
+        std::process::exit(code);
+    }
     let logger = LOGGER.get_or_init(|| StderrLogger::new(std::env::var("RUST_LOG").ok().as_deref()));
     if log::set_logger(logger).is_ok() {
         log::set_max_level(logger.level);
+    }
+    // A plugin that hangs or crashes while it is scanned is skipped instead of hanging the CLI.
+    match std::env::current_exe() {
+        Ok(exe) => soundcraft_engine::scan_plugins_in_helpers(exe),
+        Err(e) => log::warn!("plugins are scanned in this process: cannot find this executable: {e}"),
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first().cloned() else {

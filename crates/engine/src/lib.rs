@@ -33,6 +33,21 @@ pub fn shutdown_plugin_hosts() {
     soundcraft_vst3_host::shutdown();
 }
 
+/// Answers a plugin scan request when this process was started as a scan helper (by
+/// [`scan_plugins_in_helpers`]): returns the exit status for `std::process::exit`, or `None` for a
+/// normal start. Apps call it first thing in `main`, before logging, windows or audio, with the
+/// arguments after the executable.
+pub fn run_plugin_scan_helper(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<i32> {
+    soundcraft_vst3_host::run_scan_helper(args)
+}
+
+/// Scans VST3 plugins in helper processes started from `exe` (the running app, which answers
+/// through [`run_plugin_scan_helper`]): a plugin that hangs or crashes while it is scanned is
+/// skipped instead of hanging or ending the app. CLAP plugins are still scanned in-process.
+pub fn scan_plugins_in_helpers(exe: std::path::PathBuf) {
+    soundcraft_vst3_host::set_scan_helper(Some(soundcraft_vst3_host::ScanHelper::new(exe)));
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EngineError {
     #[error("unknown command `{0}`")]
