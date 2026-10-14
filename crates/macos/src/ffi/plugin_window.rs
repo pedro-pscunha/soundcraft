@@ -47,7 +47,7 @@ define_class!(
             // ⌘W that the plugin did not take closes this editor (handed on, it would close
             // SoundCraft's window).
             if is_close_window(event) {
-                self.performClose(None);
+                guarded("closing it with ⌘W", || self.performClose(None));
                 return;
             }
             // While SoundCraft has a text field focused, a key handed on would type into it unseen.
@@ -344,9 +344,7 @@ impl PluginWindow {
     /// did not reach the screen, it is hidden and closes as one the user closed.
     pub fn show(&mut self, mtm: MainThreadMarker) {
         let window = self.window(mtm);
-        if let Err(e) = objc2::exception::catch(std::panic::AssertUnwindSafe(|| order_front(window))) {
-            log::error!("plugin window: showing it threw an Objective-C exception: {}", e.map_or_else(|| "nil".to_string(), |e| e.to_string()));
-        }
+        guarded("showing it", || order_front(window));
         self.shown = true;
     }
 
@@ -381,6 +379,15 @@ impl Drop for PluginWindow {
                 w.close();
             }
         });
+    }
+}
+
+/// Runs `f`, which may run a plugin view's own code (AppKit calls into the views as it shows,
+/// closes or refocuses their window), catching an Objective-C exception thrown there (logged):
+/// uncaught, it would unwind into AppKit or abort SoundCraft.
+fn guarded(what: &str, f: impl FnOnce()) {
+    if let Err(e) = objc2::exception::catch(std::panic::AssertUnwindSafe(f)) {
+        log::error!("plugin window: {what} threw an Objective-C exception: {}", e.map_or_else(|| "nil".to_string(), |e| e.to_string()));
     }
 }
 

@@ -17,11 +17,11 @@ fn main() {}
 #[cfg(target_os = "macos")]
 mod macos {
     use objc2::rc::{Retained, autoreleasepool};
-    use objc2::runtime::NSObject;
+    use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
     use objc2_app_kit::{
         NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSResponder, NSView, NSWindow,
-        NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     };
     use objc2_foundation::{NSException, NSPoint, NSRect, NSSize, NSString};
     use soundcraft_macos::plugin_window::{PluginWindow, content_size, testing};
@@ -127,6 +127,27 @@ mod macos {
             #[unsafe(method(keyDown:))]
             fn key_down(&self, _e: &NSEvent) {
                 throws_now();
+            }
+        }
+    );
+
+    define_class!(
+        // SAFETY: an NSObject subclass without Drop that implements `windowShouldClose:` with its
+        // declared signature.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SoundCraftTestThrowingDelegate"]
+        /// A window delegate whose own code throws when the window is about to close (a plugin
+        /// may observe its window).
+        struct ThrowingDelegate;
+
+        unsafe impl NSObjectProtocol for ThrowingDelegate {}
+
+        unsafe impl NSWindowDelegate for ThrowingDelegate {
+            #[unsafe(method(windowShouldClose:))]
+            fn window_should_close(&self, _sender: &NSWindow) -> bool {
+                throws_now();
+                true
             }
         }
     );
@@ -450,8 +471,16 @@ mod macos {
             assert!(win.makeFirstResponder(Some(&taking)));
             type_key(win, NSEventType::KeyDown, W, NSEventModifierFlags::Command);
             assert_eq!(seen(), [("plugin", "down", W)]);
-            // Closed (the window's `close` lets go of the ⌘⌥W still held), not handed on.
+            // Code that runs as the window closes throws: caught, never left to abort the app.
             assert!(win.makeFirstResponder(None));
+            // SAFETY: NSObject's designated initializer on a fresh instance.
+            let delegate: Retained<ThrowingDelegate> = unsafe { msg_send![super(ThrowingDelegate::alloc(mtm).set_ivars(())), init] };
+            win.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            type_key(win, NSEventType::KeyDown, W, NSEventModifierFlags::Command);
+            assert_eq!(seen(), [], "not handed on");
+            win.setDelegate(None);
+
+            // Closed (the window's `close` lets go of the ⌘⌥W still held), not handed on.
             type_key(win, NSEventType::KeyDown, W, NSEventModifierFlags::Command | NSEventModifierFlags::CapsLock);
             assert_eq!(seen(), [("soundcraft", "up", W), ("soundcraft", "flags", 0)], "⌘W closes the window");
         });
