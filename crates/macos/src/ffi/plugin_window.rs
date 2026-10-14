@@ -180,12 +180,13 @@ impl HostWindow {
     /// A ⌘-key on a character key (⌘S, ⌘N, ⌘Q, ⌘-digits, ⌘Space) that no plugin view took and that
     /// is not an Edit key, while a text view (`NSText`: a field editor, a plain Cocoa text field's)
     /// is first responder. Such a view keeps a ⌘-key it has no use for in its `keyDown:` and beeps,
-    /// so the key would never reach SoundCraft: it is handled here as `keyDown:` handles a key no
-    /// view took (⌘W closes this window, the rest is handed on). True when taken. False for other
-    /// keys (⌘ with an arrow, Delete or another function key: text views bind many, ⌘← moving to
-    /// the line's start), while the text view is composing with an input method, for a key aimed
-    /// at another window, with another first responder (a plugin's own view may take ⌘-keys in its
-    /// `keyDown:`), and when nothing is handed on (`hand_on`): the text view gets the key then.
+    /// so the key would never reach SoundCraft: it is handled here as AppKit and `keyDown:` handle
+    /// a key no view took (the menu bar first, see `main_menu_takes`; then ⌘W closes this window,
+    /// the rest is handed on). True when taken. False for other keys (⌘ with an arrow, Delete or
+    /// another function key: text views bind many, ⌘← moving to the line's start), while the text
+    /// view is composing with an input method, for a key aimed at another window, with another
+    /// first responder (a plugin's own view may take ⌘-keys in its `keyDown:`), and when nothing
+    /// is handed on (`hand_on`): the text view gets the key then.
     fn command_key_from_text(&self, event: &NSEvent) -> bool {
         if !is_command_character(event) || edit_action(event).is_some() || event.windowNumber() != self.windowNumber() {
             return false;
@@ -200,11 +201,25 @@ impl HostWindow {
         if in_text != Some(true) {
             return false;
         }
+        if self.main_menu_takes(event) {
+            return true;
+        }
         if is_close_window(event) {
             guarded("closing it with ⌘W", || self.performClose(None));
             return true;
         }
         self.hand_on(event)
+    }
+
+    /// Offers a ⌘-key to SoundCraft's menu bar (`NSApp.mainMenu`), as AppKit does with a key
+    /// equivalent the key window did not take, before it sends it as `keyDown:`. The menu bar has
+    /// few key equivalents (SoundCraft's shortcuts are egui's) but not none: Services shortcuts the
+    /// user assigned, and Emoji & Symbols (⌃⌘Space) that AppKit may add to an Edit menu. True when
+    /// a menu item took the key; false without a main menu.
+    fn main_menu_takes(&self, event: &NSEvent) -> bool {
+        let app = NSApplication::sharedApplication(self.mtm());
+        // A menu item's action runs here (a service, say); if it throws, the key counts as taken.
+        guarded("offering a ⌘-key to the menu bar", || app.mainMenu().is_some_and(|menu| menu.performKeyEquivalent(event))).unwrap_or(true)
     }
 
     /// The view Tab (⇧Tab: `back`) would move the focus to: the focused view's next (previous)
@@ -219,12 +234,12 @@ impl HostWindow {
     }
 
     /// ⌘C, ⌘V, ⌘X, ⌘Z, ⇧⌘Z and ⌘A for the plugin's focused control, as another app's Edit menu
-    /// sends them (SoundCraft's menu bar has no key equivalents): the action goes to the first of
-    /// the focused control and the responders after it, up to this window, that implements it, if
-    /// it is enabled there. True when it was sent. False (the key goes on to `keyDown:`, and so
-    /// to SoundCraft, as before) for a key aimed at another window, with no control focused (the
-    /// window itself first responder), or when no responder implements the action or it is
-    /// disabled (nothing selected to copy, nothing to undo).
+    /// sends them (SoundCraft's menu bar has none of them: its shortcuts are egui's): the action
+    /// goes to the first of the focused control and the responders after it, up to this window,
+    /// that implements it, if it is enabled there. True when it was sent. False (the key goes on
+    /// to `keyDown:`, and so to SoundCraft, as before) for a key aimed at another window, with no
+    /// control focused (the window itself first responder), or when no responder implements the
+    /// action or it is disabled (nothing selected to copy, nothing to undo).
     fn perform_edit(&self, event: &NSEvent) -> bool {
         let Some(action) = edit_action(event) else { return false };
         if event.windowNumber() != self.windowNumber() {

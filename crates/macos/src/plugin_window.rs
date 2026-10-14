@@ -39,10 +39,11 @@
 //!   AppKit's own handling runs (a beep).
 //! - What plugins keep: every key their views handle: text fields, their own shortcuts, a
 //!   computer-keyboard piano. AppKit offers ⌘-keys to the plugin's views first (the window's
-//!   `performKeyEquivalent:` runs NSWindow's own before anything else). SoundCraft's menu bar has
-//!   no key equivalents (its shortcuts are egui's, Quit and Hide included), so every ⌘-key a
-//!   plugin does not take arrives as `keyDown:` and is handed on like any other: ⌘S saves, ⌘Q
-//!   quits.
+//!   `performKeyEquivalent:` runs NSWindow's own before anything else), then to SoundCraft's menu
+//!   bar. The menu bar has few key equivalents (SoundCraft's shortcuts are egui's, Quit and Hide
+//!   included): Services shortcuts the user assigned, and Emoji & Symbols (⌃⌘Space) that AppKit
+//!   may add to an Edit menu. Every other ⌘-key a plugin does not take arrives as `keyDown:` and is
+//!   handed on like any other: ⌘S saves, ⌘Q quits.
 //! - The Edit keys: ⌘C, ⌘V, ⌘X, ⌘Z, ⇧⌘Z and ⌘A (by the character typed, no other modifier) that
 //!   no plugin view took go to the plugin's focused control as another app's Edit menu sends them
 //!   (`copy:`, `paste:`, `cut:`, `undo:`, `redo:`, `selectAll:`): to the first of that control and
@@ -57,12 +58,14 @@
 //!   Cocoa text field's) keeps a ⌘-key it has no use for in its `keyDown:` and beeps, so it never
 //!   reaches the window. While one is first responder, a ⌘-key on a character key (⌘S, ⌘N, ⌘Q,
 //!   ⌘-digits, ⌘Space; any other modifier too) that no plugin view took and that is not an Edit
-//!   key is handled in `performKeyEquivalent:` as `keyDown:` handles a key no view took: ⌘W closes
-//!   the editor, the rest is handed on (not while SoundCraft has a text field focused: the text
-//!   view gets the key then). ⌘ with an arrow, Delete, Return or another function key stays with
-//!   the text view, which binds many of them (⌘→ moves to the end of the line), and so does every
-//!   key while it composes text with an input method. Any other first responder (a plugin's own
-//!   view, which may take ⌘-keys in its `keyDown:`) gets the key as before.
+//!   key is handled in `performKeyEquivalent:` as AppKit and `keyDown:` handle a key no view took:
+//!   offered to the menu bar first (a key equivalent there runs its item, as in any window), then
+//!   ⌘W closes the editor and the rest is handed on (not while SoundCraft has a text field
+//!   focused: the text view gets the key then). ⌘ with an arrow, Delete, Return or another
+//!   function key stays with the text view, which binds many of them (⌘→ moves to the end of the
+//!   line), and so does every key while it composes text with an input method. Any other first
+//!   responder (a plugin's own view, which may take ⌘-keys in its `keyDown:`) gets the key as
+//!   before.
 //! - ⌘W (no other modifier) that the plugin does not take closes the editor's own window
 //!   (`performClose:`, as its close button does; the editor is taken down at the next idle).
 //!   Handed on, it would close SoundCraft's window. ⌘W with another modifier is handed on.
@@ -88,9 +91,9 @@
 //!    copy, ⌘Z undoes the paste and ⇧⌘Z redoes it, ⌘X cuts, and the text pasted into another app
 //!    is the one copied. SoundCraft copies, pastes and undoes nothing meanwhile. With the field
 //!    still focused, press ⌘S on a modified session: it saves, without a beep, and the field keeps
-//!    its text; ⌘→ moves to the end of the field; ⌘W closes the editor. Close the editor, open it
-//!    again and, before clicking in it (no field focused), press ⌘Z: SoundCraft undoes its last
-//!    edit.
+//!    its text; ⌘→ moves to the end of the field; if SoundCraft's Edit menu lists Emoji & Symbols,
+//!    ⌃⌘Space opens the Character Viewer; ⌘W closes the editor. Close the editor, open it again
+//!    and, before clicking in it (no field focused), press ⌘Z: SoundCraft undoes its last edit.
 //! 4. With the editor key and no field of the plugin focused, press ⇧Space: playback starts at
 //!    half speed (a shortcut that needs its modifier). Hold ⌥ or ⇧ and click in the Edit window:
 //!    SoundCraft sees the modifier as with its own window key. Hold ⇧ in the editor, ⌘Tab to

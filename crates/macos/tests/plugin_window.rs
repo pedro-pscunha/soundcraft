@@ -20,7 +20,7 @@ mod macos {
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenuItem, NSPasteboard,
+        NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenu, NSMenuItem, NSPasteboard,
         NSPasteboardTypeString, NSResponder, NSText, NSTextView, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     };
     use objc2_foundation::{NSDate, NSException, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSString};
@@ -288,6 +288,23 @@ mod macos {
             #[unsafe(method(copy:))]
             fn copy_action(&self, _sender: Option<&AnyObject>) {
                 throws_now();
+            }
+        }
+    );
+
+    define_class!(
+        // SAFETY: an NSObject subclass without Drop that implements an action method taking its
+        // sender.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SoundCraftTestMenuTarget"]
+        /// The target of a menu item in the menu bar: records that the item ran.
+        struct MenuTarget;
+
+        impl MenuTarget {
+            #[unsafe(method(takeKey:))]
+            fn take_key(&self, _sender: Option<&AnyObject>) {
+                SEEN.with(|s| s.borrow_mut().push(("menu", "item", 0)));
             }
         }
     );
@@ -801,6 +818,46 @@ mod macos {
             press(win, RIGHT, cmd | NSEventModifierFlags::Function);
             assert_eq!(seen(), [], "⌘→ is the text view's");
             assert_eq!(text.selectedRange(), NSRange::new(5, 0), "⌘→ moved to the end");
+
+            // A ⌘-key that is a key equivalent of the menu bar goes to the menu, as AppKit offers
+            // it there before `keyDown:`: it is not handed on. Here ⌃⌘Space, Emoji & Symbols, which
+            // AppKit may add to an Edit menu (a Services shortcut the user assigned is another). A
+            // ⌘-key the menu bar does not have is still handed on. This process has no main menu of
+            // its own: the checks above ran the step without one. It is put back after.
+            let app = NSApplication::sharedApplication(mtm);
+            assert!(app.mainMenu().is_none(), "no main menu yet: the ⌘S checks above ran without one");
+            // SAFETY: NSObject's designated initializer on a fresh instance.
+            let menu_target: Retained<MenuTarget> = unsafe { msg_send![super(MenuTarget::alloc(mtm).set_ivars(())), init] };
+            let edit_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Edit"));
+            // SAFETY: a valid selector of an action method taking its sender, which `MenuTarget`
+            // implements.
+            let emoji = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str("Emoji & Symbols"),
+                    Some(sel!(takeKey:)),
+                    &NSString::from_str(" "),
+                )
+            };
+            emoji.setKeyEquivalentModifierMask(NSEventModifierFlags::Control | cmd);
+            // SAFETY: the item does not retain its target; `menu_target` lives until the menu bar
+            // is put back.
+            unsafe { emoji.setTarget(Some(&menu_target)) };
+            edit_menu.addItem(&emoji);
+            let bar = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::new());
+            let edit_item = NSMenuItem::new(mtm);
+            edit_item.setSubmenu(Some(&edit_menu));
+            bar.addItem(&edit_item);
+            app.setMainMenu(Some(&bar));
+            press(win, SPACE, NSEventModifierFlags::Control | cmd);
+            let to_menu = seen();
+            press(win, S, cmd);
+            let not_in_menu = seen();
+            app.setMainMenu(None);
+            assert!(app.mainMenu().is_none(), "the main menu is put back (none)");
+            assert_eq!(to_menu, [("menu", "item", 0)], "⌃⌘Space ran the menu bar's item, not handed on");
+            assert_eq!(not_in_menu, downs(&[S]), "⌘S, which the menu bar does not have, is handed on");
+            assert_eq!(text.string().to_string(), "hello", "the text is untouched");
             text.removeFromSuperview();
 
             // A control whose own `copy:` throws: caught, and the key counts as taken (it is not

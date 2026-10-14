@@ -18,7 +18,7 @@ log.workspace = true
 thiserror.workspace = true
 objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry", "NSNotification", "NSOperation", "NSProcessInfo", "NSString", "NSURL", "block2"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSApplicationScripting", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSText", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSApplicationScripting", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSText", "NSView", "NSWindow"] }
 block2 = "0.6"
 
 # The plugin window test runs on the main thread (`harness = false`) with the test seams on.
@@ -26,7 +26,7 @@ block2 = "0.6"
 soundcraft-macos = { path = ".", features = ["testing"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSException", "NSGeometry", "NSObjCRuntime", "NSRange", "NSRunLoop", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenuItem", "NSPasteboard", "NSResponder", "NSText", "NSTextView", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSText", "NSTextView", "NSView", "NSWindow"] }
 
 [[test]]
 name = "plugin_window"
