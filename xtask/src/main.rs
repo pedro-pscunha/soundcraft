@@ -145,11 +145,27 @@ fn wasm() -> Result<(), String> {
     cargo(&args)
 }
 
+/// The workspace tests, kept away from the installed VST3 plugins: the standard plugin folders are
+/// replaced by an empty one (one hung plugin, such as a PACE plugin without its licence service,
+/// would hang every test that scans). `SOUNDCRAFT_VST3_SMOKE` (the installed-plugin smoke test) or
+/// an explicit `SOUNDCRAFT_VST3_DEFAULT_PATHS` keeps the folders the caller chose.
+fn test() -> Result<(), String> {
+    let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    cmd.args(["test", "--workspace"]).current_dir(root());
+    if std::env::var_os("SOUNDCRAFT_VST3_SMOKE").is_none() && std::env::var_os("SOUNDCRAFT_VST3_DEFAULT_PATHS").is_none() {
+        let none = root().join("target/tmp/no-standard-vst3-folders");
+        std::fs::create_dir_all(&none).map_err(|e| e.to_string())?;
+        cmd.env("SOUNDCRAFT_VST3_DEFAULT_PATHS", none);
+    }
+    let st = cmd.status().map_err(|e| e.to_string())?;
+    if st.success() { Ok(()) } else { Err("cargo test --workspace failed".into()) }
+}
+
 fn ci() -> Result<(), String> {
     let steps: Vec<(&str, Box<dyn Fn() -> Result<(), String>>)> = vec![
         ("fmt", Box::new(|| cargo(&["fmt", "--all", "--", "--check"]))),
         ("clippy", Box::new(|| cargo(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
-        ("test", Box::new(|| cargo(&["test", "--workspace"]))),
+        ("test", Box::new(test)),
         ("assets", Box::new(assets)),
         ("layers", Box::new(layers)),
         ("wasm", Box::new(wasm)),

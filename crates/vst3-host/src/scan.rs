@@ -34,17 +34,22 @@ impl Os {
 }
 
 /// The standard VST3 search locations for this OS (existing or not), followed by every entry of
-/// the `VST3_PATH` environment variable.
+/// the `VST3_PATH` environment variable. A nonempty `SOUNDCRAFT_VST3_DEFAULT_PATHS` (a path list,
+/// like `PATH`) replaces the standard locations: tests set it to keep the installed plugins out.
 pub fn default_search_paths() -> Vec<PathBuf> {
-    let mut v = os_search_paths(
-        Os::current(),
-        std::env::var_os("HOME").map(PathBuf::from),
-        std::env::var_os("COMMONPROGRAMFILES").map(PathBuf::from),
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-    );
-    if let Some(cp) = std::env::var_os("VST3_PATH") {
-        v.extend(std::env::split_paths(&cp).filter(|p| !p.as_os_str().is_empty()));
-    }
+    search_paths_with(Os::current(), |name| std::env::var_os(name))
+}
+
+/// [`default_search_paths`] for a given OS and environment (testable everywhere).
+fn search_paths_with(os: Os, env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let list = |v: std::ffi::OsString| std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()).collect::<Vec<_>>();
+    let mut v = match env("SOUNDCRAFT_VST3_DEFAULT_PATHS").filter(|v| !v.is_empty()) {
+        Some(paths) => list(paths),
+        None => {
+            os_search_paths(os, env("HOME").map(PathBuf::from), env("COMMONPROGRAMFILES").map(PathBuf::from), env("LOCALAPPDATA").map(PathBuf::from))
+        }
+    };
+    v.extend(env("VST3_PATH").map(list).unwrap_or_default());
     v
 }
 
@@ -301,6 +306,18 @@ mod tests {
         let unix = os_search_paths(Os::Unix, Some("/home/u".into()), None, None);
         assert_eq!(unix, vec![PathBuf::from("/home/u/.vst3"), PathBuf::from("/usr/lib/vst3"), PathBuf::from("/usr/local/lib/vst3")]);
         assert!(!default_search_paths().is_empty());
+    }
+
+    #[test]
+    fn the_default_paths_override_replaces_the_standard_locations_only() {
+        let env = |vars: Vec<(&'static str, String)>| move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.into());
+        let home = || ("HOME", "/Users/u".to_string());
+        let standard = vec![PathBuf::from("/Users/u/Library/Audio/Plug-Ins/VST3"), PathBuf::from("/Library/Audio/Plug-Ins/VST3")];
+        assert_eq!(search_paths_with(Os::MacOs, env(vec![home()])), standard);
+        assert_eq!(search_paths_with(Os::MacOs, env(vec![home(), ("SOUNDCRAFT_VST3_DEFAULT_PATHS", String::new())])), standard, "empty: ignored");
+        let both = std::env::join_paths(["/t/a", "/t/b"]).unwrap().into_string().unwrap();
+        let vars = vec![home(), ("SOUNDCRAFT_VST3_DEFAULT_PATHS", both), ("VST3_PATH", "/extra".to_string())];
+        assert_eq!(search_paths_with(Os::MacOs, env(vars)), vec![PathBuf::from("/t/a"), PathBuf::from("/t/b"), PathBuf::from("/extra")]);
     }
 
     #[test]

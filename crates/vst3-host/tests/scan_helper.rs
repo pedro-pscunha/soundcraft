@@ -5,8 +5,10 @@
 //! fails. Each must be skipped with its reason while the good bundle's plugins still come back,
 //! and the skipped ones are not tried again until `rescan`. A helper stuck in a plugin ends when
 //! its host is gone (Unix). With a scan cache, a later scan (as in another run) starts helpers only
-//! for new or changed bundles; each helper start is counted in `<bundle>.launches` (bundles under
-//! this test's temp folder only).
+//! for new or changed bundles; each helper start is logged, with its process id, in
+//! `<bundle>.launches` (bundles under this test's temp folder only). The tests run in a child of
+//! this binary with `SOUNDCRAFT_VST3_DEFAULT_PATHS` set to an empty folder, so no installed plugin
+//! is ever scanned.
 
 mod common;
 
@@ -14,7 +16,6 @@ use soundcraft_vst3_host::{SCAN_HELPER_FLAG, ScanHelper, SkippedBundle};
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -28,18 +29,37 @@ fn main() {
         && Path::new(bundle).starts_with(env!("CARGO_TARGET_TMPDIR"))
     {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(Path::new(bundle).with_extension("launches"));
-        let _ = log.and_then(|mut f| writeln!(f, "launched"));
+        let _ = log.and_then(|mut f| writeln!(f, "{}", std::process::id()));
     }
-    if let Some(code) = soundcraft_vst3_host::run_scan_helper(args) {
+    if let Some(code) = soundcraft_vst3_host::run_scan_helper(args.clone()) {
         std::process::exit(code);
     }
     // The short-lived host of `a_helper_ends_when_its_host_is_gone`: starts scanning a folder
-    // whose bundle hangs, and exits in the middle of it.
-    if let Some(dir) = std::env::args_os().nth(2).filter(|_| std::env::args().nth(1).as_deref() == Some("--scan-and-exit")) {
-        let slow = ScanHelper { timeout: Duration::from_secs(60), ..helper() };
-        std::thread::spawn(move || soundcraft_vst3_host::scan_paths_with(&[PathBuf::from(dir)], &slow));
-        std::thread::sleep(Duration::from_secs(1));
-        std::process::exit(0);
+    // whose one bundle hangs, and exits as soon as its helper has started.
+    if let [mode, bundle] = args.as_slice()
+        && mode == "--scan-and-exit"
+    {
+        let (bundle, slow) = (PathBuf::from(bundle), ScanHelper { timeout: Duration::from_secs(60), ..helper() });
+        let dir = bundle.parent().unwrap().to_path_buf();
+        std::thread::spawn(move || soundcraft_vst3_host::scan_paths_with(&[dir], &slow));
+        let started = Instant::now();
+        while launches(&bundle) == 0 && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::process::exit(if launches(&bundle) == 0 { 1 } else { 0 });
+    }
+    // Hermetic: run the tests again in a child that sees no standard plugin folder.
+    if std::env::var_os("SOUNDCRAFT_VST3_DEFAULT_PATHS").is_none() {
+        let none = Path::new(env!("CARGO_TARGET_TMPDIR")).join("vst3-no-default-plugins");
+        let _ = std::fs::remove_dir_all(&none);
+        std::fs::create_dir_all(&none).unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(&args)
+            .env("SOUNDCRAFT_VST3_DEFAULT_PATHS", &none)
+            .env_remove("VST3_PATH")
+            .status()
+            .unwrap();
+        std::process::exit(status.code().unwrap_or(1));
     }
     // A scan that hangs fails the test instead of hanging it.
     std::thread::spawn(|| {
@@ -212,14 +232,15 @@ fn skipped_bundles_are_remembered_until_rescan(dir: &Path, cache: &Path) {
     assert_eq!((launches(&good), launches(&slow)), (1, 1));
     assert!(cached_outcome(cache, &slow)["skipped"].as_str().is_some_and(|r| r.starts_with("timed out")), "the skip is in the cache");
     // `rescan` tries every bundle again, the cache notwithstanding: the stuck one loads now that it
-    // no longer hangs, and the cache is rewritten. (It scans the standard folders too, through
-    // helpers.)
+    // no longer hangs, and the cache is rewritten.
     std::fs::remove_file(hang_file.unwrap()).unwrap();
     soundcraft_vst3_host::rescan();
     assert!(mine().is_empty(), "retried: {:?}", mine());
     assert_eq!((launches(&good), launches(&slow)), (2, 2), "every bundle retried");
     assert!(cached_outcome(cache, &slow)["plugins"].is_array(), "the cache was rewritten");
     assert!(soundcraft_vst3_host::scan().iter().any(|d| d.path == good));
+    let elsewhere: Vec<_> = soundcraft_vst3_host::scan().into_iter().filter(|d| !d.path.starts_with(env!("CARGO_TARGET_TMPDIR"))).collect();
+    assert!(elsewhere.is_empty(), "the rescan scanned installed plugins: {elsewhere:?}");
     soundcraft_vst3_host::set_scan_helper(None);
 }
 
@@ -227,19 +248,18 @@ fn skipped_bundles_are_remembered_until_rescan(dir: &Path, cache: &Path) {
 #[cfg(unix)]
 fn a_helper_ends_when_its_host_is_gone(dir: &Path) {
     let (stuck, _) = install(dir, "Stuck", Some("hang-entry"));
-    let helpers = || {
-        let out = Command::new("pgrep").arg("-f").arg(stuck.as_os_str()).output().unwrap();
-        String::from_utf8_lossy(&out.stdout).split_whitespace().map(str::to_string).collect::<Vec<_>>()
-    };
-    let host = Command::new(std::env::current_exe().unwrap()).arg("--scan-and-exit").arg(dir).output().unwrap();
-    assert!(host.status.success(), "{host:?}");
+    let host = Command::new(std::env::current_exe().unwrap()).arg("--scan-and-exit").arg(&stuck).output().unwrap();
+    assert!(host.status.success(), "the helper never started: {host:?}");
+    // The host waited for its helper to start, so this is a live helper, not one that never ran.
+    let pid = std::fs::read_to_string(stuck.with_extension("launches")).unwrap().trim().to_string();
+    let alive = || Command::new("kill").args(["-0", &pid]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
     let started = Instant::now();
-    while !helpers().is_empty() && started.elapsed() < Duration::from_secs(10) {
+    while alive() && started.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let left = helpers();
-    for pid in &left {
-        let _ = Command::new("kill").args(["-9", pid]).status();
+    let outlived = alive();
+    if outlived {
+        let _ = Command::new("kill").args(["-9", &pid]).status();
     }
-    assert!(left.is_empty(), "helpers {left:?} outlived their host by {:?}", started.elapsed());
+    assert!(!outlived, "helper {pid} outlived its host by {:?}", started.elapsed());
 }

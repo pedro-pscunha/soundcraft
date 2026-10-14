@@ -20,6 +20,14 @@ fn tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
+/// An empty folder that stands in for the standard plugin folders, so no installed plugin is
+/// scanned.
+fn no_standard_folders(dir: &std::path::Path) -> PathBuf {
+    let none = dir.join("no-standard-plugin-folders");
+    std::fs::create_dir_all(&none).unwrap();
+    none
+}
+
 #[test]
 fn the_helper_answers_one_line_and_nothing_else() {
     let dir = tmpdir("answer");
@@ -49,9 +57,10 @@ fn the_cli_scans_vst3_plugins_in_helpers() {
     let dir = tmpdir("scan");
     let bundle = dir.join("garbage.vst3");
     std::fs::write(&bundle, b"not a plugin").unwrap();
-    // The home folder's plugins are left out; the system-wide folders are still scanned.
+    // No standard plugin folder: only this test's folder is scanned.
     let out = bin()
         .env("HOME", &dir)
+        .env("SOUNDCRAFT_VST3_DEFAULT_PATHS", no_standard_folders(&dir))
         .env("VST3_PATH", &dir)
         .env_remove("RUST_LOG")
         .args(["run", "--cmd", r#"engine.vst3_plugins={"rescan":true}"#])
@@ -59,7 +68,7 @@ fn the_cli_scans_vst3_plugins_in_helpers() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("engine.vst3_plugins: ["));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "engine.vst3_plugins: []", "no installed plugin scanned");
     let skipped = format!("vst3: skipped {}: cannot load VST3 plugin", bundle.display());
     assert!(stderr.contains(&skipped), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -79,6 +88,7 @@ fn the_cli_caches_vst3_scans_in_its_settings_folder() {
     let run = |no_prefs: bool| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_soundcraft-cli"));
         cmd.env("HOME", &dir)
+            .env("SOUNDCRAFT_VST3_DEFAULT_PATHS", no_standard_folders(&dir))
             .env("VST3_PATH", &plugins)
             .env("SOUNDCRAFT_CONFIG_DIR", &config)
             .env("RUST_LOG", "info")
