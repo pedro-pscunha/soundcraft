@@ -33,8 +33,9 @@
 //!   changes go elsewhere then, so the window lets go of them itself, handing on a key-up for each
 //!   key-down it handed on and the modifier state as it is now. SoundCraft never sees a key stuck
 //!   down.
-//! - Not while SoundCraft has a text field focused (the app reports it every frame with
-//!   [`set_app_wants_keyboard`]): a key-down handed on would type into that field out of sight, so
+//! - Not while SoundCraft has a text field focused, in its main window or the separate Mix window
+//!   (the app reports it every frame with [`set_app_wants_keyboard`]; egui keeps focus per window,
+//!   so the app asks both): a key-down handed on would type into that field out of sight, so
 //!   AppKit's own handling runs (a beep).
 //! - What plugins keep: every key their views handle: text fields, their own shortcuts, a
 //!   computer-keyboard piano. AppKit offers ⌘-keys to the plugin's views first (the window's
@@ -84,7 +85,10 @@
 //!    another app and back, let go: Space plays at normal speed (nothing stays held).
 //! 5. Press ⌘W with the editor key: the editor closes, SoundCraft's window stays.
 //! 6. Start renaming a track (its name field focused), click the editor's background and type a
-//!    letter: a beep, and the name does not change.
+//!    letter: a beep, and the name does not change. The same with the Mix window in its own window
+//!    (Window › Mix in Separate Window): focus a field there (a track's comments, the plugin
+//!    search), open an editor from that window's insert, click the editor's background and type a
+//!    letter: a beep, and the field does not change.
 //! 7. In an editor with several text fields, Tab moves to the next and ⇧Tab back. In a VST3 editor
 //!    drawn by VSTGUI or JUCE, click a knob and press Tab: SoundCraft's Tab runs (Tab to
 //!    Transient in the Edit window).

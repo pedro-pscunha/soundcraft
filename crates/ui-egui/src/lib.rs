@@ -299,6 +299,10 @@ pub struct SoundApp {
     pub palette: palette::PaletteState,
     /// Bring the separate Mix window to the front on the next frame.
     pub(crate) focus_mix: bool,
+    /// The separate Mix window had a widget focused (a text field) when its last pass ended: egui
+    /// keeps focus per viewport, so the main window's context does not see it (see
+    /// [`SoundApp::wants_keyboard`]).
+    pub(crate) mix_wants_keyboard: bool,
     /// When the pointer was last pressed, to tell the click that brings SoundCraft forward
     /// (`plugin_window::slot_click`).
     pub(crate) activation: plugin_window::Activation,
@@ -387,6 +391,7 @@ impl SoundApp {
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
             focus_mix: false,
+            mix_wants_keyboard: false,
             activation: plugin_window::Activation::default(),
             synthetic: Vec::new(),
             sample_drop_targets: Vec::new(),
@@ -1256,6 +1261,13 @@ impl SoundApp {
         raw.events.extend(evs);
     }
 
+    /// egui has a widget focused (a text field) in one of SoundCraft's windows: the main one (`ctx`,
+    /// the root viewport) or the separate Mix window, whose focus egui keeps apart (recorded as its
+    /// pass ends). Plugin editors hand no keys on to SoundCraft meanwhile (see the app).
+    pub fn wants_keyboard(&self, ctx: &egui::Context) -> bool {
+        ctx.egui_wants_keyboard_input() || self.mix_wants_keyboard
+    }
+
     /// Lay out the whole window.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -1282,6 +1294,8 @@ impl SoundApp {
         }
         if self.ui.mix_separate {
             mix_window::show_separate(self, &ctx);
+        } else {
+            self.mix_wants_keyboard = false;
         }
         panels::floating(self, &ctx);
         windows::show(self, &ctx);
@@ -1359,6 +1373,39 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 mod tests {
     use super::{Services, SoundApp, automation_step_due};
     use serde_json::json;
+
+    /// A field focused in the separate Mix window counts as SoundCraft typing (plugin editors then
+    /// hand no keys on, which would type into it out of sight), as one in the main window does.
+    /// egui keeps focus per viewport: a pass of the Mix window's own viewport with its field
+    /// focused leaves the main window's context with none.
+    #[test]
+    fn a_field_focused_in_the_separate_mix_window_counts_as_typing() {
+        let ctx = egui::Context::default();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let mut text = String::new();
+        let mut pass = |viewport_id: egui::ViewportId, focus: bool| {
+            let mut focused = false;
+            let viewports = std::iter::once((viewport_id, egui::ViewportInfo::default())).collect();
+            let mut out = ctx.run_ui(egui::RawInput { viewport_id, viewports, ..Default::default() }, |ui| {
+                let field = ui.add(egui::TextEdit::singleline(&mut text));
+                if focus {
+                    field.request_focus();
+                }
+                focused = ui.ctx().egui_wants_keyboard_input();
+            });
+            out.textures_delta.clear();
+            focused
+        };
+        let mix = egui::ViewportId::from_hash_of("soundcraft.mix");
+        app.mix_wants_keyboard = pass(mix, true);
+        assert!(app.mix_wants_keyboard, "the Mix window's field has the keyboard");
+        assert!(!pass(egui::ViewportId::ROOT, false), "egui: the main window has no focus of its own");
+        assert!(app.wants_keyboard(&ctx), "the Mix window's field counts");
+        app.mix_wants_keyboard = false;
+        assert!(!app.wants_keyboard(&ctx), "no field focused anywhere");
+        assert!(pass(egui::ViewportId::ROOT, true));
+        assert!(app.wants_keyboard(&ctx), "the main window's field counts");
+    }
 
     /// `transport.play {from}` starts at `from`, not at the edit insertion (a Locate followed by
     /// Play used to start from the insertion while stopped), and jumps there while playing.

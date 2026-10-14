@@ -32,6 +32,9 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         show(app, ui);
+        // egui keeps focus per viewport: the main window's context does not see a field focused
+        // here (`SoundApp::wants_keyboard`).
+        app.mix_wants_keyboard = ui.ctx().egui_wants_keyboard_input();
         if ui.ctx().input(|i| i.viewport().close_requested()) {
             separate_closed(app);
         }
@@ -42,6 +45,7 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
 pub fn separate_closed(app: &mut SoundApp) {
     app.ui.mix_separate = false;
     app.ui.window = crate::MainWindow::Mix;
+    app.mix_wants_keyboard = false;
 }
 
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
