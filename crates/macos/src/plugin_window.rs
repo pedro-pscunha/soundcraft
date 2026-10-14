@@ -19,9 +19,11 @@
 //!   window is its end).
 //! - To whom: the first responder of SoundCraft's main window (winit's view, so egui sees the key
 //!   as if its window were key). Plugin windows never become main (`canBecomeMainWindow` is NO),
-//!   so SoundCraft's window stays main while a plugin window is key; without a main window, the
-//!   frontmost visible window that is no plugin window and can be key. With neither, AppKit's own
-//!   handling runs (a beep, as before).
+//!   so SoundCraft's window stays main while a plugin window is key; without a main window of
+//!   SoundCraft's, the frontmost of SoundCraft's visible windows that can be key. SoundCraft's
+//!   windows are winit's (class `WinitWindow`): a window a plugin opened itself (a CLAP plugin's
+//!   floating window, a plugin's own panel) never gets the keys, even when it is main or in front.
+//!   With no such window, AppKit's own handling runs (a beep, as before).
 //! - What plugins keep: every key their views handle: text fields, their own shortcuts, a
 //!   computer-keyboard piano. `performKeyEquivalent:` is not overridden, so AppKit still offers
 //!   ⌘-keys to the plugin's views first and then to the menu bar (Quit, Hide); a ⌘-key nobody
@@ -46,5 +48,5 @@ pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, PluginWindow, content_size,
 /// Test seams (the `testing` feature, never on in the app).
 #[cfg(feature = "testing")]
 pub mod testing {
-    pub use crate::ffi::plugin_window::testing::{set_key_target, set_order_front};
+    pub use crate::ffi::plugin_window::testing::{choose_target, set_key_target, set_order_front};
 }

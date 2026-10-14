@@ -110,6 +110,15 @@ mod macos {
     );
 
     define_class!(
+        // SAFETY: an NSWindow subclass without instance variables, Drop or overrides.
+        #[unsafe(super(NSWindow, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WinitWindow"]
+        /// SoundCraft's own window: winit's class (winit is not linked here).
+        struct AppWindow;
+    );
+
+    define_class!(
         // SAFETY: an NSResponder subclass without Drop that overrides responder methods with
         // their declared signatures.
         #[unsafe(super(NSResponder, NSObject))]
@@ -164,6 +173,26 @@ mod macos {
         autoreleasepool(|_| window.sendEvent(&key(window, ty, code, flags)));
     }
 
+    /// A hidden, titled window: SoundCraft's (winit's class) when `app`, else a plain `NSWindow`.
+    fn hidden_window(mtm: MainThreadMarker, app: bool) -> Retained<NSWindow> {
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 100.0));
+        let (style, backing) = (NSWindowStyleMask::Titled, NSBackingStoreType::Buffered);
+        let w = if app {
+            // SAFETY: NSWindow's designated initializer on a fresh instance of the subclass, main
+            // thread, valid arguments.
+            let w: Retained<AppWindow> = unsafe {
+                msg_send![super(AppWindow::alloc(mtm).set_ivars(())), initWithContentRect: rect, styleMask: style, backing: backing, defer: false]
+            };
+            Retained::into_super(w)
+        } else {
+            // SAFETY: as above, on a fresh NSWindow.
+            unsafe { NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), rect, style, backing, false) }
+        };
+        // SAFETY: the caller holds its own retain of the window.
+        unsafe { w.setReleasedWhenClosed(false) };
+        w
+    }
+
     /// The process's windows: (all, visible).
     fn windows(mtm: MainThreadMarker) -> (usize, usize) {
         autoreleasepool(|_| {
@@ -181,18 +210,7 @@ mod macos {
 
         // SoundCraft's window, hidden, with its view as first responder.
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 100.0));
-        // SAFETY: a fresh NSWindow, main thread, valid arguments; closed when the test ends.
-        let app_window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                rect,
-                NSWindowStyleMask::Titled,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        // SAFETY: we hold our own retain of the window.
-        unsafe { app_window.setReleasedWhenClosed(false) };
+        let app_window = hidden_window(mtm, true);
         // SAFETY: NSView's designated initializer on a fresh instance.
         let target: Retained<Target> = unsafe { msg_send![super(Target::alloc(mtm).set_ivars(())), initWithFrame: rect] };
         app_window.setContentView(Some(&target));
@@ -272,6 +290,38 @@ mod macos {
             assert_eq!(seen(), [("unhandled", "down", SPACE)]);
             passing.removeFromSuperview();
             testing::set_key_target(Some(&app_window));
+        });
+
+        // Who gets the keys a plugin window passes on: SoundCraft's main window, else its
+        // frontmost visible window that can be key; never a plugin's window, neither a plugin
+        // window nor one a plugin opened itself (here a plain NSWindow: a CLAP plugin's floating
+        // window), even when that one is main or in front.
+        autoreleasepool(|_| {
+            let other_app_window = hidden_window(mtm, true);
+            let plugins_own = hidden_window(mtm, false);
+            let plugin = w.window(mtm);
+            let all = |_: &NSWindow| true;
+            let pick = |main: Option<&NSWindow>, ordered: &[&NSWindow], visible: &dyn Fn(&NSWindow) -> bool| {
+                testing::choose_target(main, ordered, visible).map(|t| Retained::as_ptr(&t))
+            };
+            let ptr = |w: &NSWindow| Some(std::ptr::from_ref(w));
+            assert_eq!(pick(Some(&app_window), &[plugin, &plugins_own, &other_app_window, &app_window], &all), ptr(&app_window), "the main window");
+            assert_eq!(
+                pick(Some(&plugins_own), &[&plugins_own, plugin, &app_window], &all),
+                ptr(&app_window),
+                "a plugin's own main window is passed over"
+            );
+            assert_eq!(
+                pick(None, &[plugin, &plugins_own, &other_app_window, &app_window], &all),
+                ptr(&other_app_window),
+                "the frontmost of SoundCraft's"
+            );
+            assert_eq!(pick(None, &[plugin, &plugins_own], &all), None, "only plugins' windows: none");
+            let not_other = |w: &NSWindow| !std::ptr::eq(w, &*other_app_window);
+            assert_eq!(pick(None, &[&other_app_window, &app_window], &not_other), ptr(&app_window), "a hidden one is passed over");
+            assert_eq!(pick(None, &[&app_window], &|_: &NSWindow| false), None, "none visible: none");
+            other_app_window.close();
+            plugins_own.close();
         });
 
         // The window follows the view's size, keeping its top-left corner.

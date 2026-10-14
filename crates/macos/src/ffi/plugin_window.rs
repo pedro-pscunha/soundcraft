@@ -3,8 +3,8 @@
 //! [`crate::plugin_window`] for the behaviour.
 
 use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::NSObject;
-use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::runtime::{AnyClass, NSObject};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSEvent, NSFloatingWindowLevel, NSResponder, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
@@ -110,22 +110,36 @@ fn forward(mtm: MainThreadMarker, event: &NSEvent, key: Key) -> bool {
     })
 }
 
-/// SoundCraft's window that gets the keys plugin windows pass on: the main window (plugin windows
-/// never become main), else the frontmost visible window that is no plugin window and can be key.
+/// SoundCraft's window that gets the keys plugin windows pass on (see [`choose_target`]).
 fn target_window(mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
     #[cfg(feature = "testing")]
     if let Some(w) = testing::target() {
         return Some(w);
     }
     let app = NSApplication::sharedApplication(mtm);
-    if let Some(main) = app.mainWindow().filter(|w| !is_plugin_window(w)) {
-        return Some(main);
-    }
-    app.orderedWindows().iter().find(|w| !is_plugin_window(w) && w.isVisible() && w.canBecomeKeyWindow())
+    choose_target(app.mainWindow(), app.orderedWindows(), |w| w.isVisible())
 }
 
-fn is_plugin_window(w: &NSWindow) -> bool {
-    w.isKindOfClass(HostWindow::class())
+/// The window the keys a plugin window passes on go to, given the app's main window and its
+/// windows front to back: the main window when it is SoundCraft's own (plugin windows never become
+/// main), else the frontmost of SoundCraft's own windows that is `visible` and can be key; `None`
+/// without one (AppKit's own handling runs then: a beep). Never a plugin's window: neither a
+/// plugin window nor one a plugin opened itself (a CLAP plugin's floating window, a plugin's own
+/// panel), which may be main or frontmost.
+fn choose_target(
+    main: Option<Retained<NSWindow>>,
+    ordered: impl IntoIterator<Item = Retained<NSWindow>>,
+    visible: impl Fn(&NSWindow) -> bool,
+) -> Option<Retained<NSWindow>> {
+    main.filter(|w| is_app_window(w)).or_else(|| ordered.into_iter().find(|w| is_app_window(w) && visible(w) && w.canBecomeKeyWindow()))
+}
+
+/// The class of winit's windows: SoundCraft's own (every egui viewport is one).
+const APP_WINDOW_CLASS: &std::ffi::CStr = c"WinitWindow";
+
+/// One of SoundCraft's own windows.
+fn is_app_window(w: &NSWindow) -> bool {
+    AnyClass::get(APP_WINDOW_CLASS).is_some_and(|c| w.isKindOfClass(c))
 }
 
 /// The content size a plugin window gives a view of size `s`: rounded, each side at most 16 384
@@ -293,5 +307,12 @@ pub mod testing {
 
     pub(super) fn target() -> Option<Retained<NSWindow>> {
         TARGET.with(|t| t.borrow().as_ref().and_then(Weak::load))
+    }
+
+    /// The window the keys a plugin window passes on would go to, given the main window, the
+    /// windows front to back and which of them count as visible (tests: hidden windows). SoundCraft's
+    /// own windows are winit's (class `WinitWindow`).
+    pub fn choose_target(main: Option<&NSWindow>, ordered: &[&NSWindow], visible: impl Fn(&NSWindow) -> bool) -> Option<Retained<NSWindow>> {
+        super::choose_target(main.map(objc2::Message::retain), ordered.iter().map(|w| objc2::Message::retain(*w)), visible)
     }
 }
