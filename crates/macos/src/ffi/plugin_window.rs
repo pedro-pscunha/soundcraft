@@ -4,7 +4,7 @@
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, NSObject, Sel};
-use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenuItem, NSResponder, NSText, NSView,
     NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
@@ -99,7 +99,7 @@ define_class!(
 
         /// A ⌘-key, before it arrives as `keyDown:`: the plugin's views first (NSWindow's own
         /// handling), then the Edit keys for the plugin's focused control (see `perform_edit`),
-        /// then the other ⌘-keys a focused text view would keep (see `command_key_from_text`).
+        /// then the other ⌘-keys a focused text field would keep (see `command_key_from_text`).
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             let taken = guarded("offering a ⌘-key to the plugin", || {
@@ -178,24 +178,27 @@ impl HostWindow {
     }
 
     /// A ⌘-key on a character key (⌘S, ⌘N, ⌘Q, ⌘-digits, ⌘Space) that no plugin view took and that
-    /// is not an Edit key, while a text view (`NSText`: a field editor, a plain Cocoa text field's)
-    /// is first responder. Such a view keeps a ⌘-key it has no use for in its `keyDown:` and beeps,
-    /// so the key would never reach SoundCraft: it is handled here as AppKit and `keyDown:` handle
-    /// a key no view took (the menu bar first, see `main_menu_takes`; then ⌘W closes this window,
-    /// the rest is handed on). True when taken. False for other keys (⌘ with an arrow, Delete or
-    /// another function key: text views bind many, ⌘← moving to the line's start), while the text
-    /// view is composing with an input method, for a key aimed at another window, with another
-    /// first responder (a plugin's own view may take ⌘-keys in its `keyDown:`), and when nothing
-    /// is handed on (`hand_on`): the text view gets the key then.
+    /// is not an Edit key, while a field editor (an `NSText` whose `isFieldEditor` is true: the
+    /// text view a plain Cocoa text field edits in) is first responder. A field editor keeps a
+    /// ⌘-key it has no use for in its `keyDown:` and beeps, so the key would never reach
+    /// SoundCraft: it is handled here as AppKit and `keyDown:` handle a key no view took (the menu
+    /// bar first, see `main_menu_takes`; then ⌘W closes this window, the rest is handed on). True
+    /// when taken. False for other keys (⌘ with an arrow, Delete or another function key: text
+    /// views bind many, ⌘← moving to the line's start), while the field editor is composing with
+    /// an input method, for a key aimed at another window, with another first responder (a
+    /// plugin's own view, or its own text view that is not a field editor, such as a script or
+    /// preset editor: either may take ⌘-keys in its `keyDown:`), and when nothing is handed on
+    /// (`hand_on`): the first responder gets the key then.
     fn command_key_from_text(&self, event: &NSEvent) -> bool {
         if !is_command_character(event) || edit_action(event).is_some() || event.windowNumber() != self.windowNumber() {
             return false;
         }
-        // The text view's own code may run (`hasMarkedText`); if it throws, the key is left to it.
+        // The text view's own code may run (`isFieldEditor`, `hasMarkedText`); if it throws, the
+        // key is left to it.
         let in_text = guarded("asking the focused text view about a ⌘-key", || {
-            self.firstResponder().is_some_and(|r| {
+            self.firstResponder().and_then(|r| r.downcast::<NSText>().ok()).is_some_and(|t| {
                 // SAFETY: `hasMarkedText` (NSTextInputClient) takes nothing and returns a BOOL.
-                r.isKindOfClass(NSText::class()) && !(r.respondsToSelector(sel!(hasMarkedText)) && unsafe { msg_send![&*r, hasMarkedText] })
+                t.isFieldEditor() && !(t.respondsToSelector(sel!(hasMarkedText)) && unsafe { msg_send![&*t, hasMarkedText] })
             })
         });
         if in_text != Some(true) {

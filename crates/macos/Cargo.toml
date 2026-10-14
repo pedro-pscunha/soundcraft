@@ -26,7 +26,7 @@ block2 = "0.6"
 soundcraft-macos = { path = ".", features = ["testing"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSException", "NSGeometry", "NSObjCRuntime", "NSRange", "NSRunLoop", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSText", "NSTextView", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSControl", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSText", "NSTextField", "NSTextView", "NSView", "NSWindow"] }
 
 [[test]]
 name = "plugin_window"

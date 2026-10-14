@@ -21,7 +21,8 @@ mod macos {
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
         NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenu, NSMenuItem, NSPasteboard,
-        NSPasteboardTypeString, NSResponder, NSText, NSTextView, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+        NSPasteboardTypeString, NSResponder, NSText, NSTextField, NSTextView, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate,
+        NSWindowStyleMask,
     };
     use objc2_foundation::{NSDate, NSException, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSString};
     use soundcraft_macos::plugin_window::{PluginWindow, check_app_windows, content_size, testing};
@@ -272,6 +273,29 @@ mod macos {
     }
 
     define_class!(
+        // SAFETY: an NSTextView subclass without instance variables or Drop that overrides
+        // `keyDown:` with its declared signature.
+        #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SoundCraftTestScriptEditor"]
+        /// A plugin's own text view that is not a field editor (a script or preset editor): it
+        /// takes ⌘-keys in its `keyDown:` (recorded), and leaves the others to NSTextView.
+        struct ScriptEditor;
+
+        impl ScriptEditor {
+            #[unsafe(method(keyDown:))]
+            fn key_down(&self, e: &NSEvent) {
+                if e.modifierFlags().contains(NSEventModifierFlags::Command) {
+                    record("plugin", "down", e);
+                } else {
+                    // SAFETY: NSTextView's own `keyDown:`, with the event AppKit passed in.
+                    let () = unsafe { msg_send![super(self), keyDown: e] };
+                }
+            }
+        }
+    );
+
+    define_class!(
         // SAFETY: an NSView subclass without Drop that overrides `copy:` with its declared
         // signature.
         #[unsafe(super(NSView, NSResponder, NSObject))]
@@ -377,11 +401,13 @@ mod macos {
         });
     }
 
-    /// A text view in `window`'s content view, holding `text`, focused.
+    /// A field editor (what a plain Cocoa text field edits in: a text view whose `isFieldEditor` is
+    /// true) in `window`'s content view, holding `text`, focused.
     fn focused_text(mtm: MainThreadMarker, window: &PluginWindow, text: &str) -> Retained<TextView> {
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 40.0));
         // SAFETY: NSTextView's `initWithFrame:` on a fresh instance of the subclass.
         let view: Retained<TextView> = unsafe { msg_send![super(TextView::alloc(mtm).set_ivars(())), initWithFrame: frame] };
+        view.setFieldEditor(true);
         view.setString(&NSString::from_str(text));
         view.setAllowsUndo(true);
         window.content_view(mtm).expect("a content view").addSubview(&view);
@@ -744,10 +770,10 @@ mod macos {
         assert!(ran.load(std::sync::atomic::Ordering::Relaxed), "later work still runs");
 
         // The Edit keys go to the plugin's focused control as another app's Edit menu sends them
-        // (SoundCraft's menu bar has none): a plain Cocoa text view copies, pastes, cuts, undoes,
-        // redoes and selects all. Its copy and paste use a private pasteboard here. It runs last: a
-        // text view with an insertion point makes AppKit add a hidden window of its own
-        // (TextInputUI's), which the window counts above would see.
+        // (SoundCraft's menu bar has none): a plain Cocoa text field (its field editor) copies,
+        // pastes, cuts, undoes, redoes and selects all. Its copy and paste use a private pasteboard
+        // here. It runs last: a text view with an insertion point makes AppKit add a hidden window
+        // of its own (TextInputUI's), which the window counts above would see.
         let general = NSPasteboard::generalPasteboard().changeCount();
         autoreleasepool(|_| {
             let cmd = NSEventModifierFlags::Command;
@@ -780,6 +806,32 @@ mod macos {
             assert_eq!(seen(), downs(&[S]), "handed on by keyDown:");
             passing.removeFromSuperview();
 
+            // Nor with a plugin's own text view focused that is not a field editor (a script or
+            // preset editor, which may take ⌘-keys in its `keyDown:`): ⌘S reaches it.
+            // SAFETY: NSTextView's `initWithFrame:` on a fresh instance of the subclass.
+            let script: Retained<ScriptEditor> = unsafe { msg_send![super(ScriptEditor::alloc(mtm).set_ivars(())), initWithFrame: rect] };
+            edit.content_view(mtm).expect("a content view").addSubview(&script);
+            assert!(win.makeFirstResponder(Some(&script)));
+            assert!(!script.isFieldEditor());
+            assert!(!autoreleasepool(|_| win.performKeyEquivalent(&key(win, NSEventType::KeyDown, S, cmd))), "not a key equivalent");
+            press(win, S, cmd);
+            assert_eq!(seen(), [("plugin", "down", S)], "the script editor's keyDown: got ⌘S");
+            script.removeFromSuperview();
+
+            // A plain Cocoa text field edits in the window's field editor, which is first responder
+            // then: ⌘S from it is handed on.
+            let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect);
+            edit.content_view(mtm).expect("a content view").addSubview(&field);
+            assert!(win.makeFirstResponder(Some(&field)));
+            assert!(
+                win.firstResponder().and_then(|r| r.downcast::<NSText>().ok()).is_some_and(|t| t.isFieldEditor()),
+                "the text field's field editor is first responder"
+            );
+            press(win, S, cmd);
+            assert_eq!(seen(), downs(&[S]), "⌘S from a text field is handed on");
+            assert!(win.makeFirstResponder(None));
+            field.removeFromSuperview();
+
             let text = focused_text(mtm, &edit, "hello");
             press(win, A, cmd);
             assert_eq!(text.selectedRange(), NSRange::new(0, 5), "⌘A selects all");
@@ -798,8 +850,8 @@ mod macos {
             assert_eq!(clipboard_text().as_deref(), Some("hello"));
             assert_eq!(seen(), [], "none of them reached SoundCraft");
 
-            // Other ⌘-keys on character keys: a text view keeps them and beeps, so they are handed
-            // on before they reach it (⌘S saves), and the text is untouched.
+            // Other ⌘-keys on character keys: a field editor keeps them and beeps, so they are
+            // handed on before they reach it (⌘S saves), and the text is untouched.
             text.setSelectedRange(NSRange::new(0, 5));
             press(win, S, cmd);
             press(win, S, cmd | NSEventModifierFlags::Shift);
@@ -870,8 +922,8 @@ mod macos {
             assert_eq!(seen(), [], "taken");
             thrower.removeFromSuperview();
 
-            // ⌘W from a text view closes the editor, as from anywhere else in it: it is not handed
-            // on, and the window lets go of the keys handed on above as it closes.
+            // ⌘W from a field editor closes the editor, as from anywhere else in it: it is not
+            // handed on, and the window lets go of the keys handed on above as it closes.
             let _bye = focused_text(mtm, &edit, "bye");
             press(win, W, cmd);
             let closing = seen();

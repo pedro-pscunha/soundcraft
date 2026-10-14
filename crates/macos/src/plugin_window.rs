@@ -54,18 +54,19 @@
 //!   undoes that typing. With no control focused (the window itself is first responder), or when
 //!   no responder implements the action or it is disabled (nothing selected to copy, nothing to
 //!   undo), the key goes on to `keyDown:` and is handed on as before: ⌘Z is SoundCraft's undo.
-//! - The other ⌘-keys in a plugin's text field: a text view (`NSText`: a field editor, a plain
-//!   Cocoa text field's) keeps a ⌘-key it has no use for in its `keyDown:` and beeps, so it never
-//!   reaches the window. While one is first responder, a ⌘-key on a character key (⌘S, ⌘N, ⌘Q,
-//!   ⌘-digits, ⌘Space; any other modifier too) that no plugin view took and that is not an Edit
-//!   key is handled in `performKeyEquivalent:` as AppKit and `keyDown:` handle a key no view took:
-//!   offered to the menu bar first (a key equivalent there runs its item, as in any window), then
-//!   ⌘W closes the editor and the rest is handed on (not while SoundCraft has a text field
-//!   focused: the text view gets the key then). ⌘ with an arrow, Delete, Return or another
-//!   function key stays with the text view, which binds many of them (⌘→ moves to the end of the
-//!   line), and so does every key while it composes text with an input method. Any other first
-//!   responder (a plugin's own view, which may take ⌘-keys in its `keyDown:`) gets the key as
-//!   before.
+//! - The other ⌘-keys in a plugin's text field: a plain Cocoa text field edits in a field editor
+//!   (an `NSText` whose `isFieldEditor` is true), which keeps a ⌘-key it has no use for in its
+//!   `keyDown:` and beeps, so the key never reaches the window. While a field editor is first
+//!   responder, a ⌘-key on a character key (⌘S, ⌘N, ⌘Q, ⌘-digits, ⌘Space; any other modifier too)
+//!   that no plugin view took and that is not an Edit key is handled in `performKeyEquivalent:` as
+//!   AppKit and `keyDown:` handle a key no view took: offered to the menu bar first (a key
+//!   equivalent there runs its item, as in any window), then ⌘W closes the editor and the rest is
+//!   handed on (not while SoundCraft has a text field focused: the field editor gets the key
+//!   then). ⌘ with an arrow, Delete, Return or another function key stays with the field editor,
+//!   which binds many of them (⌘→ moves to the end of the line), and so does every key while it
+//!   composes text with an input method. Any other first responder gets the key as before: a
+//!   plugin's own view, or a text view of its own that is not a field editor (a script or preset
+//!   editor); either may take ⌘-keys in its `keyDown:`.
 //! - ⌘W (no other modifier) that the plugin does not take closes the editor's own window
 //!   (`performClose:`, as its close button does; the editor is taken down at the next idle).
 //!   Handed on, it would close SoundCraft's window. ⌘W with another modifier is handed on.
