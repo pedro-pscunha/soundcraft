@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: skipped VST3 plugins are listed and can be rescanned from the app; helper failures on SoundCraft's side load in-process instead; previously minor: the VST3 scan is cached per bundle across runs) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: a helper failing on SoundCraft's side loads in-process only the bundles known to load; previously minor: skipped VST3 plugins are listed and can be rescanned from the app) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -175,8 +175,11 @@ Known risks, unmeasured:
   submenu's "Rescan VST3"). The app's first scan and its rescans still run on the UI thread and
   freeze it meanwhile.
 - When the scan helper fails on SoundCraft's side (cannot start, or is an older or newer
-  SoundCraft), the bundles it had not scanned are loaded in SoundCraft's own process instead: a
-  plugin that hangs there (not in the cache yet) hangs the scan again, as before helpers.
+  SoundCraft), only the bundles the scan cache knows to load (their last outcome, for the same
+  build of the bundle, is a list of plugins) are loaded in SoundCraft's own process instead. The
+  others, and any bundle a stuck helper was running, are listed as not scanned and tried again by
+  the next scan: their plugins are missing until the helper works again (with no cache, all of
+  them), but nothing that may hang is loaded.
 - On Windows plugins share standard output with the helper's answer (on Unix it has a private
   one): more than 8 MiB of plugin output before the answer hides it, and the bundle is skipped.
   Crash signals in Windows helpers get the system's crash handling (on Unix they end the helper
@@ -256,6 +259,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | G-13: when the scan helper fails on SoundCraft's side, only bundles the cache knows to load are loaded in-process; the rest are listed as not scanned (a rescan no longer loads known-hanging plugins in-process) |
 | 2026-10-14 | minor | G-13: skipped VST3 plugins are listed (`engine.vst3_plugins` returns them) and the VST3 submenu rescans; helper failures on SoundCraft's side load in-process instead; Windows helpers end with SoundCraft (job object); residual risks updated |
 | 2026-10-14 | minor | G-13: the VST3 scan is cached per bundle across runs (settings folder, fingerprinted), eight helpers at a time: a plugin that never answers costs 30 s once, not in every run (dev Mac: 30.5 s cold, 0.03 s warm, the sun-v54 bounce 66 s → 6 s) |
 | 2026-10-14 | minor | G-13: VST3 scans run in helper processes: a VST3 that hangs or crashes while scanned (Gullfoss without its iLok service) is skipped instead of hanging the app and every CLI bounce; the cost of plugins that never answer is a risk; CLAP and Audio Unit scans stay in-process |

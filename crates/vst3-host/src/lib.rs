@@ -222,6 +222,9 @@ pub struct SkippedBundle {
     pub reason: String,
     /// Skipped by an earlier scan, kept in the scan cache (not tried again in this one).
     pub from_cache: bool,
+    /// Not scanned at all: the scan helper failed on SoundCraft's side (see the reason). No verdict
+    /// on the bundle: neither cached nor remembered, so the next scan tries it again.
+    pub helper_failed: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

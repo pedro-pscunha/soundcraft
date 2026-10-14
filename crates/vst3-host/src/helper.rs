@@ -80,8 +80,13 @@ pub(crate) enum Skip {
     /// scan cache across runs.
     Bundle(String),
     /// SoundCraft's side: the helper could not be started or read, or is no scan helper of this
-    /// protocol. Not a verdict on the bundle: never remembered or cached.
+    /// protocol, and never ran the bundle's code. Not a verdict on the bundle: never remembered or
+    /// cached.
     Host(String),
+    /// SoundCraft's side too, but the helper may have been running the bundle's code: it was lost
+    /// track of, or ran past its time limit before greeting. The bundle may hang: never loaded in
+    /// this process instead.
+    HostStuck(String),
 }
 
 /// What a helper prints after [`MARKER`].
@@ -194,7 +199,7 @@ pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Resu
             let i = next.fetch_add(1, Ordering::Relaxed);
             let (Some(path), Some(slot)) = (bundles.get(i), slots.get(i)) else { break };
             let r = scan_one(helper, path);
-            if let Err(Skip::Host(why)) = &r {
+            if let Err(Skip::Host(why) | Skip::HostStuck(why)) = &r {
                 broken.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| why.clone());
             }
             *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
@@ -363,6 +368,7 @@ fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limit:
     judge(ended, hello, why, bundle, limit, exe).map_err(|skip| match skip {
         Skip::Bundle(r) => Skip::Bundle(clean_reason(&r)),
         Skip::Host(r) => Skip::Host(clean_reason(&r)),
+        Skip::HostStuck(r) => Skip::HostStuck(clean_reason(&r)),
     })
 }
 
@@ -382,14 +388,16 @@ fn judge(
             Ended::Lost => "stopped".to_string(),
         };
         let greeting = hello.map_or_else(|| "no greeting".to_string(), |v| format!("protocol {v}"));
-        return Err(Skip::Host(why(format!("{} is not a scan helper of protocol {PROTOCOL} ({greeting}; it {how})", exe.display()))));
+        let why = why(format!("{} is not a scan helper of protocol {PROTOCOL} ({greeting}; it {how})", exe.display()));
+        // Still running at its limit, or lost: it may be running the bundle's code.
+        return Err(if matches!(ended, Ended::TimedOut | Ended::Lost) { Skip::HostStuck(why) } else { Skip::Host(why) });
     }
     match ended {
         Ended::Answered(Answer::Ok(ds)) => Ok(well_formed(ds, bundle)),
         Ended::Answered(Answer::Error(e)) => Err(Skip::Bundle(e)),
         Ended::TimedOut => Err(Skip::Bundle(why(format!("timed out after {limit:?}")))),
         Ended::Exited(st) => Err(Skip::Bundle(why(ended_reason(st)))),
-        Ended::Lost => Err(Skip::Host(why("the scan helper stopped without an answer".into()))),
+        Ended::Lost => Err(Skip::HostStuck(why("the scan helper stopped without an answer".into()))),
     }
 }
 

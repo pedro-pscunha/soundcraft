@@ -27,6 +27,9 @@ struct Registry {
     helper: Option<ScanHelper>,
     /// Bundles a helper could not scan, not tried again until `rescan`.
     skipped: Vec<SkippedBundle>,
+    /// Bundles not scanned because the scan helper failed on SoundCraft's side, as the last scans
+    /// left them: listed with `skipped`, but tried again by the next scan.
+    not_scanned: Vec<SkippedBundle>,
     /// Replaces the standard folders (tests: see `set_default_search_paths`).
     default_paths: Option<Vec<PathBuf>>,
     /// Bumped by every rescan: a scan that began before one does not store its result.
@@ -51,17 +54,26 @@ fn scan_done() -> &'static Condvar {
     C.get_or_init(Condvar::new)
 }
 
-/// Adds the bundles skipped by a scan that ran without the lock to the registry's.
+/// Adds `new` to `list`, an entry for the same bundle replacing the older one.
+fn add_skips(list: &mut Vec<SkippedBundle>, new: impl IntoIterator<Item = SkippedBundle>) {
+    for s in new {
+        match list.iter_mut().find(|k| k.path == s.path) {
+            Some(k) => *k = s,
+            None => list.push(s),
+        }
+    }
+}
+
+/// Adds the bundles a scan that ran without the lock skipped, or could not scan, to the
+/// registry's.
 fn remember_skips(new: Vec<SkippedBundle>) {
     if new.is_empty() {
         return;
     }
+    let (not_scanned, skipped): (Vec<_>, Vec<_>) = new.into_iter().partition(|s| s.helper_failed);
     let mut r = lock();
-    for s in new {
-        if !r.skipped.iter().any(|k| k.path == s.path) {
-            r.skipped.push(s);
-        }
-    }
+    add_skips(&mut r.skipped, skipped);
+    add_skips(&mut r.not_scanned, not_scanned);
 }
 
 /// Descriptors of every audio module class in one `.vst3`.
@@ -137,9 +149,13 @@ fn bundle_name(path: &Path) -> String {
 /// Scans the bundles in `dirs` in helpers, sorted by name; bundles in `known` (skipped before) are
 /// left out. Returns the plugins and the bundles skipped now, each logged. With a scan cache,
 /// unchanged bundles come from the cache unless `fresh` (a rescan), and what the helpers find is
-/// written back to it. When the helpers fail on SoundCraft's side (cannot start, no scan helper of
-/// this protocol), the bundles they had not scanned are loaded here instead, as without a helper:
-/// logged once, nothing remembered.
+/// written back to it.
+///
+/// When the helpers fail on SoundCraft's side (cannot start, no scan helper of this protocol), the
+/// bundles they had not scanned are loaded here instead, but only those the scan cache knows to
+/// load (their last outcome, for the same fingerprint, is a list of plugins; looked up on a rescan
+/// too). The others, and any bundle a stuck helper was running, are listed as not scanned
+/// ([`SkippedBundle::helper_failed`]): they may hang, and nothing here can stop that.
 fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
     let mut cache = h.cache.as_deref().map(ScanCache::load);
     let mut pending: Vec<Pending> = paths::find_bundles(dirs)
@@ -169,33 +185,48 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         let outcome = match &answer {
             Ok(ds) => Some(Outcome::Plugins(ds.clone())),
             Err(Skip::Bundle(why)) => Some(Outcome::Skipped(why.clone())),
-            Err(Skip::Host(_)) => None,
+            Err(Skip::Host(_) | Skip::HostStuck(_)) => None,
         };
         if let (Some(c), Some(print), Some(outcome)) = (&mut cache, p.print, outcome) {
             c.record(&p.path, print, outcome);
         }
         p.state = State::Done(answer);
     }
-    let failed: Vec<&str> = pending
-        .iter()
-        .filter_map(|p| match &p.state {
-            State::Done(Err(Skip::Host(why))) => Some(why.as_str()),
-            _ => None,
-        })
-        .collect();
-    if let Some(why) = failed.first() {
-        log::warn!("vst3: the scan helper failed ({why}); scanning {} bundles in this process instead", failed.len());
+    // Known to load: the cache's last outcome for this very build of the bundle is its plugins.
+    let loads = |p: &Pending| match (&cache, p.print) {
+        (Some(c), Some(print)) => matches!(c.lookup(&p.path, print), Some(Outcome::Plugins(_))),
+        _ => false,
+    };
+    let failed = pending.iter().find_map(|p| match &p.state {
+        State::Done(Err(Skip::Host(why) | Skip::HostStuck(why))) => Some(why.clone()),
+        _ => None,
+    });
+    if let Some(why) = &failed {
+        let here = pending.iter().filter(|p| matches!(p.state, State::Done(Err(Skip::Host(_)))) && loads(p)).count();
+        let not = pending.iter().filter(|p| matches!(p.state, State::Done(Err(Skip::Host(_) | Skip::HostStuck(_))))).count() - here;
+        log::warn!("vst3: the scan helper failed ({why}); loading {here} bundles known to load in this process, {not} not scanned");
     }
+    let not_scanned = |path: PathBuf, why: &str| SkippedBundle {
+        path,
+        reason: crate::helper::clean_reason(&format!("not scanned: the scan helper failed: {why}")),
+        from_cache: false,
+        helper_failed: true,
+    };
     let (mut out, mut skipped) = (Vec::new(), Vec::new());
     for p in pending {
+        let known_to_load = loads(&p);
         match p.state {
             State::Cached(Outcome::Plugins(ds)) | State::Done(Ok(ds)) => merge(&mut out, ds),
-            State::Cached(Outcome::Skipped(reason)) => skipped.push(SkippedBundle { path: p.path, reason, from_cache: true }),
-            State::Done(Err(Skip::Bundle(reason))) => skipped.push(SkippedBundle { path: p.path, reason, from_cache: false }),
-            State::Done(Err(Skip::Host(_))) => match load_bundle(&p.path) {
+            State::Cached(Outcome::Skipped(reason)) => skipped.push(SkippedBundle { path: p.path, reason, from_cache: true, helper_failed: false }),
+            State::Done(Err(Skip::Bundle(reason))) => skipped.push(SkippedBundle { path: p.path, reason, from_cache: false, helper_failed: false }),
+            State::Done(Err(Skip::Host(why))) if known_to_load => match load_bundle(&p.path) {
                 Ok(ds) => merge(&mut out, ds),
-                Err(e) => log::warn!("{e}"),
+                Err(e) => {
+                    log::warn!("{e}");
+                    skipped.push(not_scanned(p.path, &why));
+                }
             },
+            State::Done(Err(Skip::Host(why) | Skip::HostStuck(why))) => skipped.push(not_scanned(p.path, &why)),
             State::Todo => {}
         }
     }
@@ -242,6 +273,7 @@ fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
         r.scanned = None;
         r.failed.clear();
         r.skipped.clear();
+        r.not_scanned.clear();
     }
     loop {
         if let Some(list) = &r.scanned {
@@ -273,7 +305,12 @@ fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
     // A rescan that began meanwhile wins: it scans again once this one has ended.
     if r.generation == generation {
         r.scanned = Some(found.clone());
-        r.skipped = known.into_iter().chain(new).collect();
+        let (not_scanned, skipped): (Vec<_>, Vec<_>) = new.into_iter().partition(|s| s.helper_failed);
+        let mut all = known;
+        add_skips(&mut all, skipped);
+        r.skipped = all;
+        // This scan covered every folder: only its own bundles stay not scanned.
+        r.not_scanned = not_scanned;
     }
     found
 }
@@ -320,7 +357,8 @@ pub fn set_scan_helper(helper: Option<ScanHelper>) {
 }
 
 pub fn skipped() -> Vec<SkippedBundle> {
-    lock().skipped.clone()
+    let r = lock();
+    r.skipped.iter().chain(&r.not_scanned).cloned().collect()
 }
 
 fn leak(s: String) -> &'static str {

@@ -32,6 +32,12 @@ fn main() {
         let _ = log.and_then(|mut f| writeln!(f, "{}", std::process::id()));
     }
     // A program that is no scan helper of this protocol, as an older SoundCraft answers.
+    // A program that greets with nothing and never ends, as a helper stuck before it starts.
+    if std::env::current_exe().is_ok_and(|e| e.file_stem().is_some_and(|n| n == "stalling-scan-helper")) {
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    }
     if std::env::current_exe().is_ok_and(|e| e.file_stem().is_some_and(|n| n == "not-a-scan-helper")) {
         eprintln!("soundcraft-cli: unknown subcommand `{}`", SCAN_HELPER_FLAG);
         std::process::exit(1);
@@ -55,6 +61,20 @@ fn main() {
     }
     // A fresh process for `adding_a_folder_first_keeps_the_standard_ones`: its standard folders hold
     // `standard`; `extra` is added before anything has scanned.
+    // A fresh process for `failures_on_soundcrafts_side_load_only_bundles_known_to_load`: rescans
+    // `dir` through `exe` with the scan cache `cache`, and prints what it found as JSON.
+    if let [mode, exe, cache, dir] = args.as_slice()
+        && mode == "--rescan-with"
+    {
+        let failing = ScanHelper { exe: exe.into(), cache: Some(cache.into()), parallel: 1, ..helper() };
+        soundcraft_vst3_host::set_scan_helper(Some(failing));
+        soundcraft_vst3_host::add_search_dir(Path::new(dir));
+        let started = Instant::now();
+        let plugins = soundcraft_vst3_host::rescan();
+        let paths: Vec<&Path> = plugins.iter().map(|d| d.path.as_path()).collect();
+        println!("{}", serde_json::json!({"plugins": paths, "skipped": soundcraft_vst3_host::skipped(), "secs": started.elapsed().as_secs_f64()}));
+        std::process::exit(0);
+    }
     if let [mode, extra, standard] = args.as_slice()
         && mode == "--add-dir-first"
     {
@@ -92,6 +112,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
     hanging_crashing_and_failing_bundles_are_skipped(&root.join("mixed"));
     eight_stuck_helpers_cost_one_time_limit(&root.join("eight"));
+    failures_on_soundcrafts_side_load_only_bundles_known_to_load(&root.join("known"), &root.join("lone"), &root.join("helpers"));
     failures_on_soundcrafts_side_are_no_plugin_skips(&root.join("host-failures"));
     plugin_output_cannot_spoil_or_hide_the_answer(&root.join("noisy"));
     an_answer_counts_when_the_module_exit_hangs(&root.join("hang-exit"));
@@ -244,11 +265,76 @@ fn failures_on_soundcrafts_side_are_no_plugin_skips(dir: &Path) {
     for (exe, launched) in [(impostor, 1), (dir.join("no-such-helper"), 1)] {
         let failing = ScanHelper { exe, parallel: 1, cache: Some(cache.clone()), ..helper() };
         let (found, skipped) = soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &failing);
-        assert_eq!(found.len(), 2, "loaded in this process instead: {found:?}");
-        assert!(skipped.is_empty(), "{skipped:?}");
+        // Nothing is known to load (no cache yet), so nothing is loaded here.
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        assert!(skipped.iter().all(|s| s.helper_failed && s.reason.starts_with("not scanned: the scan helper failed")), "{skipped:?}");
         assert_eq!(goods.iter().map(|g| launches(g)).sum::<usize>(), launched, "no helper after the first failure");
         assert!(!cache.exists(), "nothing cached");
     }
+}
+
+/// Runs a rescan of `dir` through `exe` in a fresh process (see `--rescan-with`): its report, or a
+/// failure when it does not end within 20 s (it hung, likely on a plugin loaded in-process).
+fn rescan_in_child(exe: &Path, cache: &Path, dir: &Path) -> serde_json::Value {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--rescan-with")
+        .arg(exe)
+        .arg(cache)
+        .arg(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            panic!("the rescan through {} hung", exe.display());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = child.wait_with_output().unwrap();
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("no report from the rescan through {} ({:?}): {e}", exe.display(), out.status))
+}
+
+/// On a rescan whose helper fails on SoundCraft's side, only bundles the cache knows to load are
+/// loaded in this process. A bundle cached as hanging or crashing, or one a stuck helper was
+/// running, is listed as not scanned instead, and the rescan ends at once.
+fn failures_on_soundcrafts_side_load_only_bundles_known_to_load(dir: &Path, lone: &Path, helpers: &Path) {
+    let (good, _) = install(dir, "Good", None);
+    let (hang, _) = install(dir, "Hang", Some("hang-entry"));
+    let (crash, _) = install(dir, "Zcrash", Some("crash-entry"));
+    let cache = helpers.join("cache/vst3.json");
+    // Scanned twice with a working helper: Good is known to load, Hang and Zcrash are skipped.
+    let working = ScanHelper { cache: Some(cache.clone()), ..helper() };
+    for _ in 0..2 {
+        soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &working);
+    }
+    let copy = |name: &str| {
+        let exe = helpers.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        exe
+    };
+    for exe in [helpers.join("no-such-helper"), copy("not-a-scan-helper")] {
+        let report = rescan_in_child(&exe, &cache, dir);
+        assert_eq!(report["plugins"], serde_json::json!([good, good]), "Good, loaded here: {report}");
+        let skipped = report["skipped"].as_array().unwrap();
+        for bundle in [&hang, &crash] {
+            let s = skipped.iter().find(|s| s["path"] == bundle.to_str().unwrap()).unwrap_or_else(|| panic!("{report}"));
+            assert_eq!(s["helper_failed"], true, "{report}");
+            assert!(s["reason"].as_str().unwrap().starts_with("not scanned: the scan helper failed"), "{report}");
+        }
+        assert!(report["secs"].as_f64().unwrap() < 2.0, "{report}");
+    }
+    // A helper stuck before it greets may be running the bundle's code: even a bundle known to load
+    // is then not loaded here.
+    let (lone_bundle, _) = install(lone, "Lone", None);
+    soundcraft_vst3_host::scan_paths_with(&[lone.to_path_buf()], &working);
+    let report = rescan_in_child(&copy("stalling-scan-helper"), &cache, lone);
+    assert_eq!(report["plugins"], serde_json::json!([]), "{report}");
+    assert_eq!(report["skipped"][0]["path"], lone_bundle.to_str().unwrap(), "{report}");
+    assert_eq!(report["skipped"][0]["helper_failed"], true, "{report}");
 }
 
 fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cache_dir: &Path) {
