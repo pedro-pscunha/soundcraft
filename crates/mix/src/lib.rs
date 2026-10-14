@@ -2376,6 +2376,14 @@ mod tests {
     use soundcraft_model::{Insert, SourceAudio, SourceId};
     use std::sync::Arc;
 
+    /// For tests that reach a VST3 scan (creating a `vst3:` plugin): the scans see none of the
+    /// installed plugins (the standard folders are replaced by none), so a test never loads one in
+    /// this process, and one that hangs (a PACE plugin without its licence service) cannot hang the
+    /// tests. Under plain `cargo test`, no environment needed.
+    fn no_installed_vst3() {
+        soundcraft_vst3_host::set_default_search_paths(Some(Vec::new()));
+    }
+
     fn synth_session(level_db: f32) -> Session {
         use soundcraft_midi::{Note, Sequence};
         let mut s = Session::default();
@@ -2913,6 +2921,7 @@ mod tests {
 
     #[test]
     fn stored_state_comes_first_then_session_params() {
+        no_installed_vst3();
         let (mut s, t) = session_with_dc(0.5, 48_000);
         let mut ins = Insert::new("vst3:00000000000000000000000000000001");
         ins.params.insert("gain".into(), -6.0);
