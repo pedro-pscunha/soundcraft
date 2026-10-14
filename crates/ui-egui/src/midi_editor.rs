@@ -390,11 +390,13 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         let v = (((vel.max.y - 2.0 - p.y) / (vel.height() - 4.0)) * 127.0).round().clamp(1.0, 127.0) as i64;
         let _ = app.engine.execute_merged("midi.note_edit", &json!({"clip": cid.0, "index": i, "velocity": v}), &format!("vel:{}", cid.0));
     }
-    // Playhead over the notes and the velocity lane, in the Edit window's stroke: the play
-    // position while playing, else where playback starts.
+    // Over the notes and the velocity lane, as in the Edit window: the playhead (1.5, red) at the
+    // play position while playing, else the insertion line (1.0, light) where playback starts —
+    // steady here, the Edit window's blink would keep this panel repainting while idle.
     if let Some(x) = playhead_x(&s.tempo, sr, app.position(), clip.range(), base_tick, roll.x_range(), px_per_tick) {
         let lanes = Rect::from_min_max(roll.min, pos2(roll.max.x, vel.max.y));
-        ui.painter().with_clip_rect(lanes).line_segment([pos2(x, lanes.min.y), pos2(x, lanes.max.y)], Stroke::new(1.5, t.playhead));
+        let stroke = if app.is_playing() { Stroke::new(1.5, t.playhead) } else { Stroke::new(1.0, t.insertion) };
+        ui.painter().with_clip_rect(lanes).line_segment([pos2(x, lanes.min.y), pos2(x, lanes.max.y)], stroke);
         if app.is_playing() {
             // The roll stretches one clip across its width, so the line can move much faster than
             // the Edit window's (repainted at 30 Hz): keep it smooth at 60 Hz while it is shown.
@@ -519,15 +521,23 @@ mod tests {
     }
 
     /// The playhead lines painted inside the MIDI editor's body, and that body.
-    fn editor_playheads(h: &Harness<SoundApp>) -> (Vec<[egui::Pos2; 2]>, Rect) {
+    /// The vertical lines in the editor drawn in `color` (each must have the Edit window's `width`).
+    fn editor_lines(h: &Harness<SoundApp>, color: egui::Color32, width: f32) -> (Vec<[egui::Pos2; 2]>, Rect) {
         let body = h.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new("soundcraft-midi-body"))).unwrap();
         let lines = h
             .output()
             .shapes
             .iter()
             .filter_map(|c| match &c.shape {
-                Shape::LineSegment { points, stroke } if stroke.color == Tokens::current().playhead && points.iter().all(|p| body.contains(*p)) => {
-                    assert_eq!(stroke.width, 1.5, "the Edit window's playhead stroke");
+                // The editor's own lines start at the roll's top (the Edit window's blinking
+                // insertion line can fall inside the body's rect too).
+                Shape::LineSegment { points, stroke }
+                    if stroke.color == color
+                        && points[0].x == points[1].x
+                        && points[0].y == body.min.y + 22.0
+                        && points.iter().all(|p| body.contains(*p)) =>
+                {
+                    assert_eq!(stroke.width, width, "the Edit window's stroke");
                     Some(*points)
                 }
                 _ => None,
@@ -536,15 +546,25 @@ mod tests {
         (lines, body)
     }
 
+    fn editor_playheads(h: &Harness<SoundApp>) -> (Vec<[egui::Pos2; 2]>, Rect) {
+        editor_lines(h, Tokens::current().playhead, 1.5)
+    }
+
+    fn editor_insertions(h: &Harness<SoundApp>) -> (Vec<[egui::Pos2; 2]>, Rect) {
+        editor_lines(h, Tokens::current().insertion, 1.0)
+    }
+
     #[test]
     fn the_editor_draws_the_playhead_over_notes_and_velocities() {
         let (mut h, clip) = lead_in_editor();
         let cid = h.state().engine.session().track_by_name("Lead").and_then(|t| t.clips().first()).map(|c| c.id);
         assert_eq!(target_clip(h.state()), cid, "the editor shows the Lead clip");
-        // Stopped: at the insertion, a quarter of the way across the roll (constant tempo).
-        let (lines, body) = editor_playheads(&h);
+        // Stopped: the insertion line (not the red playhead), a quarter of the way across the
+        // roll (constant tempo).
+        assert_eq!(editor_playheads(&h).0, Vec::<[egui::Pos2; 2]>::new(), "no playhead while stopped");
+        let (lines, body) = editor_insertions(&h);
         let roll = Rangef::new(body.min.x + KEY_W, body.max.x - 4.0);
-        let [[top, bottom]] = lines[..] else { panic!("one playhead line in the editor, got {lines:?}") };
+        let [[top, bottom]] = lines[..] else { panic!("one insertion line in the editor, got {lines:?}") };
         assert!((top.x - (roll.min + roll.span() / 4.0)).abs() < 1.0 && top.x == bottom.x, "{top:?} {bottom:?} on {roll:?}");
         // From the top of the roll down through the velocity lane.
         assert_eq!(top.y, body.min.y + 22.0);
