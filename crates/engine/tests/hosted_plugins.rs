@@ -123,6 +123,33 @@ fn factory_settings_drop_a_hosted_plugins_overrides_and_state() {
     assert_eq!(insert_of(&e, t), before);
 }
 
+/// Before a save the UI stores each live hosted plugin's state with the values of the overrides
+/// the plugin changed by itself (`params`, read from the instance): a preset loaded in its own
+/// editor must not come back half reverted by the old overrides. They replace those overrides
+/// only, clamped into range: none is added (a parameter the session never set stays the plugin's
+/// own, in its state). Like the state, they keep the playing instance and are not undoable or
+/// journaled.
+#[test]
+fn a_live_state_replaces_only_the_overrides_the_insert_has() {
+    install_fixture();
+    let mut e = Engine::default();
+    let t = dc_track(&mut e, 84);
+    e.execute("mix.insert", &json!({"track": t.0, "slot": 0, "plugin": GAIN, "params": {"7": 2.0}})).unwrap();
+    let (history, epoch) = (e.undo_history(), insert_of(&e, t).state_epoch());
+    let state = soundcraft_model::b64::encode(b"a preset loaded in its editor");
+    let live = |params| json!({"track": t.0, "slot": 0, "state": state, "live": true, "params": params});
+    let r = e.execute("mix.insert_state", &live(json!({"7": 0.5, "3": 1.0}))).unwrap();
+    assert_eq!((r["bytes"].as_u64(), r["params"].as_u64()), (Some(29), Some(1)));
+    let ins = insert_of(&e, t);
+    assert_eq!(ins.params.iter().collect::<Vec<_>>(), [(&"7".to_string(), &0.5)], "replaced, and none added");
+    assert_eq!(ins.state_bytes().unwrap(), b"a preset loaded in its editor");
+    assert_eq!(ins.state_epoch(), epoch, "the playing instance stays");
+    assert_eq!(e.undo_history(), history, "not undoable");
+    assert!(e.journal.iter().all(|(id, _)| id != "mix.insert_state"), "not journaled");
+    e.execute("mix.insert_state", &live(json!({"7": 9.0}))).unwrap();
+    assert_eq!(insert_of(&e, t).params.get("7"), Some(&2.0), "clamped into range");
+}
+
 /// Sample players load their samples on threads of their own after their state arrives, so an
 /// offline render that made a hosted instrument, or a hosted plugin from a stored state, waits
 /// before its first block. One without them, or with only a stateless hosted effect (nothing to
