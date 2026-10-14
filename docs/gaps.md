@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (G-13 wording: bundles a failing helper did not scan are tried again by the next rescan or the next start; previously minor: the VST3 scan cache retries a timeout once and starts cold after an update) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: a failing scan helper's bundles known to load are listed from the cache, none loaded in-process; two SoundCraft builds sharing the settings folder scan cold on every switch; previously trivial: bundles a failing helper did not scan are tried again by the next rescan or the next start) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -164,7 +164,7 @@ plugin once it is created, still run in SoundCraft's process. ≈ 30–50 h. AAX
 cannot be hosted (#109): Avid's AAX SDK licence and PACE signing; owner decision, likely never.
 
 Known risks, unmeasured:
-- A VST3 that never answers its scan helper costs the 30 s time limit on the first scan only:
+- A VST3 that never answers its scan helper costs the 30 s time limit on its first two scans only:
   each bundle's plugins, or why it was skipped, are cached in the settings folder
   (`plugin-cache/vst3.v1.json`) under its fingerprint (binary size and modification time, bundle
   modification time), and later runs start helpers only for new or changed bundles. Measured on
@@ -174,12 +174,15 @@ Known risks, unmeasured:
   (so a PACE plugin without its licence service costs its 30 s on two runs). A skipped bundle
   stays skipped until it changes, SoundCraft is updated (the cache names the scanning code), or a
   rescan (`engine.vst3_plugins {"rescan": true}`, which also lists the skipped bundles, or
-  "Rescan VST3" in the VST3 submenu or the plugin search). The app's first scan and its rescans
-  still run on the UI thread and freeze it meanwhile.
+  "Rescan VST3" in the VST3 submenu or the plugin search). Two SoundCraft builds sharing the
+  settings folder (two versions installed side by side) each discard the other's cache, so every
+  switch between them scans cold. The app's first scan and its rescans still run on the UI thread
+  and freeze it meanwhile.
 - When the scan helper fails on SoundCraft's side (cannot start, or is an older or newer
-  SoundCraft), only the bundles the scan cache knows to load (their last outcome, for the same
-  build of the bundle, is a list of plugins) are loaded in SoundCraft's own process instead. The
-  others, and any bundle a stuck helper was running, are listed as not scanned and tried again by
+  SoundCraft), the bundles the scan cache knows to load (their last outcome, for the same build of
+  the bundle, is a list of plugins) are listed from their cached plugins; none is loaded in
+  SoundCraft's own process. The others, and any bundle a stuck helper was running, are listed as
+  not scanned and tried again by
   the next rescan or the next start: their plugins are missing until then (with no cache, all of
   them, even when the failure was brief, such as a spawn refused for want of processes), but
   nothing that may hang is loaded.
@@ -262,6 +265,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | G-13: when the scan helper fails on SoundCraft's side, bundles known to load are listed from their cached plugins and none is loaded in-process; a timeout costs 30 s on two scans; known limit: two SoundCraft builds sharing the settings folder discard each other's scan cache |
 | 2026-10-14 | trivial | G-13 wording: bundles a failing scan helper did not scan are tried again by the next rescan or the next start (that scan's result stands for the run), not by the next scan |
 | 2026-10-14 | minor | G-13: a VST3 timeout is retried once on the next run before it is cached as a skip, and the scan cache starts cold after a SoundCraft update; risks updated |
 | 2026-10-14 | minor | G-13: when the scan helper fails on SoundCraft's side, only bundles the cache knows to load are loaded in-process; the rest are listed as not scanned (a rescan no longer loads known-hanging plugins in-process) |

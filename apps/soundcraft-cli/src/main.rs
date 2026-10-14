@@ -18,7 +18,8 @@
 //! soundcraft-cli plugins                          list built-in plugins
 //! VST3 plugins are scanned once and cached in the settings folder (plugin-cache/vst3.v1.json;
 //! $SOUNDCRAFT_CONFIG_DIR overrides the folder, $SOUNDCRAFT_NO_PREFS turns the cache off). Bundles
-//! that hung, crashed or failed stay skipped until they change; retry them all with
+//! that crashed or failed stay skipped until they change (one that hung, after a second try on the
+//! next run); retry them all with
 //! soundcraft-cli run --cmd 'engine.vst3_plugins={"rescan":true}'
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]

@@ -124,7 +124,7 @@ fn main() {
         }
         std::process::exit(if ok { 0 } else { 1 });
     }
-    // A fresh process for `failures_on_soundcrafts_side_load_only_bundles_known_to_load`: rescans
+    // A fresh process for `failures_on_soundcrafts_side_load_no_bundle_in_process`: rescans
     // `dir` through `exe` with the scan cache `cache`, and prints what it found as JSON.
     if let [mode, exe, cache, dir] = args.as_slice()
         && mode == "--rescan-with"
@@ -181,7 +181,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
     hanging_crashing_and_failing_bundles_are_skipped(&root.join("mixed"));
     eight_stuck_helpers_cost_one_time_limit(&root.join("eight"));
-    failures_on_soundcrafts_side_load_only_bundles_known_to_load(&root.join("known"), &root.join("lone"), &root.join("helpers"));
+    failures_on_soundcrafts_side_load_no_bundle_in_process(&root.join("known"), &root.join("lone"), &root.join("helpers"));
     failures_on_soundcrafts_side_are_no_plugin_skips(&root.join("host-failures"));
     plugin_output_cannot_spoil_or_hide_the_answer(&root.join("noisy"));
     an_answer_counts_when_the_module_exit_hangs(&root.join("hang-exit"));
@@ -443,7 +443,7 @@ fn rescan_in_child(exe: &Path, cache: &Path, dir: &Path) -> serde_json::Value {
 /// On a rescan whose helper fails on SoundCraft's side, the bundles the cache knows to load are
 /// listed from the cache, and no bundle is loaded in this process: not one cached as hanging or
 /// crashing (listed as not scanned, and the rescan ends at once), nor even the one known to load.
-fn failures_on_soundcrafts_side_load_only_bundles_known_to_load(dir: &Path, lone: &Path, helpers: &Path) {
+fn failures_on_soundcrafts_side_load_no_bundle_in_process(dir: &Path, lone: &Path, helpers: &Path) {
     let (good, recorder) = install(dir, "Good", Some("record-loads"));
     let loads = recorder.unwrap().with_file_name("loads");
     let (hang, _) = install(dir, "Hang", Some("hang-entry"));

@@ -19,10 +19,11 @@
 //! [`HELPER_PARALLEL`] at a time, which prints the bundle's plugins as one line of JSON. A helper
 //! that takes longer than [`HELPER_TIMEOUT`] is killed; a bundle whose helper times out, crashes
 //! or fails is logged once with the reason and skipped, and remembered ([`skipped`]) so later scans
-//! do not try it again until [`rescan`]. A plugin that hangs in its module entry (a PACE/iLok-
-//! protected one without its licence service) or crashes while being scanned therefore no longer
-//! hangs or kills SoundCraft, and SoundCraft's own process loads only the bundles of the plugins it
-//! creates. The helper's standard error (plugin chatter) goes to the debug log. A helper that
+//! in this run do not try it again until [`rescan`] (across runs: the scan cache, below). A plugin
+//! that hangs in its module entry (a PACE/iLok-protected one without its licence service) or
+//! crashes while being scanned therefore no longer hangs or kills SoundCraft, and SoundCraft's own
+//! process loads only the bundles of the plugins it creates. The helper's standard error (plugin
+//! chatter) goes to the debug log. A helper that
 //! fails on SoundCraft's side (cannot start, or is no scan helper of this protocol: an older
 //! SoundCraft after an update in place) says nothing about the plugins. No further helper is
 //! started for that scan, nothing is cached, and no bundle is loaded in this process instead. Of
@@ -46,12 +47,13 @@
 //! protocol, the scanner revision): another one starts cold. A later scan, in this run or another,
 //! starts helpers only for new or changed bundles, drops the bundles that are gone and writes back
 //! its own findings over the file as it then is (a temporary file renamed over it). A crash or a
-//! load failure is cached at once; a timeout first only as "timed out once": the next scan tries the
-//! bundle again, and a second timeout in a row is a skip. So a plugin that never answers costs its
-//! time limit twice, then nothing: it stays skipped (logged once per process at info level) until
-//! it changes or [`rescan`] retries every bundle and rewrites the cache. Categories are derived
-//! again from the cached sub-categories on every read. An unreadable or corrupt cache is logged and
-//! scanned over, never an error. Bundles whose path is not UTF-8 (Linux only) are not cached.
+//! load failure is cached at once; a timeout first only as "timed out once": the next run (or a
+//! rescan) tries the bundle again, and a second timeout in a row is a skip. So a plugin that never
+//! answers costs its time limit twice, then nothing: it stays skipped (logged once per process at
+//! info level) until it changes or [`rescan`] retries every bundle and rewrites the cache.
+//! Categories are derived again from the cached sub-categories on every read. An unreadable or
+//! corrupt cache is logged and scanned over, never an error. Bundles whose path is not UTF-8 (Linux
+//! only) are not cached.
 //! In-process scans use no cache: they exist to load each bundle here, and cannot skip one that
 //! hangs anyway.
 //!
@@ -428,8 +430,11 @@ pub fn set_scan_helper(helper: Option<ScanHelper>) {
     api::set_scan_helper(helper)
 }
 
-/// The bundles scan helpers could not scan since the last [`rescan`] (which retries them); later
-/// scans skip them without starting a helper.
+/// The bundles scan helpers skipped since the last [`rescan`] (which retries them): later scans in
+/// this run skip them without starting a helper. Then those not scanned because the helper failed
+/// on SoundCraft's side ([`SkippedBundle::helper_failed`]): not remembered that way, so a later
+/// scan of their folder tries them (the stored scan of the search folders stands until the next
+/// rescan or the next start).
 pub fn skipped() -> Vec<SkippedBundle> {
     api::skipped()
 }
