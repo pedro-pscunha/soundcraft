@@ -50,11 +50,23 @@
 //!
 //! 1. Open a plugin's editor (click its insert): the editor is in front and key. Press Space:
 //!    playback starts and stops. Press ⌘S on a modified session: it saves.
-//! 2. Click a text field in the plugin's editor (a preset name, a value box) and type: the text
-//!    goes to the plugin, and Space types a space instead of starting playback.
-//! 3. Press ⌥ or ⇧ with the editor key, then click in the Edit window: SoundCraft sees the
-//!    modifier state it would see with its own window key.
-//! 4. Switch to another app and back: the editor hides and comes back, still open.
+//! 2. With the editor in front, click its insert again: the editor closes. Click once more: it
+//!    opens.
+//! 3. Click a text field in the plugin's editor (a preset name, a value box) and type: the text
+//!    goes to the plugin, and Space types a space instead of starting playback. Select text in it
+//!    and press ⌘C, ⌘V, ⌘Z: they stay in the field (SoundCraft copies, pastes and undoes
+//!    nothing; a plain Cocoa field such as Apple's generic view's may do nothing at all).
+//! 4. With the editor key and no field of the plugin focused, press ⇧Space: playback starts at
+//!    half speed (a shortcut that needs its modifier). Hold ⌥ or ⇧ and click in the Edit window:
+//!    SoundCraft sees the modifier as with its own window key. Hold ⇧ in the editor, ⌘Tab to
+//!    another app and back, let go: Space plays at normal speed (nothing stays held).
+//! 5. Press ⌘W with the editor key: the editor closes, SoundCraft's window stays.
+//! 6. Start renaming a track (its name field focused), click the editor's background and type a
+//!    letter: a beep, and the name does not change.
+//! 7. In an editor with several text fields, Tab moves to the next and ⇧Tab back.
+//! 8. With a CLAP plugin's own floating window open next to an Audio Unit or VST3 editor, press
+//!    Space with the latter key: playback starts (the key never goes to the CLAP window).
+//! 9. Switch to another app and back: the editor hides and comes back, still open.
 
 pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, MainThreadJob, PluginWindow, content_size, fit_content, on_main_queue, set_app_wants_keyboard};
 
