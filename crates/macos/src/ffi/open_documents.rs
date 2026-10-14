@@ -8,7 +8,7 @@ use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::sel;
-use objc2_app_kit::{NSApplication, NSApplicationWillFinishLaunchingNotification};
+use objc2_app_kit::{NSApplication, NSApplicationWillFinishLaunchingNotification, NSRunningApplication};
 use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSURL};
 use std::ffi::CStr;
 use std::path::PathBuf;
@@ -24,6 +24,13 @@ type OpenUrls = extern "C-unwind" fn(&AnyObject, Sel, Option<&AnyObject>, Option
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+// AppKit's `NSApp`: the shared application once `+[NSApplication sharedApplication]` made it, nil
+// before.
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {
+    static mut NSApp: *mut AnyObject;
+}
+
 /// Why `application:openURLs:` could not be added to a class.
 #[derive(Debug, thiserror::Error)]
 pub enum AddError {
@@ -33,12 +40,19 @@ pub enum AddError {
     Refused(String),
 }
 
-/// Registers the observer that adds the method when the launch begins (see the crate docs).
+/// Adds the method when the launch begins (see `crate::open_documents`), or at once when it
+/// already has.
 pub fn install() {
     if INSTALLED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let block = RcBlock::new(|_: NonNull<NSNotification>| on_will_finish_launching());
+    if MainThreadMarker::new().is_some_and(launch_begun) {
+        // The launch notification has been posted (or is about to be, with the delegate in place
+        // already): waiting for it would wait forever.
+        add_to_delegate("at once: the launch had begun");
+        return;
+    }
+    let block = RcBlock::new(|_: NonNull<NSNotification>| add_to_delegate("at launch"));
     // SAFETY: AppKit's notification-name constant is an immutable NSString that lives for the
     // whole process.
     let name = unsafe { NSApplicationWillFinishLaunchingNotification };
@@ -50,7 +64,19 @@ pub fn install() {
     std::mem::forget(token);
 }
 
-fn on_will_finish_launching() {
+/// The app has finished launching, or its application already has a delegate (winit sets it
+/// before the launch begins). Never creates the application.
+fn launch_begun(mtm: MainThreadMarker) -> bool {
+    if NSRunningApplication::currentApplication().isFinishedLaunching() {
+        return true;
+    }
+    // SAFETY: AppKit's global, read (not referenced) on the main thread, where AppKit writes it.
+    let app = unsafe { (&raw const NSApp).read() };
+    !app.is_null() && NSApplication::sharedApplication(mtm).delegate().is_some()
+}
+
+/// Adds the method to the application delegate's class; `when` says which path ran (logged).
+fn add_to_delegate(when: &str) {
     let Some(mtm) = MainThreadMarker::new() else {
         log::warn!("open-documents: launch notification off the main thread; files opened from Finder will not arrive");
         return;
@@ -61,7 +87,7 @@ fn on_will_finish_launching() {
     };
     let delegate: &AnyObject = delegate.as_ref();
     match add_open_urls(delegate.class()) {
-        Ok(()) => log::info!("open-documents: application:openURLs: added to {}", delegate.class().name().to_string_lossy()),
+        Ok(()) => log::info!("open-documents: application:openURLs: added to {} {when}", delegate.class().name().to_string_lossy()),
         Err(e) => log::warn!("open-documents: {e}; files opened from Finder will not arrive"),
     }
 }

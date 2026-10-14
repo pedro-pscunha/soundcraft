@@ -18,18 +18,22 @@ log.workspace = true
 thiserror.workspace = true
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry", "NSNotification", "NSOperation", "NSString", "NSURL", "block2"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSApplicationScripting", "NSEvent", "NSGraphics", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSApplicationScripting", "NSEvent", "NSGraphics", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
 block2 = "0.6"
 
 # The plugin window test runs on the main thread (`harness = false`) with the test seams on.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 soundcraft-macos = { path = ".", features = ["testing"] }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSResponder", "NSView", "NSWindow"] }
 
 [[test]]
 name = "plugin_window"
+harness = false
+
+[[test]]
+name = "open_documents_late"
 harness = false
 
 # An isolated unsafe helper crate (craftrules never-crash), like soundcraft-au-host: this crate

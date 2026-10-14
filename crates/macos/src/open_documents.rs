@@ -36,7 +36,9 @@
 //! an `NSApplicationWillFinishLaunchingNotification` observer, which fires once the delegate is
 //! set and before the launch document is delivered, and adds the method from there. The launch
 //! document then waits in the queue until the app's first frame. Documents opened while running
-//! arrive between frames on the main thread and call the waker.
+//! arrive between frames on the main thread and call the waker. Called later on the main thread,
+//! once the app has finished launching or its delegate is set, [`install`] adds the method at once
+//! instead (the notification would never come); documents delivered before that are lost.
 //!
 //! # Safety
 //!
@@ -60,8 +62,8 @@
 //!    `open -a SoundCraft take.wav`): the file is imported at the edit selection, as when it is
 //!    dropped on the window.
 //! 4. `~/Library/Application Support/SoundCraft/logs/soundcraft.log` has, once per start,
-//!    "open-documents: application:openURLs: added to WinitApplicationDelegate", and no other
-//!    "open-documents" record.
+//!    "open-documents: application:openURLs: added to WinitApplicationDelegate at launch", and no
+//!    other "open-documents" record.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -72,7 +74,8 @@ pub const MAX_PENDING: usize = 4096;
 /// Makes the files the system opens with SoundCraft reach [`take_paths`].
 ///
 /// Call it before the event loop starts (before `eframe::run_native`), so the document that
-/// launches the app is caught too; see the crate docs. Later calls do nothing.
+/// launches the app is caught too; see the module docs. Called on the main thread after the launch
+/// began, it adds the method at once. Later calls do nothing.
 /// Failures (no application delegate, a delegate that already handles the event) are logged:
 /// the app still runs, without open-documents support. Off macOS it does nothing.
 pub fn install() {
