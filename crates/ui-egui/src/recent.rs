@@ -150,6 +150,31 @@ mod tests {
         assert_eq!(label("solo.scraft"), "solo");
     }
 
+    /// Choosing the open session in Open Recent keeps it as it is: no save question, no reload.
+    #[test]
+    fn open_recent_keeps_the_open_session_as_it_is() {
+        use egui_kittest::kittest::Queryable;
+        let dir = std::env::temp_dir().join(format!("soundcraft-recent-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Song.scraft").to_string_lossy().into_owned();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.run("session.save_as", serde_json::json!({"path": file})).unwrap();
+        app.run("track.new", serde_json::json!({"name": "Unsaved"})).unwrap();
+        app.ui.recent_sessions = vec![file.clone()];
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(600.0, 400.0)).build_ui_state(|ui, app: &mut SoundApp| menu(app, ui), app);
+        h.run();
+        h.get_by_label("Open Recent").click();
+        h.run();
+        h.get_by_label(&label(&file)).click();
+        h.run();
+        let app = h.state();
+        assert!(app.dialogs.open.is_none(), "no save question");
+        assert!(app.engine.session().track_by_name("Unsaved").is_some() && app.engine.is_dirty(), "not reloaded");
+        assert_eq!(app.ui.status, format!("{} is already open.", app.engine.session().name));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn older_ui_json_without_the_list_still_loads() {
         let ui: crate::UiState = serde_json::from_str("{}").unwrap();

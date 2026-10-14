@@ -1076,6 +1076,13 @@ pub fn replaces(e: &Engine, command: &str, file: &Path) -> bool {
     }
 }
 
+/// True when `path` names the open session's file (`Engine::path`, which may name it without its
+/// extension), by whatever path, links included. Opening it again would reload it: its undo
+/// history, and what its plugins hold that was never saved, would be lost.
+pub fn is_open_session(e: &Engine, path: &str) -> bool {
+    e.path.as_deref().is_some_and(|own| same_path(&session_file(own), &session_file(path)))
+}
+
 fn same_path(a: &Path, b: &Path) -> bool {
     let full = |p: &Path| if p.as_os_str().is_empty() { Path::new(".").canonicalize() } else { p.canonicalize() };
     a == b || matches!((full(a), full(b)), (Ok(x), Ok(y)) if x == y)
@@ -1701,6 +1708,26 @@ mod rate_tests {
 #[cfg(test)]
 mod open_tests {
     use super::*;
+
+    #[test]
+    fn the_open_session_is_known_by_its_file_with_or_without_the_extension() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-is-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("Song.scraft");
+        std::fs::write(&file, "{}").unwrap();
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        assert!(!is_open_session(&e, &text(&file)), "no session file yet");
+        e.path = Some(text(&dir.join("Song")));
+        assert!(is_open_session(&e, &text(&file)), "saved as `Song`, written to Song.scraft");
+        assert!(is_open_session(&e, &text(&dir.join("sub").join("..").join("Song.scraft"))), "the same file by another path");
+        e.path = Some(text(&file));
+        assert!(is_open_session(&e, &text(&file)));
+        assert!(!is_open_session(&e, &text(&dir.join("Other.scraft"))));
+        assert!(!is_open_session(&e, &text(&dir.join("Song.scraft.bak"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_file_named_by_many_sources_is_decoded_once() {

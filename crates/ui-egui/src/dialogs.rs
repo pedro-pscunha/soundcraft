@@ -153,10 +153,12 @@ impl Dialogs {
 }
 
 /// When `id` would close a session with unsaved changes, ask first; true when the question is
-/// open instead. A take in progress is stopped first, so it counts as a change.
+/// open instead. A take in progress is stopped first, so it counts as a change. Opening the open
+/// session closes nothing (`SoundApp::run` keeps it as it is).
 pub fn ask_to_save(app: &mut SoundApp, id: &str, params: &Value) -> bool {
     if !matches!(id, "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit")
         || soundcraft_engine::find_command(id).is_some_and(|c| (c.enabled)(&app.engine).is_err())
+        || app.reopens(id, params)
     {
         return false;
     }

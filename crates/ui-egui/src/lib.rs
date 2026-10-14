@@ -417,6 +417,11 @@ impl SoundApp {
 
     /// Run a command; errors go to the status line. Returns the result.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        if self.reopens(id, &params) {
+            let name = self.engine.session().name.clone();
+            self.ui.status = format!("{name} is already open.");
+            return Ok(json!({"name": name, "already_open": true}));
+        }
         if matches!(id, "session.new" | "session.open" | "session.close" | "session.revert") && bounce::refuses_session_switch(self) {
             return Err(self.ui.status.clone());
         }
@@ -451,6 +456,12 @@ impl SoundApp {
                 Err(e.to_string())
             }
         }
+    }
+
+    /// `id` with `params` opens the open session again, which would reload it, losing its undo
+    /// history and what its plugins hold unsaved: [`run`](Self::run) keeps it as it is instead.
+    pub(crate) fn reopens(&self, id: &str, params: &Value) -> bool {
+        id == "session.open" && params.get("path").and_then(Value::as_str).is_some_and(|p| soundcraft_engine::io::is_open_session(&self.engine, p))
     }
 
     pub fn is_playing(&self) -> bool {
@@ -1459,6 +1470,31 @@ mod tests {
             assert!(app.engine.transport.recording, "{request:?}");
             assert_eq!(app.ui.status, "Stop recording first.", "{request:?}");
         }
+    }
+
+    /// Opening the open session again, by any way that runs `session.open` (a command, or the
+    /// dialog layer that Open Recent, the Workspace browser and Finder go through), keeps it as it
+    /// is: no save question, no reload of its undo history or unsaved changes.
+    #[test]
+    fn opening_the_open_session_keeps_it_as_it_is() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-reopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.run("session.save_as", json!({"path": dir.join("Song").to_string_lossy()})).unwrap();
+        app.run("track.new", json!({"name": "Unsaved"})).unwrap();
+        let undo = app.engine.undo_label().map(str::to_string);
+        let file = dir.join("Song.scraft").to_string_lossy().into_owned();
+        let name = app.engine.session().name.clone();
+        let kept = Ok(json!({"name": name, "already_open": true}));
+        assert_eq!(crate::dialogs::run_or_ask(&mut app, "session.open", json!({"path": file})), kept);
+        assert!(app.dialogs.open.is_none(), "no save question");
+        app.ui.status.clear();
+        assert_eq!(app.run("session.open", json!({"path": file})), kept);
+        assert!(app.engine.session().track_by_name("Unsaved").is_some(), "not reloaded");
+        assert_eq!((app.engine.undo_label().map(str::to_string), app.engine.is_dirty()), (undo, true));
+        assert_eq!(app.ui.status, format!("{name} is already open."));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

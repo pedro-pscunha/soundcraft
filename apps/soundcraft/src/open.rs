@@ -3,7 +3,6 @@
 //! and audio files import.
 
 use serde_json::{Value, json};
-use soundcraft_engine::io::session_file;
 use soundcraft_ui_egui::{SoundApp, dialogs};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -49,23 +48,11 @@ fn file_name(p: &str) -> String {
     Path::new(p).file_name().map_or_else(|| p.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
-/// True when `opened` is the session file of the session at `open` (`Engine::path`, which may
-/// name it without its extension), following links.
-fn same_session(open: &str, opened: &str) -> bool {
-    let (a, b) = (session_file(open), session_file(opened));
-    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
-}
-
 fn open_path(app: &mut SoundApp, p: &str) {
     let lower = p.to_ascii_lowercase();
     let at = app.engine.session().edit.selection.start;
     let r = if is_session(p) {
-        if app.engine.path.as_deref().is_some_and(|open| same_session(open, p)) {
-            // Opening it again would reload it: its undo history, and what its plugins hold that
-            // was never saved, would be lost.
-            app.ui.status = format!("{} is already open.", app.engine.session().name);
-            return;
-        }
+        // The open session itself stays as it is (`SoundApp::run`).
         dialogs::run_or_ask(app, "session.open", json!({"path": p})).map(drop)
     } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
         app.run("file.import_midi", json!({"path": p})).map(|v| imported(app, p, &v["tracks"], 0))
@@ -93,7 +80,7 @@ fn imported(app: &mut SoundApp, p: &str, tracks: &Value, at: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Opener, same_session};
+    use super::Opener;
     use serde_json::json;
     use soundcraft_ui_egui::{Services, SoundApp};
     use std::path::PathBuf;
@@ -112,21 +99,6 @@ mod tests {
 
     fn path(p: &std::path::Path) -> String {
         p.to_string_lossy().into_owned()
-    }
-
-    #[test]
-    fn the_open_session_is_known_by_its_file_with_or_without_the_extension() {
-        let d = dir("same");
-        let file = d.join("Song.scraft");
-        std::fs::write(&file, "{}").unwrap();
-        let via = d.join("sub").join("..").join("Song.scraft");
-        std::fs::create_dir_all(d.join("sub")).unwrap();
-        assert!(same_session(&path(&file), &path(&file)));
-        assert!(same_session(&path(&d.join("Song")), &path(&file)), "saved as `Song`, written to Song.scraft");
-        assert!(same_session(&path(&file), &path(&via)), "the same file by another path");
-        assert!(!same_session(&path(&d.join("Other.scraft")), &path(&file)));
-        assert!(!same_session(&path(&d.join("Song")), &path(&d.join("Song.scraft.bak"))));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
