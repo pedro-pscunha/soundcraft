@@ -109,10 +109,10 @@ impl Plugin for AuPlugin {
             self.mode_warned = true;
             log::warn!("{}: renders in its {actual} mode, not {} (it refused the OfflineRender property)", self.info.id, self.mode);
         }
-        // Re-send every value so a re-initialized unit matches the session.
-        for (&id, &v) in self.ids.iter().zip(&self.values) {
-            self.inst.set_param(id, v);
-        }
+        // Nothing is re-sent: a unit keeps its parameters across re-initialization, and `values`
+        // only knows what the host set, so re-sending it would replay stale values over changes
+        // made in the unit's own view or by the unit itself. The session's overrides reach the
+        // instance through `set_param` (the mixer applies them before the first block).
     }
 
     fn reset(&mut self) {
@@ -282,6 +282,28 @@ impl Plugin for AuPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `prepare` re-initializes the unit without re-sending the values the host last set: the
+    /// unit keeps them itself, and a change the host never made (in the unit's own view, here
+    /// through the same `AudioUnitSetParameter` its view's `AUParameterSet` calls) used to be
+    /// overwritten with the host's stale value. AUDelay ships with macOS; skipped where missing.
+    #[test]
+    fn prepare_keeps_the_values_the_unit_has() {
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let (Some(host), Some(view)) = (p.info.params.first(), p.info.params.get(1)) else { panic!("AUDelay has parameters") };
+        let (Some(&host_id), Some(&view_id)) = (p.ids.first(), p.ids.get(1)) else { panic!("ids") };
+        let mid = |q: &soundcraft_dsp::ParamInfo, f: f32| q.min + (q.max - q.min) * f;
+        let (host_value, view_value) = (mid(host, 0.3), mid(view, 0.7));
+        assert!(p.set_param(host.id, host_value));
+        assert_ne!(p.param(view.id), Some(view_value));
+        assert!(p.inst.set_param(view_id, view_value), "an edit in the unit's view");
+        for (sr, block) in [(96_000.0, 256), (44_100.0, 1024)] {
+            p.prepare(sr, block, 2);
+            assert!(p.inst.is_ready());
+            assert_eq!(p.inst.get_param(host_id), Some(host_value), "{sr}: the unit keeps what the host set");
+            assert_eq!(p.inst.get_param(view_id), Some(view_value), "{sr}: and what its view set");
+        }
+    }
 
     /// The mode reaches a unit that has one (AURoundTripAAC reports its `OfflineRender`
     /// property); AUDelay has none, so there is nothing it could refuse (and nothing to log). Both
