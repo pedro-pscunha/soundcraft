@@ -164,10 +164,11 @@ fn read(file: &Path) -> Result<Option<BTreeMap<PathBuf, (Fingerprint, Outcome)>>
             .bundles
             .into_iter()
             .map(|e| {
-                // The plugins belong to the bundle they are filed under, whatever the file says.
+                // The plugins belong to the bundle they are filed under, whatever the file says, and
+                // must be well formed; a reason is cleaned like a helper's.
                 let outcome = match e.outcome {
-                    Outcome::Plugins(ds) => Outcome::Plugins(ds.into_iter().map(|d| Vst3Descriptor { path: e.path.clone(), ..d }).collect()),
-                    skipped => skipped,
+                    Outcome::Plugins(ds) => Outcome::Plugins(crate::helper::well_formed(ds, &e.path)),
+                    Outcome::Skipped(why) => Outcome::Skipped(crate::helper::clean_reason(&why)),
                 };
                 (e.path, (e.fingerprint, outcome))
             })
@@ -231,6 +232,23 @@ mod tests {
         let json = serde_json::json!({"version": VERSION, "bundles": [{"path": a, "fingerprint": PRINT, "outcome": {"plugins": [elsewhere]}}]});
         std::fs::write(&file, json.to_string()).unwrap();
         assert_eq!(ScanCache::load(&file).lookup(&a, PRINT), Some(&Outcome::Plugins(vec![plugin(&a)])));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn malformed_entries_are_cleaned_on_reading() {
+        let d = dir("malformed");
+        let (file, a, b) = (d.join("vst3.json"), d.join("A.vst3"), d.join("B.vst3"));
+        let other_host = Vst3Descriptor { id: "clap:com.x".into(), ..plugin(&a) };
+        let json = serde_json::json!({"version": VERSION, "bundles": [
+            {"path": a, "fingerprint": PRINT, "outcome": {"plugins": [other_host, plugin(&a)]}},
+            {"path": b, "fingerprint": PRINT, "outcome": {"skipped": format!("x\n{}", "y".repeat(5000))}},
+        ]});
+        std::fs::write(&file, json.to_string()).unwrap();
+        let c = ScanCache::load(&file);
+        assert_eq!(c.lookup(&a, PRINT), Some(&Outcome::Plugins(vec![plugin(&a)])));
+        let Some(Outcome::Skipped(why)) = c.lookup(&b, PRINT) else { panic!() };
+        assert!(why.starts_with("x y") && why.chars().count() <= 300, "{why:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

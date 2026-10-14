@@ -13,7 +13,7 @@
 //! hands it its process id in `SOUNDCRAFT_SCAN_HOST_PID`), so a plugin stuck in its module entry
 //! cannot keep it alive forever.
 
-use crate::{SCAN_HELPER_FLAG, ScanHelper, Vst3Descriptor};
+use crate::{ID_PREFIX, SCAN_HELPER_FLAG, ScanHelper, Vst3Descriptor, parse_id};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -35,7 +35,9 @@ const MAX_STDOUT: u64 = 8 << 20;
 /// How much of the end of a helper's standard error is kept.
 const STDERR_TAIL: usize = 8 << 10;
 /// Most characters of the helper's last error line put into a skip reason.
-const MAX_LAST_LINE: usize = 300;
+const MAX_LAST_LINE: usize = 200;
+/// Most characters of a skip reason (a helper's error answer can be anything).
+const MAX_REASON: usize = 300;
 /// How long a helper may take to exit once it has answered.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// How often a running helper is checked.
@@ -316,6 +318,20 @@ fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limit:
         Some(l) => format!("{what}; its last output: {l}"),
         None => what,
     };
+    judge(ended, hello, why, bundle, limit, exe).map_err(|skip| match skip {
+        Skip::Bundle(r) => Skip::Bundle(clean_reason(&r)),
+        Skip::Host(r) => Skip::Host(clean_reason(&r)),
+    })
+}
+
+fn judge(
+    ended: Ended,
+    hello: Option<&str>,
+    why: impl Fn(String) -> String,
+    bundle: &Path,
+    limit: Duration,
+    exe: &Path,
+) -> Result<Vec<Vst3Descriptor>, Skip> {
     if hello != Some(PROTOCOL) {
         let how = match &ended {
             Ended::Answered(_) => "answered".to_string(),
@@ -327,12 +343,30 @@ fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limit:
         return Err(Skip::Host(why(format!("{} is not a scan helper of protocol {PROTOCOL} ({greeting}; it {how})", exe.display()))));
     }
     match ended {
-        Ended::Answered(Answer::Ok(ds)) => Ok(ds.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()),
+        Ended::Answered(Answer::Ok(ds)) => Ok(well_formed(ds, bundle)),
         Ended::Answered(Answer::Error(e)) => Err(Skip::Bundle(e)),
         Ended::TimedOut => Err(Skip::Bundle(why(format!("timed out after {limit:?}")))),
         Ended::Exited(st) => Err(Skip::Bundle(why(ended_reason(st)))),
         Ended::Lost => Err(Skip::Host(why("the scan helper stopped without an answer".into()))),
     }
+}
+
+/// The descriptors whose id is `vst3:` and their class id, as a scan in this process makes them,
+/// with `path` set to `bundle`; others are logged and dropped (they could never be created, or
+/// would claim another host's ids).
+pub(crate) fn well_formed(ds: Vec<Vst3Descriptor>, bundle: &Path) -> Vec<Vst3Descriptor> {
+    let (good, bad): (Vec<_>, Vec<_>) =
+        ds.into_iter().partition(|d| parse_id(&d.id).is_some() && d.id.strip_prefix(ID_PREFIX) == Some(d.class_id.as_str()));
+    if let Some(d) = bad.first() {
+        log::warn!("vst3: ignoring {} malformed plugin entries for {} (such as id {:?})", bad.len(), bundle.display(), clean_reason(&d.id));
+    }
+    good.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()
+}
+
+/// A reason fit for a log line and a list: control characters (line breaks, terminal escapes)
+/// become spaces, and it is cut to [`MAX_REASON`] characters.
+pub(crate) fn clean_reason(reason: &str) -> String {
+    reason.chars().map(|c| if c.is_control() { ' ' } else { c }).take(MAX_REASON).collect()
 }
 
 /// How a helper that never answered ended.
@@ -497,6 +531,34 @@ mod tests {
         let helper = ScanHelper { timeout: Duration::MAX, ..ScanHelper::new(std::env::current_exe().unwrap()) };
         let r = scan_bundles(&helper, &[PathBuf::from("/x.vst3")]);
         assert!(matches!(r.as_slice(), [Err(Skip::Host(e))] if e.contains("no greeting")), "{r:?}");
+    }
+
+    #[test]
+    fn malformed_plugins_and_reasons_are_cleaned() {
+        let bundle = Path::new("/p/A.vst3");
+        let good = descriptor("Good", "/elsewhere");
+        let other_host = Vst3Descriptor { id: "clap:com.x".into(), ..good.clone() };
+        let mismatched = Vst3Descriptor { id: "vst3:00000000000000000000000000000000".into(), ..good.clone() };
+        let not_hex = Vst3Descriptor { id: "vst3:ZZ".into(), class_id: "ZZ".into(), ..good.clone() };
+        let r = classify(
+            Ended::Answered(Answer::Ok(vec![other_host, good.clone(), mismatched, not_hex])),
+            Some(PROTOCOL),
+            "",
+            bundle,
+            Duration::ZERO,
+            bundle,
+        );
+        assert_eq!(r, Ok(vec![Vst3Descriptor { path: bundle.to_path_buf(), ..good }]));
+        let hostile = format!("bad\n\u{1b}[31mred{}", "x".repeat(8 << 20));
+        let Err(Skip::Bundle(why)) = classify(Ended::Answered(Answer::Error(hostile)), Some(PROTOCOL), "", bundle, Duration::ZERO, bundle) else {
+            panic!()
+        };
+        assert!(why.chars().count() <= MAX_REASON && why.starts_with("bad  [31mred"), "{why:?}");
+        let Err(Skip::Bundle(why)) = classify(Ended::TimedOut, Some(PROTOCOL), "line one\nlast \u{7}line", bundle, Duration::from_secs(1), bundle)
+        else {
+            panic!()
+        };
+        assert_eq!(why, "timed out after 1s; its last output: last  line");
     }
 
     #[test]
