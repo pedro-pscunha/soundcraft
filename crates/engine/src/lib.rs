@@ -61,7 +61,8 @@ pub enum TransportRequest {
     Play,
     /// Play from this position (stopped), or jump there (playing): `transport.play {from}`.
     PlayFrom(Samples),
-    /// Play this range and stop at its end (an empty range plays on): `edit.play_timeline`.
+    /// Play this range as Play plays the edit selection (looped with Loop Playback, else stopping at
+    /// its end, with pre- and post-roll; an empty range plays on): `edit.play_timeline`.
     PlayRange(soundcraft_time::Range),
     Stop,
     TogglePlay,

@@ -990,16 +990,22 @@ impl SoundApp {
 
     /// Play from the selection, honouring loop playback and selection end.
     pub fn play_from_selection(&mut self) {
+        let sel = self.engine.session().edit.selection;
+        self.play_range(sel);
+    }
+
+    /// Plays `r` as Play plays the edit selection: looped with Loop Playback, else stopping at its
+    /// end, with pre- and post-roll when they are on; an empty range plays on from its start.
+    fn play_range(&mut self, r: Range) {
         let s = self.engine.session();
-        let sel = s.edit.selection;
-        let preroll = if s.edit.pre_post_roll { s.edit.pre_roll } else { 0 };
-        let postroll = if s.edit.pre_post_roll { s.edit.post_roll } else { 0 };
-        if s.edit.loop_playback && !sel.is_empty() {
-            self.start_play(sel.start, None, Some(sel));
-        } else if !sel.is_empty() {
-            self.start_play((sel.start - preroll).max(0), Some(sel.end + postroll), None);
+        let (preroll, postroll) = if s.edit.pre_post_roll { (s.edit.pre_roll, s.edit.post_roll) } else { (0, 0) };
+        let from = r.start.saturating_sub(preroll).max(0);
+        if s.edit.loop_playback && !r.is_empty() {
+            self.start_play(r.start, None, Some(r));
+        } else if !r.is_empty() {
+            self.start_play(from, Some(r.end.saturating_add(postroll)), None);
         } else {
-            self.start_play((sel.start - preroll).max(0), None, None);
+            self.start_play(from, None, None);
         }
     }
 
@@ -1035,15 +1041,11 @@ impl SoundApp {
                     if self.is_playing() {
                         self.locate(at);
                     } else {
-                        self.engine.transport.position = at;
                         self.start_play(at, None, None);
                     }
                 }
-                TransportRequest::PlayRange(r) => {
-                    let end = (!r.is_empty()).then_some(r.end);
-                    self.engine.transport.position = r.start;
-                    self.start_play(r.start, end, None);
-                }
+                // Play Timeline plays the timeline selection as Play plays the edit selection.
+                TransportRequest::PlayRange(r) => self.play_range(r),
                 TransportRequest::Stop | TransportRequest::Pause => self.stop_play(),
                 TransportRequest::TogglePlay => {
                     if self.is_playing() {
@@ -1354,6 +1356,36 @@ mod tests {
         app.handle_transport(0.25);
         assert!(app.is_playing());
         assert!((192_000..216_000).contains(&app.position()), "started at {}", app.position());
+    }
+
+    /// Play Timeline (`]`) plays the timeline selection as Play plays the edit selection: looped
+    /// with Loop Playback, with pre- and post-roll when they are on.
+    #[test]
+    fn play_timeline_loops_and_rolls_like_play() {
+        use soundcraft_time::{Range, Samples};
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.run("options.link_timeline_edit", json!({"value": false})).unwrap();
+        let timeline = Range::new(192_000, 240_000);
+        app.engine.session_mut().edit.timeline_selection = timeline;
+        app.run("edit.select", json!({"start": 0, "end": 10})).unwrap();
+        let play = |app: &mut SoundApp| {
+            app.run("edit.play_timeline", json!({})).unwrap();
+            app.handle_transport(0.0);
+            let played = app.sim;
+            app.run("transport.stop", json!({})).unwrap();
+            app.handle_transport(0.0);
+            played
+        };
+        app.run("options.loop_playback", json!({"value": true})).unwrap();
+        assert_eq!(play(&mut app), Some((192_000, None, Some(timeline))), "looped");
+        app.run("options.loop_playback", json!({"value": false})).unwrap();
+        app.run("options.pre_post_roll", json!({"value": true})).unwrap();
+        app.engine.session_mut().edit.pre_roll = 48_000;
+        app.engine.session_mut().edit.post_roll = 24_000;
+        assert_eq!(play(&mut app), Some((144_000, Some(264_000), None)), "rolled");
+        app.engine.session_mut().edit.pre_roll = Samples::MAX;
+        app.engine.session_mut().edit.post_roll = Samples::MAX;
+        assert_eq!(play(&mut app), Some((0, Some(Samples::MAX), None)), "rolls far past the session's ends");
     }
 
     #[test]
