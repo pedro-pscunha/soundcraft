@@ -770,15 +770,23 @@ pub fn create_fades(s: &mut Session, track: TrackId, range: Range, shape: FadeSh
     let mut made = 0;
     let mut xfaded: Vec<ClipId> = Vec::new();
     let n = pl.clips.len();
+    // Each crossfade is measured on the clips as they were (id, start, end, offset), not on a clip
+    // the previous crossfade already extended. A clip with a crossfade at both ends gives each at
+    // most half of itself, so neighbouring crossfades never overlap and no clip reaches past its
+    // neighbours.
+    let was: Vec<(ClipId, Samples, Samples, Samples)> = pl.clips.iter().map(|c| (c.id, c.start, c.end(), c.source_offset())).collect();
+    let joined = |i: usize| match (was.get(i), was.get(i + 1)) {
+        (Some(a), Some(b)) => b.1 == a.2 && range.start < a.2 && range.end > a.2,
+        _ => false,
+    };
+    let room = |len: Samples, shared: bool| if shared { len / 2 } else { len };
     // Crossfades between adjacent clips whose boundary is inside the range.
     for i in 0..n.saturating_sub(1) {
-        let (Some(a), Some(b)) = (pl.clips.get(i).cloned(), pl.clips.get(i + 1).cloned()) else { continue };
-        let boundary = a.end();
-        if b.start == boundary && range.start < boundary && range.end > boundary {
-            let before = boundary - range.start.max(a.start);
-            let after = range.end.min(b.end()) - boundary;
-            let a_handle = handles.iter().find(|h| h.0 == a.id).map_or(0, |h| h.1);
-            let b_handle = b.source_offset();
+        let (Some(&(a_id, a_start, boundary, _)), Some(&(b_id, _, b_end, b_handle))) = (was.get(i), was.get(i + 1)) else { continue };
+        if joined(i) {
+            let before = (boundary - range.start.max(a_start)).min(room(boundary - a_start, i > 0 && joined(i - 1)));
+            let after = (range.end.min(b_end) - boundary).min(room(b_end - boundary, joined(i + 1)));
+            let a_handle = handles.iter().find(|h| h.0 == a_id).map_or(0, |h| h.1);
             // Extend each clip into the other's territory using its handles.
             let ext_a = after.min(a_handle).max(0);
             let ext_b = before.min(b_handle).max(0);
@@ -792,8 +800,8 @@ pub fn create_fades(s: &mut Session, track: TrackId, range: Range, shape: FadeSh
                 cb.fade_in = Fade { len: (ext_b + after).min(cb.length), shape, curvature: 0.0 };
             }
             made += 1;
-            xfaded.push(a.id);
-            xfaded.push(b.id);
+            xfaded.push(a_id);
+            xfaded.push(b_id);
         }
     }
     for c in pl.clips.iter_mut().filter(|c| !xfaded.contains(&c.id)) {
@@ -835,6 +843,9 @@ pub fn delete_fades(s: &mut Session, track: TrackId, range: Range) -> usize {
             }
         }
     }
+    // A clip that reached past its neighbour (sessions saved before crossfades stayed between
+    // neighbours) can move a start past the next one's.
+    pl.sort();
     n
 }
 
@@ -934,6 +945,51 @@ mod tests {
         delete_fades(&mut s, t, Range::new(2900, 3100));
         let c = s.track(t).unwrap().clips();
         assert_eq!((c[0].end(), c[1].start), (3000, 3000));
+    }
+
+    /// Sorted, every clip at least a sample long and its fades inside it.
+    fn sane(s: &Session, t: TrackId) {
+        let c = s.track(t).unwrap().clips();
+        assert!(c.windows(2).all(|w| w[0].start <= w[1].start), "not sorted: {:?}", clips(s, t));
+        assert!(c.iter().all(|c| c.length > 0 && c.fade_in.len + c.fade_out.len <= c.length), "{:?}", clips(s, t));
+    }
+
+    #[test]
+    fn crossfades_across_several_boundaries_stay_between_neighbours() {
+        // Four abutting clips (1000..5000, cut at 2000, 3000 and 4000) under one selection: three
+        // crossfades. Each is measured on the clips as they were, and a clip with a crossfade at
+        // both ends gives each at most half of itself, so no clip reaches past its neighbours.
+        let (mut s, t) = session_with_clip();
+        for at in [2000, 3000, 4000] {
+            separate_at(&mut s, t, at);
+        }
+        assert_eq!(create_fades(&mut s, t, Range::new(1000, 5000), FadeShape::Linear), 3);
+        sane(&s, t);
+        let c = s.track(t).unwrap().clips();
+        assert!(c.windows(3).all(|w| w[0].end() <= w[2].start), "a crossfade reaches past a neighbour: {:?}", clips(&s, t));
+        // An inner clip's two crossfades meet at its middle (2500, 3500); the outer sides use the
+        // whole selection.
+        assert_eq!((c[1].start, c[1].end()), (1000, 3500), "{:?}", clips(&s, t));
+        assert_eq!((c[2].start, c[2].end()), (2500, 5000), "{:?}", clips(&s, t));
+        delete_fades(&mut s, t, Range::new(1000, 5000));
+        sane(&s, t);
+        let c = s.track(t).unwrap().clips();
+        assert!(c.windows(2).all(|w| w[0].end() <= w[1].start), "still overlapping: {:?}", clips(&s, t));
+        assert!(c.iter().all(|c| c.fade_in.len == 0 && c.fade_out.len == 0));
+    }
+
+    #[test]
+    fn deleting_fades_keeps_a_playlist_sorted_when_a_clip_reaches_past_its_neighbour() {
+        // Sessions saved before crossfades were kept between neighbours can hold this.
+        let (mut s, t) = session_with_clip();
+        let ids = [s.new_clip_id(), s.new_clip_id()];
+        if let Some(pl) = s.track_mut(t).and_then(|t| t.playlist_mut()) {
+            pl.clips[0].length = 4000;
+            pl.clips.push(Clip::audio(ids[0], "b", SourceId(500), 2000, 2000, 1000));
+            pl.clips.push(Clip::audio(ids[1], "c", SourceId(500), 2500, 2500, 1500));
+        }
+        delete_fades(&mut s, t, Range::new(1000, 5000));
+        sane(&s, t);
     }
 
     fn three_clips() -> (Session, TrackId, [ClipId; 3]) {
