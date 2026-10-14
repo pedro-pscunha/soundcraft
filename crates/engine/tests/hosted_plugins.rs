@@ -163,7 +163,11 @@ fn offline_renders_wait_for_hosted_plugins_to_load() {
     let loading = |e: &Engine| soundcraft_mix::RangeRender::new(e.session(), None, range, 512).loading();
     assert_eq!(loading(&e), None);
     e.execute("mix.insert", &json!({"track": t.0, "slot": 0, "plugin": GAIN})).unwrap();
-    assert_eq!(loading(&e), None, "a stateless hosted effect has nothing to load");
+    assert_eq!(loading(&e), None, "a hosted effect does not wait");
+    // The app's Bounce Mix stores every live instance's state first: a hosted effect with a state
+    // does not make the render wait either.
+    e.execute("mix.insert_state", &json!({"track": t.0, "slot": 0, "state": soundcraft_model::b64::encode(b"settings")})).unwrap();
+    assert_eq!(loading(&e), None, "a hosted effect with a stored state does not wait");
     let inst = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
     e.execute("mix.instrument", &json!({"track": inst.0, "plugin": SYNTH})).unwrap();
     assert!(loading(&e).is_some(), "a hosted instrument may load its sounds");
@@ -175,15 +179,14 @@ fn offline_renders_wait_for_hosted_plugins_to_load() {
     assert!(job.loading() && job.progress() == 0.0, "still loading: nothing rendered");
     drop(job);
     let _ = std::fs::remove_file(&out);
-    e.execute("track.delete", &json!({"tracks": [inst.0]})).unwrap();
-    assert_eq!(loading(&e), None);
-
-    e.execute("mix.insert_state", &json!({"track": t.0, "slot": 0, "state": soundcraft_model::b64::encode(b"settings")})).unwrap();
+    // The first block waits, later ones do not.
     let mut r = soundcraft_mix::RangeRender::new(e.session(), None, range, 512);
-    let left = r.loading().expect("waits for the hosted insert given a state");
+    let left = r.loading().expect("waits for the hosted instrument");
     assert!(left <= soundcraft_mix::HOSTED_LOAD_WAIT && left > soundcraft_mix::HOSTED_LOAD_WAIT / 2, "{left:?}");
     let started = std::time::Instant::now();
     assert!(r.next_block(e.session()).is_some());
     assert!(started.elapsed() >= left.saturating_sub(std::time::Duration::from_millis(5)));
     assert_eq!(r.loading(), None);
+    e.execute("track.delete", &json!({"tracks": [inst.0]})).unwrap();
+    assert_eq!(loading(&e), None);
 }

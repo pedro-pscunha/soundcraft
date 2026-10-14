@@ -40,13 +40,15 @@
 //!   engine made with [`MixEngine::offline`], so every instance it creates is told before
 //!   `prepare` that it renders offline ([`Plugin::set_render_mode`]). [`MixEngine::new`] and
 //!   instances made for playback render in real time.
-//! - a [`RangeRender`] whose engine created a third-party instrument, or a third-party plugin from
-//!   a stored state, waits [`HOSTED_LOAD_WAIT`] before its first block. Sample players (Keyscape,
-//!   Omnisphere) return from `setState` at once and load their samples on threads of their own,
-//!   playing silence until they are done, and no plugin format reports when that is (Keyscape
-//!   calls neither VST3 `IProgress` nor `restartComponent`). Without the wait an offline render,
-//!   which runs far faster than real time, loses its first notes. A stateless hosted effect has
-//!   nothing to load, and its render does not wait.
+//! - a [`RangeRender`] whose engine created a third-party instrument waits [`HOSTED_LOAD_WAIT`]
+//!   before its first block. Sample players (Keyscape, Omnisphere) return from `setState` at once
+//!   and load their samples on threads of their own, playing silence until they are done, and no
+//!   plugin format reports when that is (Keyscape calls neither VST3 `IProgress` nor
+//!   `restartComponent`). Without the wait an offline render, which runs far faster than real
+//!   time, loses its first notes. Hosted effects do not make a render wait, with a stored state
+//!   or not: the app stores one for every hosted insert before it bounces, so counting them would
+//!   make every bounce with a hosted effect wait. An effect that loads its data the same way (a
+//!   convolution reverb's impulse response) may render its first moments without it.
 //!
 //! An instance starts from its stored state; the insert's parameter values are then applied on
 //! top before the first block. A built-in insert stores every parameter. A hosted insert stores
@@ -386,8 +388,8 @@ pub struct MixEngine {
     external: bool,
     /// How the instances `sync` creates render (see [`MixEngine::offline`]).
     mode: RenderMode,
-    /// `sync` created a third-party instance that may still be loading (see
-    /// [`MixEngine::take_created_hosted`]) since it was last asked.
+    /// `sync` created a third-party instrument, which may still be loading (see
+    /// [`MixEngine::take_created_hosted`]), since it was last asked.
     created_hosted: bool,
     /// Instances handed over by the host, waiting for `sync` to place them.
     adopt: HashMap<(TrackId, usize), PreparedInstance>,
@@ -437,8 +439,8 @@ impl SlotCtx<'_> {
         } else {
             let state = if third { ins.state_bytes() } else { None };
             let made = create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch, self.mode).map(|n| n.plugin);
-            // An instrument, or a plugin given a state, may load on threads of its own.
-            *self.created_hosted |= third && made.is_some() && (idx == INSTRUMENT_SLOT || state.is_some());
+            // An instrument may load its sounds on threads of its own.
+            *self.created_hosted |= third && made.is_some() && idx == INSTRUMENT_SLOT;
             made
         }?;
         Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false })
@@ -644,9 +646,8 @@ impl MixEngine {
         self.busses.retain(|id, _| s.bus(*id).is_some());
     }
 
-    /// True when `sync` created, since the last call, a third-party instance that may still be
-    /// loading: an instrument, or a plugin given a stored state (never with external instances,
-    /// which the host creates).
+    /// True when `sync` created, since the last call, a third-party instrument, which may still be
+    /// loading (never with external instances, which the host creates).
     pub fn take_created_hosted(&mut self) -> bool {
         std::mem::take(&mut self.created_hosted)
     }
@@ -2115,7 +2116,7 @@ pub fn source_channels(s: &Session, bus: Option<BusId>) -> usize {
     }
 }
 
-/// How long an offline render waits, once, after creating third-party plugins and before its
+/// How long an offline render waits, once, after creating a third-party instrument and before its
 /// first block (see the crate docs). Keyscape needed 0.1–0.2 s with its samples in the disk cache.
 pub const HOSTED_LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 

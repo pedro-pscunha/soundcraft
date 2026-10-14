@@ -169,10 +169,13 @@ Known risks, unmeasured:
   or a state is stored (`mix.insert_state`). Pedalboard (JUCE) makes it sound at once; which call
   makes the difference is not known.
 - Offline renders (Bounce Mix, exports) wait 2 s (`HOSTED_LOAD_WAIT`) before their first block
-  when they made a hosted instrument or a hosted plugin from a stored state, since sample players
-  load on threads of their own and report nothing. Keyscape needed 0.1–0.2 s with its samples in
-  the disk cache; a large patch read from a cold disk may need more, and the first notes of such a
-  bounce can still come out silent.
+  when they made a hosted instrument, since sample players load on threads of their own and
+  report nothing. Keyscape needed 0.1–0.2 s with its samples in the disk cache; a large patch read
+  from a cold disk may need more, and the first notes of such a bounce can still come out silent.
+  Hosted effects never make a render wait (Bounce Mix stores a state for every hosted insert
+  first, so waiting for effects with a state would make every bounce with one wait): an effect
+  that loads its data the same way (a convolution reverb's impulse response, a sampler used as an
+  effect) can render its first moments without it.
 - An Audio Unit whose view is still alive 10 s after the plugin was removed (a view that never
   deallocates, typically held by a timer of its own) is uninitialized and leaked, never disposed:
   disposing under a live view is a use-after-free. Its uninitialized unit stays in memory until
@@ -228,6 +231,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | G-13: offline renders wait only for hosted instruments (Bounce Mix stores every insert's state first, so effects with a state made every bounce wait); effects that load their data late are a residual |
 | 2026-10-14 | trivial | G-05 wording: embedded CLAP editors are missing on macOS and Linux (on Windows they are in), as in plugin-parity.md and ROADMAP.md |
 | 2026-10-14 | minor | G-05 shrunk: Audio Unit editor views, VST3 editors on Windows, one shared macOS plugin window with key forwarding; left: embedded CLAP GUIs, VST3 on Linux |
 | 2026-10-14 | minor | G-13: the offline renders' 2 s wait for hosted plugins may be short on a cold disk (only instruments and plugins given a state wait) |
