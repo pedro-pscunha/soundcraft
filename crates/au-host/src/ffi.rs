@@ -1459,8 +1459,9 @@ impl Drop for Instance {
 /// [`guarded`]: an exception thrown there is caught and logged, never left to abort SoundCraft.
 mod window {
     use super::{AudioUnit, CFTypeRef, cf_string, cocoa_ui, release};
+    use objc2::encode::{Encode, Encoding};
     use objc2::rc::{Allocated, Retained, Weak, autoreleasepool};
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
     use objc2::{MainThreadMarker, msg_send, sel};
     use objc2_app_kit::NSView;
     use objc2_foundation::{NSBundle, NSPoint, NSSize, NSString, NSURL};
@@ -1477,6 +1478,57 @@ mod window {
                 log::error!("au: {what} threw an Objective-C exception: {e}");
                 Err(format!("{what} threw an exception ({e})"))
             }
+        }
+    }
+
+    /// An `AudioUnit` passed to a method that declares it as the macOS SDK's
+    /// `struct ComponentInstanceRecord *` (how third-party plugins are usually built). The
+    /// record's fields are left out, so every encoding of it (`=[1q]`, none) passes objc2's
+    /// argument check.
+    #[repr(transparent)]
+    #[derive(Clone, Copy)]
+    pub(super) struct RecordRef(pub AudioUnit);
+
+    // SAFETY: a single pointer (`repr(transparent)` over `*mut c_void`), passed as a pointer; the
+    // encoding is that of a pointer, to the struct the method names.
+    unsafe impl Encode for RecordRef {
+        const ENCODING: Encoding = Encoding::Pointer(&Encoding::Struct("ComponentInstanceRecord", &[]));
+    }
+
+    /// An `AudioUnit` passed to a method that declares it as `struct OpaqueAudioComponentInstance *`
+    /// (how Apple's own frameworks are built: `AUGenericView`, Apple's view factories).
+    #[repr(transparent)]
+    #[derive(Clone, Copy)]
+    pub(super) struct OpaqueRef(pub AudioUnit);
+
+    // SAFETY: as for `RecordRef`.
+    unsafe impl Encode for OpaqueRef {
+        const ENCODING: Encoding = Encoding::Pointer(&Encoding::Struct("OpaqueAudioComponentInstance", &[]));
+    }
+
+    /// How a method declares its `AudioUnit` argument.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(super) enum UnitArg {
+        /// `struct ComponentInstanceRecord *`: passed as [`RecordRef`].
+        Record,
+        /// `struct OpaqueAudioComponentInstance *`: passed as [`OpaqueRef`].
+        Opaque,
+        /// `void *` (what Swift's `OpaquePointer` becomes): passed as `*mut c_void`.
+        Void,
+    }
+
+    /// How `cls`'s method `sel` declares its first argument, the unit, so the unit is passed as
+    /// that type and objc2's argument check (on in debug builds) agrees. Anything that is not one
+    /// of those pointers cannot be passed a unit: an error naming the encoding.
+    pub(super) fn unit_arg(cls: &AnyClass, sel: Sel) -> Result<UnitArg, String> {
+        let ty = cls.instance_method(sel).and_then(|m| m.argument_type(2)).ok_or_else(|| format!("no `{sel}`"))?;
+        let bytes = ty.to_bytes();
+        let record = bytes.strip_prefix(b"^{").map(|r| r.split(|&c| c == b'=' || c == b'}').next().unwrap_or_default());
+        match (record, bytes) {
+            (Some(b"ComponentInstanceRecord"), _) => Ok(UnitArg::Record),
+            (Some(b"OpaqueAudioComponentInstance"), _) => Ok(UnitArg::Opaque),
+            (_, b"^v") => Ok(UnitArg::Void),
+            _ => Err(format!("`{sel}` takes `{}`, not an AudioUnit", ty.to_string_lossy())),
         }
     }
 
@@ -1511,19 +1563,28 @@ mod window {
         let url: &NSURL = unsafe { &*url.cast::<NSURL>() };
         let bundle = NSBundle::bundleWithURL(url).ok_or_else(|| "its view bundle cannot be opened".to_string())?;
         let cls: &AnyClass = bundle.classNamed(&NSString::from_str(&name)).ok_or_else(|| format!("no view class `{name}`"))?;
-        if !cls.responds_to(sel!(uiViewForAudioUnit:withSize:)) {
+        let make = sel!(uiViewForAudioUnit:withSize:);
+        if !cls.responds_to(make) {
             return Err(format!("`{name}` is no AUCocoaUIBase view factory"));
         }
+        let arg = unit_arg(cls, make).map_err(|e| format!("`{name}`: {e}"))?;
         // SAFETY: `alloc` and `init` of an `NSObject` subclass (every view factory is one).
         let factory: Option<Retained<AnyObject>> = unsafe {
             let a: Allocated<AnyObject> = msg_send![cls, alloc];
             msg_send![a, init]
         };
         let factory = factory.ok_or_else(|| format!("`{name}` did not initialize"))?;
-        // SAFETY: the factory implements `uiViewForAudioUnit:withSize:` (checked above); the unit
-        // is live; a zero size lets the view choose. The view comes back autoreleased and
-        // `msg_send!` retains it.
-        let view: Option<Retained<AnyObject>> = unsafe { msg_send![&*factory, uiViewForAudioUnit: unit, withSize: NSSize::new(0.0, 0.0)] };
+        let size = NSSize::new(0.0, 0.0);
+        // SAFETY: the factory implements `uiViewForAudioUnit:withSize:` (checked above), with the
+        // unit argument passed as the type its encoding names; the unit is live; a zero size lets
+        // the view choose. The view comes back autoreleased and `msg_send!` retains it.
+        let view: Option<Retained<AnyObject>> = unsafe {
+            match arg {
+                UnitArg::Record => msg_send![&*factory, uiViewForAudioUnit: RecordRef(unit), withSize: size],
+                UnitArg::Opaque => msg_send![&*factory, uiViewForAudioUnit: OpaqueRef(unit), withSize: size],
+                UnitArg::Void => msg_send![&*factory, uiViewForAudioUnit: unit, withSize: size],
+            }
+        };
         let view = view.ok_or_else(|| format!("`{name}` made no view"))?.downcast::<NSView>().map_err(|_| format!("`{name}` made no NSView"))?;
         Ok(View { view, factory: Some(factory) })
     }
@@ -1531,11 +1592,16 @@ mod window {
     /// Apple's generic view: every parameter (the expert ones too), with the unit's own names.
     fn generic_view(unit: AudioUnit) -> Result<View, String> {
         let cls = AnyClass::get(c"AUGenericView").ok_or_else(|| "CoreAudioKit's generic view is unavailable".to_string())?;
+        let arg = unit_arg(cls, sel!(initWithAudioUnit:)).map_err(|e| format!("the generic view: {e}"))?;
         // SAFETY: `AUGenericView` is an `NSView` subclass whose `initWithAudioUnit:` takes a live
-        // unit (the caller holds it).
+        // unit (the caller holds it), passed as the type its encoding names (checked above).
         let view: Option<Retained<NSView>> = unsafe {
             let a: Allocated<NSView> = msg_send![cls, alloc];
-            msg_send![a, initWithAudioUnit: unit]
+            match arg {
+                UnitArg::Record => msg_send![a, initWithAudioUnit: RecordRef(unit)],
+                UnitArg::Opaque => msg_send![a, initWithAudioUnit: OpaqueRef(unit)],
+                UnitArg::Void => msg_send![a, initWithAudioUnit: unit],
+            }
         };
         let view = view.ok_or_else(|| "the generic view did not initialize".to_string())?;
         if cls.responds_to(sel!(setShowsExpertParameters:)) {
@@ -1915,6 +1981,34 @@ mod tests {
         assert!(e.starts_with("a test view threw an exception"), "{e}");
         assert!(e.contains("a plugin threw"), "{e}");
         assert_eq!(window::guarded("a test view", || Ok(7)), Ok(7));
+    }
+
+    /// View factories and the generic view declare the unit as one of the SDK's two `AudioUnit`
+    /// records or as `void *`; it is passed as that type, so objc2's argument check (on in debug
+    /// builds) agrees without loosening it for the whole workspace. Anything else is refused
+    /// before a message is sent.
+    #[test]
+    fn a_unit_argument_is_passed_as_the_method_declares_it() {
+        use objc2::runtime::{AnyClass, ClassBuilder, NSObject, Sel};
+        use objc2::{ClassType, sel};
+        use window::{RecordRef, UnitArg, unit_arg};
+        extern "C-unwind" fn record(_: &NSObject, _: Sel, _: RecordRef) {}
+        extern "C-unwind" fn void_ptr(_: &NSObject, _: Sel, _: *mut c_void) {}
+        extern "C-unwind" fn int(_: &NSObject, _: Sel, _: i32) {}
+        let generic = AnyClass::get(c"AUGenericView").expect("CoreAudioKit's generic view");
+        assert_eq!(unit_arg(generic, sel!(initWithAudioUnit:)), Ok(UnitArg::Opaque), "Apple's frameworks");
+        let mut b = ClassBuilder::new(c"SoundCraftTestViewFactories", NSObject::class()).expect("a new class");
+        // SAFETY: the functions take the receiver, the selector and one argument, as declared.
+        unsafe {
+            b.add_method(sel!(takesRecord:), record as extern "C-unwind" fn(_, _, _));
+            b.add_method(sel!(takesVoid:), void_ptr as extern "C-unwind" fn(_, _, _));
+            b.add_method(sel!(takesInt:), int as extern "C-unwind" fn(_, _, _));
+        }
+        let cls = b.register();
+        assert_eq!(unit_arg(cls, sel!(takesRecord:)), Ok(UnitArg::Record));
+        assert_eq!(unit_arg(cls, sel!(takesVoid:)), Ok(UnitArg::Void));
+        assert!(unit_arg(cls, sel!(takesInt:)).is_err_and(|e| e.contains("`i`")));
+        assert!(unit_arg(cls, sel!(missing:)).is_err());
     }
 
     #[test]

@@ -17,12 +17,11 @@ serde.workspace = true
 thiserror.workspace = true
 log.workspace = true
 
-# Audio Unit views in SoundCraft's plugin window (soundcraft-macos). `relax-void-encoding`: an
-# `AudioUnit` is passed to view factories as `*mut c_void`, whatever pointer type each factory's
-# method encoding names.
+# Audio Unit views in SoundCraft's plugin window (soundcraft-macos). `exception`: a plugin's view
+# code may throw.
 [target.'cfg(target_os = "macos")'.dependencies]
 soundcraft-macos.workspace = true
-objc2 = { version = "0.6", features = ["exception", "relax-void-encoding"] }
+objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSGeometry", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView"] }
 
