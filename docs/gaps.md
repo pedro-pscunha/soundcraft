@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: the VST3 scan is cached per bundle across runs, so a plugin that never answers costs its time limit once; previously minor: VST3 plugins are scanned in helper processes) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: skipped VST3 plugins are listed and can be rescanned from the app; helper failures on SoundCraft's side load in-process instead; previously minor: the VST3 scan is cached per bundle across runs) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -170,10 +170,17 @@ Known risks, unmeasured:
   modification time), and later runs start helpers only for new or changed bundles. Measured on
   the dev Mac (59 bundles, five PACE plugins without the licence service among the 9 skipped):
   30.5 s cold, 0.03 s warm; the sun-v54 bounce went from 66 s to 6 s. A bundle that timed out
-  once, for instance on a loaded machine, stays skipped until it changes or
-  `engine.vst3_plugins {"rescan": true}`; the app has no rescan item yet. The app's first scan
-  still runs on the UI thread and freezes it meanwhile. On Windows a helper whose SoundCraft was
-  killed mid-scan runs until its bundle answers (on Unix it ends at once).
+  once, for instance on a loaded machine, stays skipped until it changes or a rescan
+  (`engine.vst3_plugins {"rescan": true}`, which also lists the skipped bundles, or the VST3
+  submenu's "Rescan VST3"). The app's first scan and its rescans still run on the UI thread and
+  freeze it meanwhile.
+- When the scan helper fails on SoundCraft's side (cannot start, or is an older or newer
+  SoundCraft), the bundles it had not scanned are loaded in SoundCraft's own process instead: a
+  plugin that hangs there (not in the cache yet) hangs the scan again, as before helpers.
+- On Windows plugins share standard output with the helper's answer (on Unix it has a private
+  one): more than 8 MiB of plugin output before the answer hides it, and the bundle is skipped.
+  Crash signals in Windows helpers get the system's crash handling (on Unix they end the helper
+  quietly), and the job object that ends helpers with SoundCraft is checked by Clippy only.
 - Bounce Mix renders on the UI thread (`crates/ui-egui/src/bounce.rs` steps
   `crates/engine/src/io.rs` in 30 ms slices), and hosted plugins are told the render is offline.
   A plugin that then waits for its data (a sampler streaming from disk) can hold one block for
@@ -249,6 +256,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | G-13: skipped VST3 plugins are listed (`engine.vst3_plugins` returns them) and the VST3 submenu rescans; helper failures on SoundCraft's side load in-process instead; Windows helpers end with SoundCraft (job object); residual risks updated |
 | 2026-10-14 | minor | G-13: the VST3 scan is cached per bundle across runs (settings folder, fingerprinted), eight helpers at a time: a plugin that never answers costs 30 s once, not in every run (dev Mac: 30.5 s cold, 0.03 s warm, the sun-v54 bounce 66 s → 6 s) |
 | 2026-10-14 | minor | G-13: VST3 scans run in helper processes: a VST3 that hangs or crashes while scanned (Gullfoss without its iLok service) is skipped instead of hanging the app and every CLI bounce; the cost of plugins that never answer is a risk; CLAP and Audio Unit scans stay in-process |
 | 2026-10-14 | trivial | G-05: passing unused keys back to SoundCraft is macOS-only (editor windows on Windows and CLAP's own floating windows keep every key) |

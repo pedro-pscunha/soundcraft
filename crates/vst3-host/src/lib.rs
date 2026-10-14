@@ -22,8 +22,17 @@
 //! do not try it again until [`rescan`]. A plugin that hangs in its module entry (a PACE/iLok-
 //! protected one without its licence service) or crashes while being scanned therefore no longer
 //! hangs or kills SoundCraft, and SoundCraft's own process loads only the bundles of the plugins it
-//! creates. The helper's standard error (plugin chatter) goes to the debug log. Without a helper
-//! (library users, tests) scans load every bundle in this process, as before.
+//! creates. The helper's standard error (plugin chatter) goes to the debug log. A helper that
+//! fails on SoundCraft's side (cannot start, or is no scan helper of this protocol: an older
+//! SoundCraft after an update in place) says nothing about the plugins. No further helper is
+//! started for that scan, nothing is skipped or cached, and its bundles are loaded in this process
+//! instead (logged once). Without a helper (library users, tests) scans load every bundle in this
+//! process, as before. The apps set all this up with `soundcraft_engine::plugin_scan_startup`.
+//!
+//! Scans run without the registry lock, so the registry answers other calls while helpers work; a
+//! [`rescan`] asked for during a scan waits for it and scans again. A nonempty
+//! `SOUNDCRAFT_VST3_DEFAULT_PATHS` (a path list) replaces the standard folders, so test runs and CI
+//! keep the installed plugins out ([`scan::default_search_paths`]).
 //!
 //! A helper scan can keep a cache file ([`ScanHelper::cache`]; the apps put it in their settings
 //! folder): per bundle, its plugins or why it was skipped, under the bundle's fingerprint (its
@@ -320,7 +329,8 @@ pub fn add_search_dir(dir: &Path) -> usize {
     api::add_search_dir(dir)
 }
 
-/// Scans the given folders without touching the cache.
+/// Scans the given folders without storing the plugins found (in helpers when
+/// [`set_scan_helper`] set one: bundles they skip are remembered, see [`skipped`]).
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
     api::scan_paths(dirs)
 }

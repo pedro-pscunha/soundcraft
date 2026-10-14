@@ -2,16 +2,35 @@
 //! A plugin that never returns from its module entry (a PACE/iLok-protected plugin without its
 //! licence service) or crashes there then costs a skipped bundle, not the whole application.
 //!
-//! The protocol: `<exe> --soundcraft-scan-vst3 <bundle>` loads that one bundle in the helper (the
-//! in-process [`load_bundle`](crate::load_bundle)), prints one line, `soundcraft-vst3-scan: ` and
-//! then JSON, `{"ok":[descriptors]}` or `{"error":"why"}`, and exits: 0 when the bundle loaded, 2
-//! when not. The host finds that line wherever it is in standard output (plugins may print there
-//! too). The helper's standard error, where plugins chatter, is drained; its last line goes into
-//! the reason a bundle is skipped, the rest to the debug log. Once the answer is in, the helper has
-//! [`EXIT_GRACE`] to exit (module exits, static destructors) before it is killed; the answer
-//! counts either way. A helper whose host is gone (killed mid-scan) ends itself on Unix (the host
-//! hands it its process id in `SOUNDCRAFT_SCAN_HOST_PID`), so a plugin stuck in its module entry
-//! cannot keep it alive forever.
+//! The protocol: `<exe> --soundcraft-scan-vst3 <bundle>` first greets, before any plugin code
+//! runs, with the line `soundcraft-vst3-scan-protocol: 1`. It then loads that one bundle (the
+//! in-process [`load_bundle`](crate::load_bundle)) and prints one answer line,
+//! `soundcraft-vst3-scan: ` and then JSON, `{"ok":[descriptors]}` or `{"error":"why"}`.
+//! On Unix both lines go to a private copy of standard output, and standard output itself is
+//! pointed at standard error, so plugin code cannot write into them.
+//!
+//! The helper exits with:
+//! - 0 when the bundle loaded, 2 when it did not;
+//! - 3 when its host is gone (see below);
+//! - 4 when plugin code crashed it (Unix: its crash signals end it at once, so no crash report is
+//!   written).
+//!
+//! The host reads only lines that start with a marker and parse, and keeps the last answer. A
+//! run without this protocol's greeting is a failure on SoundCraft's side, not the bundle's (see
+//! [`Skip`]). The helper's standard error, where plugins chatter, is drained: its last 8 KiB go to
+//! the debug log, and its last line into the reason when the helper ended without an answer.
+//!
+//! Once the answer is in, the helper has [`EXIT_GRACE`] to exit (module exits, static
+//! destructors) before it is killed; the answer counts either way. A helper still running at its
+//! time limit is killed, on Unix together with whatever it started (each helper leads a process
+//! group of its own).
+//!
+//! A helper whose host is gone (killed mid-scan) ends too:
+//! - on Unix it watches its parent (the host hands it its process id in
+//!   `SOUNDCRAFT_SCAN_HOST_PID`);
+//! - on Windows the host's job object kills it.
+//!
+//! So a plugin stuck in its module entry cannot keep a helper alive forever.
 
 use crate::{ID_PREFIX, SCAN_HELPER_FLAG, ScanHelper, Vst3Descriptor, parse_id};
 use std::ffi::OsString;
