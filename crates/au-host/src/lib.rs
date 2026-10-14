@@ -37,13 +37,14 @@
 //! (`AUGenericView`, every parameter including the expert ones) when it has none or it fails to
 //! load, in SoundCraft's plugin window (`soundcraft_macos::plugin_window`, shared with the VST3
 //! host: titled, closable, floating above the app's windows, and handing the keys the view does
-//! not take to SoundCraft's own window). All of it runs on the main thread. The window follows the view when the view resizes itself (checked
-//! each `idle`), and closing it (by the user, [`Plugin::close_editor`] or the instance going) takes
-//! the view down and releases it. A view may outlive its window for a few run-loop turns (a
-//! plugin's timer holds it: Pro-L 2's for some 0.1 s) and may still call into its unit meanwhile,
-//! so the unit is disposed only once its views are gone, on the main thread
-//! (`units_awaiting_disposal` counts the waiting ones); an instance that goes on another thread
-//! with its editor open has its editor closed on the main thread first.
+//! not take to SoundCraft's own window). All of it runs on the main thread. The window follows the
+//! view when the view resizes itself (checked each `idle`), and closing it (by the user,
+//! [`Plugin::close_editor`] or the instance going) takes the view down and releases it. A view may
+//! outlive its window for a few run-loop turns (a plugin's timer holds it: Pro-L 2's for some
+//! 0.1 s) and may still call into its unit meanwhile, so the unit is disposed only once its views
+//! are gone, on the main thread (the `testing` feature's `units_awaiting_disposal` counts the
+//! waiting ones); an instance that goes on another thread with its editor open has its editor
+//! closed on the main thread first.
 //!
 //! Parameter edits made in a view reach the host through [`PluginEditor::idle`] (the latest value
 //! of each parameter since the last call), as VST3 `performEdit`s do: views set values with
@@ -79,7 +80,7 @@ mod plugin;
 #[cfg(target_os = "macos")]
 mod registry;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "testing"))]
 pub use ffi::units_awaiting_disposal;
 #[cfg(target_os = "macos")]
 pub use plugin::AuPlugin;

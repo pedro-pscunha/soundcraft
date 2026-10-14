@@ -1381,6 +1381,7 @@ impl UnitLink {
     /// listening to their unit only when they leave one, and a view released without ever having
     /// one left a listener behind that crashed at the unit's next property change. Main thread
     /// only.
+    #[cfg(feature = "testing")]
     pub fn editor_size(&self) -> Result<(u32, u32), String> {
         let mtm = MainThreadMarker::new().ok_or_else(|| "plugin views are made on the main thread".to_string())?;
         let mut g = self.lock();
@@ -1396,6 +1397,7 @@ impl UnitLink {
     }
 
     /// True when the unit publishes a Cocoa view of its own.
+    #[cfg(feature = "testing")]
     pub fn has_custom_editor(&self) -> bool {
         let g = self.lock();
         let Some(unit) = g.unit else { return false };
@@ -1567,6 +1569,7 @@ mod window {
         }
 
         /// The view's size in pixels.
+        #[cfg(feature = "testing")]
         pub fn size(&self, mtm: MainThreadMarker) -> (u32, u32) {
             let s = self.view(mtm).map_or(NSSize::new(0.0, 0.0), |v| v.frame().size);
             (s.width.max(0.0).round() as u32, s.height.max(0.0).round() as u32)
@@ -1656,7 +1659,8 @@ const RETIRE_TRIES: u32 = 200;
 static AWAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Units whose disposal waits for the main thread (an editor still to close, or a view that
-/// outlived its editor). Diagnostics and tests.
+/// outlived its editor). For tests (the `testing` feature).
+#[cfg(feature = "testing")]
 pub fn units_awaiting_disposal() -> usize {
     AWAITING.load(Ordering::Relaxed)
 }

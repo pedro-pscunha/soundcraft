@@ -67,20 +67,23 @@ impl AuPlugin {
     }
 
     /// The size in pixels of the unit's view (its own, or the generic one): the open editor's, or
-    /// one made in a window that is never shown and closed at once. Main thread only; for
-    /// diagnostics and tests.
+    /// one made in a window that is never shown and closed at once. Main thread only; for tests
+    /// (the `testing` feature).
+    #[cfg(feature = "testing")]
     pub fn editor_size(&self) -> Result<(u32, u32), String> {
         self.inst.link().editor_size()
     }
 
     /// True when the unit publishes a Cocoa view of its own; otherwise its editor is Apple's
-    /// generic view.
+    /// generic view. For tests (the `testing` feature).
+    #[cfg(feature = "testing")]
     pub fn has_custom_editor(&self) -> bool {
         self.inst.link().has_custom_editor()
     }
 
     /// Like [`Plugin::open_editor`], but the window is never ordered on screen: the view is made,
-    /// attached and listened to as for a shown one. For tests and diagnostics.
+    /// attached and listened to as for a shown one. For tests (the `testing` feature).
+    #[cfg(feature = "testing")]
     pub fn open_editor_hidden(&mut self) -> Result<(), String> {
         self.inst.link().open_editor(self.info.name, &self.ids, &self.edits, false)
     }

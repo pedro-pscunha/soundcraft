@@ -7,6 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+# Test-only API for the main-thread editor test (never on in the app).
+testing = []
+
 [dependencies]
 soundcraft-dsp.workspace = true
 serde.workspace = true
@@ -21,6 +25,9 @@ soundcraft-macos.workspace = true
 objc2 = { version = "0.6", features = ["relax-void-encoding"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSGeometry", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView"] }
+
+[dev-dependencies]
+soundcraft-au-host = { path = ".", features = ["testing"] }
 
 # The editor test checks the process's windows (none may reach the screen).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
