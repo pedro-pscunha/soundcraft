@@ -1679,7 +1679,7 @@ impl EditorLink {
         let platform = window::PLATFORM_TYPE.ok_or_else(|| "VST3 editors are not hosted on this platform yet".to_string())?;
         let mut g = self.lock();
         if let Some(w) = &g.window {
-            if w.is_visible() {
+            if !w.closed_by_user() {
                 w.raise();
                 return Ok(());
             }
@@ -1776,7 +1776,7 @@ impl EditorLink {
     pub fn is_open(&self) -> bool {
         let g = self.lock();
         match &g.window {
-            Some(w) if window::on_main_thread() => w.is_visible(),
+            Some(w) if window::on_main_thread() => !w.closed_by_user(),
             Some(_) => true,
             None => false,
         }
@@ -1788,7 +1788,7 @@ impl EditorLink {
             return;
         }
         let mut g = self.lock();
-        if g.window.as_ref().is_some_and(|w| !w.is_visible()) {
+        if g.window.as_ref().is_some_and(|w| w.closed_by_user()) {
             EditorLink::teardown(&mut g);
         }
     }
@@ -1928,6 +1928,14 @@ mod window {
 
         pub fn is_visible(&self) -> bool {
             self.get().is_some_and(|w| w.isVisible())
+        }
+
+        /// The user closed the window. It also hides while SoundCraft is in the background
+        /// (`setHidesOnDeactivate`), and comes back when the app does: hidden counts as closed
+        /// only while the app is active. Main thread only (false elsewhere).
+        pub fn closed_by_user(&self) -> bool {
+            let Some(mtm) = MainThreadMarker::new() else { return false };
+            !self.is_visible() && NSApplication::sharedApplication(mtm).isActive()
         }
 
         pub fn close(self) {
@@ -2105,6 +2113,11 @@ mod window {
             self.live().is_some_and(|h| unsafe { IsWindowVisible(h) } != 0)
         }
 
+        /// The user closed (hid) the window: owned windows are not hidden with their owner.
+        pub fn closed_by_user(&self) -> bool {
+            !self.is_visible()
+        }
+
         pub fn close(self) {
             if let Some(h) = self.live() {
                 // SAFETY: our own live window; the view was detached before (see `teardown`).
@@ -2153,6 +2166,9 @@ mod window {
         pub fn raise(&self) {}
         pub fn is_visible(&self) -> bool {
             false
+        }
+        pub fn closed_by_user(&self) -> bool {
+            !self.is_visible()
         }
         pub fn close(self) {}
     }
