@@ -325,12 +325,7 @@ pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descri
 fn ensure_scanned(fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
     let mut r = lock();
     if fresh {
-        r.generation = r.generation.wrapping_add(1);
-        r.scanned = None;
-        r.failed.clear();
-        r.skipped.clear();
-        r.not_scanned.clear();
-        r.rescan_pending = true;
+        ask_for_rescan_locked(&mut r);
     }
     loop {
         if let Some(list) = &r.scanned {
@@ -418,6 +413,22 @@ pub fn add_search_dir(dir: &Path) -> usize {
         merge(list, found);
     }
     n
+}
+
+/// Asks for a rescan: what the last scan found is dropped, a scan running now does not store its
+/// result, and whichever caller begins the next scan makes it a rescan.
+fn ask_for_rescan_locked(r: &mut Registry) {
+    r.generation = r.generation.wrapping_add(1);
+    r.scanned = None;
+    r.failed.clear();
+    r.skipped.clear();
+    r.not_scanned.clear();
+    r.rescan_pending = true;
+}
+
+#[cfg(feature = "testing")]
+pub fn ask_for_rescan() {
+    ask_for_rescan_locked(&mut lock());
 }
 
 #[cfg(feature = "testing")]

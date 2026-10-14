@@ -98,8 +98,10 @@ fn main() {
         std::process::exit(if ok { 0 } else { 1 });
     }
     // A fresh process for `a_rescan_asked_for_during_a_scan_rescans`: a scan is stuck on `slow`,
-    // a rescan is asked for, and the stuck scan's caller scans again as soon as it is done. Exits
-    // 0 when `crashy`, cached as skipped, was scanned again (the rescan's scan was fresh).
+    // a rescan is asked for, and the stuck scan's caller scans again as soon as it is done, the
+    // only caller left (the one who asked does not scan here), so it is surely the one who begins
+    // the next scan. Exits 0 when `crashy`, cached as skipped, was scanned again (that scan was
+    // the rescan, fresh).
     if let [mode, cache, crashy, slow] = args.as_slice()
         && mode == "--rescan-during-scan"
     {
@@ -114,8 +116,7 @@ fn main() {
             soundcraft_vst3_host::scan();
         });
         assert!(wait_for(&stuck, TIMEOUT), "the scan never got stuck");
-        let rescan = std::thread::spawn(soundcraft_vst3_host::rescan);
-        rescan.join().unwrap();
+        soundcraft_vst3_host::ask_for_rescan();
         first.join().unwrap();
         let ok = launches(&crashy) > crashed && soundcraft_vst3_host::skipped().iter().any(|s| s.path == crashy && !s.from_cache);
         if !ok {
@@ -736,8 +737,8 @@ fn a_bundle_is_in_one_skip_list_at_most(dir: &Path) {
     soundcraft_vst3_host::set_scan_helper(None);
 }
 
-/// A rescan asked for while a scan runs is a rescan, whichever caller begins the next scan: with
-/// another caller waiting too (in a fresh process, see `--rescan-during-scan`).
+/// A rescan asked for while a scan runs is a rescan, whichever caller begins the next scan: here
+/// surely not the one who asked (in a fresh process, see `--rescan-during-scan`).
 fn a_rescan_asked_for_during_a_scan_rescans(dir: &Path) {
     let (crashy, _) = install(dir, "Crashy", Some("crash-entry"));
     let (slow, _) = install(dir, "Slow", Some("hang-entry"));

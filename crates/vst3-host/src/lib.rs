@@ -126,6 +126,13 @@ pub fn set_default_search_paths(paths: Option<Vec<PathBuf>>) {
     registry::set_default_search_paths(paths)
 }
 
+/// Test seam: asks for a rescan as [`rescan`] does, without scanning: the next scan, whoever
+/// begins it, is the rescan. So a test can be the one that begins it.
+#[cfg(all(not(target_arch = "wasm32"), feature = "testing"))]
+pub fn ask_for_rescan() {
+    registry::ask_for_rescan()
+}
+
 use soundcraft_dsp::{Category, Plugin, PluginInfo};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
