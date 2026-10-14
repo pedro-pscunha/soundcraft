@@ -7,7 +7,7 @@ use crate::SoundApp;
 use serde_json::{Value, json};
 use soundcraft_mix::INSTRUMENT_SLOT;
 use soundcraft_model::{INSERT_SLOTS, TrackId};
-use soundcraft_playback::EditorState;
+use soundcraft_playback::{EditorError, EditorState};
 use std::time::{Duration, Instant};
 
 /// The parameters of `window.plugin`, as `engine.commands` lists them.
@@ -22,6 +22,8 @@ const FIELDS: [&str; 4] = ["track", "slot", "view", "value"];
 const AUDIO_OFF: &str = "is not loaded while audio is off, so its own editor can't open";
 /// Why nothing of a plugin can open when SoundCraft knows nothing of it.
 const NOT_INSTALLED: &str = "is not installed or could not be loaded";
+/// Why a hosted plugin's editor can't open when the plugin has none.
+const NO_EDITOR: &str = "has no editor of its own";
 
 /// Which of a plugin's windows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,9 +61,16 @@ enum Action {
 }
 
 /// Why a hosted plugin's own editor can't open (`editor`: where it stands in the player, `None`
-/// while audio is off), worded to follow the plugin's name; `None` when it can.
+/// while audio is off), worded to follow the plugin's name ("Diva has no editor of its own");
+/// `None` when it can.
 pub(crate) fn editor_unavailable(editor: Option<EditorState>) -> Option<&'static str> {
-    editor.map_or(Some(AUDIO_OFF), EditorState::unavailable)
+    match editor {
+        None => Some(AUDIO_OFF),
+        Some(EditorState::NotLoaded) => Some("is not loaded yet"),
+        Some(EditorState::Failed) => Some("did not load"),
+        Some(EditorState::NoEditor) => Some(NO_EDITOR),
+        Some(EditorState::Closed | EditorState::Open) => None,
+    }
 }
 
 /// What `window.plugin` does with the plugin `slot` describes: `editor` is where its own editor
@@ -145,7 +154,8 @@ pub(crate) fn command(app: &mut SoundApp, p: &Value) -> Result<Value, String> {
     match action(s, editor, view, want, shown) {
         Action::OpenEditor => match app.player.as_ref().map(|p| p.open_editor(track, slot)) {
             Some(Ok(())) => Ok(json!({"view": "editor", "open": true})),
-            Some(Err(e)) => fallback(app, format!("{name}: {e}")),
+            Some(Err(EditorError::Failed(e))) => fallback(app, format!("{name}: {e}")),
+            Some(Err(EditorError::Unavailable(state))) => fallback(app, format!("{name} {}.", editor_unavailable(Some(state)).unwrap_or(NO_EDITOR))),
             None => fallback(app, format!("{name} {AUDIO_OFF}.")),
         },
         Action::CloseEditor => {

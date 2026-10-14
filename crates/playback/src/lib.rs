@@ -420,17 +420,14 @@ pub enum EditorState {
     Open,
 }
 
-impl EditorState {
-    /// Why the editor can't open, worded to follow the plugin's name ("Diva has no editor of its
-    /// own"), or `None` when it can.
-    pub fn unavailable(self) -> Option<&'static str> {
-        match self {
-            Self::NotLoaded => Some("is not loaded yet"),
-            Self::Failed => Some("did not load"),
-            Self::NoEditor => Some("has no editor of its own"),
-            Self::Closed | Self::Open => None,
-        }
-    }
+/// Why [`Player::open_editor`] opened nothing. The UI puts it in words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditorError {
+    /// The slot's plugin has no editor to open: where it stands ([`EditorState::NotLoaded`],
+    /// [`EditorState::Failed`] or [`EditorState::NoEditor`]).
+    Unavailable(EditorState),
+    /// The plugin's editor failed to open, as its plugin host reports it.
+    Failed(String),
 }
 
 /// What was last created for a slot.
@@ -783,7 +780,7 @@ impl Player {
     }
 
     /// Opens (or raises) the plugin's own editor window. Main thread only.
-    pub fn open_editor(&self, track: TrackId, slot: usize) -> Result<(), String> {
+    pub fn open_editor(&self, track: TrackId, slot: usize) -> Result<(), EditorError> {
         self.side().open_editor((track, slot))
     }
 
@@ -1013,12 +1010,11 @@ impl Side {
         }
     }
 
-    fn open_editor(&mut self, key: (TrackId, usize)) -> Result<(), String> {
+    fn open_editor(&mut self, key: (TrackId, usize)) -> Result<(), EditorError> {
         let Some(e) = self.editors.get_mut(&key) else {
-            let why = self.editor_state(key).unavailable().unwrap_or("has no editor of its own");
-            return Err(format!("this plugin {why}"));
+            return Err(EditorError::Unavailable(self.editor_state(key)));
         };
-        e.open()?;
+        e.open().map_err(EditorError::Failed)?;
         self.refused.remove(&key);
         Ok(())
     }
@@ -1492,23 +1488,24 @@ mod tests {
     }
 
     #[test]
-    fn each_editor_state_says_why_the_editor_cannot_open() {
+    fn an_editor_that_cannot_open_says_where_it_stands() {
         // Insert A holds a plugin that is not installed; insert B was never asked for.
         let (mut side, _, k) = hosted_slot();
         let other = (k.0, 1);
         assert_eq!(side.editor_state(other), EditorState::NotLoaded);
         assert_eq!(side.editor_state(k), EditorState::Failed);
-        assert_eq!(side.open_editor(other), Err("this plugin is not loaded yet".into()));
-        assert_eq!(side.open_editor(k), Err("this plugin did not load".into()));
+        assert_eq!(side.open_editor(other), Err(EditorError::Unavailable(EditorState::NotLoaded)));
+        assert_eq!(side.open_editor(k), Err(EditorError::Unavailable(EditorState::Failed)));
         let made = |side: &mut Side, yes: bool| side.shadow.get_mut(&k).map(|l| l.created = yes);
         made(&mut side, true);
         assert_eq!(side.editor_state(k), EditorState::NoEditor);
-        assert_eq!(side.open_editor(k), Err("this plugin has no editor of its own".into()));
+        assert_eq!(side.open_editor(k), Err(EditorError::Unavailable(EditorState::NoEditor)));
         side.editors.insert(k, Box::new(StandInEditor::default()));
         assert_eq!(side.editor_state(k), EditorState::Closed);
         side.open_editor(k).unwrap();
         assert_eq!(side.editor_state(k), EditorState::Open);
-        assert_eq!(side.editor_state(k).unavailable(), None);
+        side.editors.insert(k, Box::new(StandInEditor::refusing("no window today")));
+        assert_eq!(side.open_editor(k), Err(EditorError::Failed("no window today".into())), "the host's own words");
     }
 
     #[test]
@@ -1533,7 +1530,7 @@ mod tests {
         assert_eq!((editor.shown(), editor.calls()), (false, vec!["open", "close"]));
         let refusing = StandInEditor::refusing("no window today");
         assert!(p.adopt_editor(&s, t, 2, Box::new(refusing.clone())));
-        assert_eq!(p.open_editor(t, 2), Err("no window today".into()));
+        assert_eq!(p.open_editor(t, 2), Err(EditorError::Failed("no window today".into())));
         assert_eq!((refusing.shown(), p.editor_state(t, 2)), (false, EditorState::Closed));
     }
 
