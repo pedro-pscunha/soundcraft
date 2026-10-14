@@ -50,7 +50,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | I/O Setup | 🟡 | Busses and paths; no hardware channel matrix (G-01) |
 | Preferences | 🟡 | Many settings stored, fewer honoured |
 | Window configurations, Tile/Cascade | 🟡 | Configurations ✅; Tile/Cascade in PR #151 |
-| Plugin windows | 🟡 | A click on a CLAP, VST3 or Audio Unit plugin's slot opens and closes the plugin's own editor (`window.plugin`), an insert's parameter window one menu item away. On macOS, where editors hide while SoundCraft is in the background, the click that brings SoundCraft forward only raises the editor. Built-in plugins show generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6). Known difference: Pro Tools reuses its target plug-in window as other inserts are clicked; SoundCraft opens a window per plugin, so they pile up |
+| Plugin windows | 🟡 | A click on a CLAP, VST3 or Audio Unit plugin's slot opens and closes the plugin's own editor (`window.plugin`), an insert's parameter window one menu item away. On macOS, where editors hide while SoundCraft is in the background, the click that brings SoundCraft forward only raises the editor. Only macOS editors pass the keys their plugin does not use to SoundCraft (Space plays, ⌘W closes the editor); editor windows on Windows and CLAP's own floating windows keep every key while in front. Built-in plugins show generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6). Known difference: Pro Tools reuses its target plug-in window as other inserts are clicked; SoundCraft opens a window per plugin, so they pile up |
 | Command palette (Search) | ✅ | Over every command |
 
 ## Look and meters
@@ -68,6 +68,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | Plugin windows: passing unused keys back to SoundCraft is macOS-only; editor windows on Windows and CLAP's own floating windows keep every key. Readiness estimate unchanged |
 | 2026-10-14 | minor | Plugin windows: a click on the slot of an editor in front closes it (it used to raise it, forever); only the click that makes SoundCraft the active app raises. Readiness estimate unchanged |
 | 2026-10-14 | minor | Plugin windows: a slot click opens and closes a hosted plugin's own editor (`window.plugin`); one window per plugin where Pro Tools reuses its target window, noted as a known difference. Readiness estimate unchanged |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |

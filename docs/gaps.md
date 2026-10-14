@@ -101,6 +101,9 @@ launch #142; Linux #45, #107.
   editor, its parameters stay under Edit Parameters… (`window.plugin`).
 - **Missing:** embedded CLAP editors on macOS and Linux (there CLAP plugins open floating windows
   of their own; on Windows they are embedded in a SoundCraft window); VST3 editors on Linux (X11).
+  Only the macOS plugin window passes the keys a plugin does not use back to SoundCraft: editor
+  windows on Windows (VST3 and CLAP) and CLAP's own floating windows keep every key while they are
+  in front, so Space or Ctrl+S does nothing until SoundCraft's window is clicked.
 - **Estimate:** ≈ 6–12 h (CLAP embedding and the X11 host window).
 
 ### G-06. Memory-bound media
@@ -231,6 +234,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | G-05: passing unused keys back to SoundCraft is macOS-only (editor windows on Windows and CLAP's own floating windows keep every key) |
 | 2026-10-14 | minor | G-13: offline renders wait only for hosted instruments (Bounce Mix stores every insert's state first, so effects with a state made every bounce wait); effects that load their data late are a residual |
 | 2026-10-14 | trivial | G-05 wording: embedded CLAP editors are missing on macOS and Linux (on Windows they are in), as in plugin-parity.md and ROADMAP.md |
 | 2026-10-14 | minor | G-05 shrunk: Audio Unit editor views, VST3 editors on Windows, one shared macOS plugin window with key forwarding; left: embedded CLAP GUIs, VST3 on Linux |
