@@ -129,7 +129,7 @@ fn prefs_path() -> Option<std::path::PathBuf> {
 
 /// Runs without preferences (`SOUNDCRAFT_NO_PREFS`, agents' test runs) neither read nor write them.
 fn prefs_enabled() -> bool {
-    std::env::var_os("SOUNDCRAFT_NO_PREFS").is_none()
+    soundcraft_engine::settings::prefs_enabled()
 }
 
 fn load_prefs() -> Option<UiState> {
