@@ -525,7 +525,12 @@ fn protocol_line(text: &str) -> Option<Line> {
 /// Reads the helper's standard output on a thread; its protocol lines come out of the receiver,
 /// which disconnects at the end of the output.
 fn read_lines(child: &mut Child) -> Option<mpsc::Receiver<Line>> {
-    let out = child.stdout.take()?;
+    spawn_reader(child.stdout.take()?)
+}
+
+/// Reads protocol lines from `out` on a thread: at most [`MAX_STDOUT`] bytes are read for them;
+/// the rest is drained unread, so the writer never blocks on a full pipe.
+fn spawn_reader(out: impl Read + Send + 'static) -> Option<mpsc::Receiver<Line>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("vst3-scan-out".into())
@@ -669,6 +674,30 @@ mod tests {
             panic!()
         };
         assert_eq!(why, "timed out after 1s; its last output: last  line");
+    }
+
+    #[test]
+    fn the_reader_reads_up_to_its_cap_and_drains_the_rest() {
+        let (out, mut writer) = std::io::pipe().unwrap();
+        let lines = spawn_reader(out).unwrap();
+        let writing = std::thread::spawn(move || -> std::io::Result<()> {
+            writeln!(writer, "{HELLO}{PROTOCOL}")?;
+            // More than the cap, in one endless line, then an answer past the cap.
+            let junk = vec![b'x'; 1 << 20];
+            for _ in 0..(MAX_STDOUT >> 20) + 4 {
+                writer.write_all(&junk)?;
+            }
+            writeln!(writer, "\n{}", error_line("past the cap"))
+        });
+        // The writer is never left blocked on a full pipe: the reader drains past its cap.
+        let started = Instant::now();
+        while !writing.is_finished() && started.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(writing.is_finished(), "the writer blocked: the rest was not drained");
+        assert!(writing.join().unwrap().is_ok());
+        let read: Vec<Line> = lines.iter().collect();
+        assert_eq!(read, vec![Line::Hello(PROTOCOL.into())], "nothing past the cap is read");
     }
 
     #[test]

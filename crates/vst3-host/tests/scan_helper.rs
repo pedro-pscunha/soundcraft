@@ -507,6 +507,21 @@ fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cac
     assert_eq!(replaced["version"], 1);
     assert_eq!(replaced["bundles"].as_array().map(Vec::len), Some(2), "{replaced}");
     only_the_cache_file();
+
+    // The binary's size alone, and the bundle folder's modification time alone, count too.
+    let (sized, _) = install(dir, "Sized", None);
+    let (touched, _) = install(dir, "Touched", None);
+    scan();
+    assert_eq!((launches(&sized), launches(&touched)), (1, 1));
+    let binary = soundcraft_vst3_host::scan::bundle_binary(&sized).unwrap();
+    let modified = std::fs::metadata(&binary).unwrap().modified().unwrap();
+    let mut grown = std::fs::OpenOptions::new().append(true).open(&binary).unwrap();
+    grown.write_all(b"\0").unwrap();
+    grown.set_modified(modified).unwrap();
+    drop(grown);
+    std::fs::write(touched.join("added"), b"").unwrap();
+    scan();
+    assert_eq!((launches(&sized), launches(&touched), launches(&good)), (2, 2, 3), "only the two changed bundles");
 }
 
 /// A timeout is provisional (a slow start or a busy machine can cause one): the next scan tries the
@@ -575,6 +590,16 @@ fn the_registry_answers_while_helpers_scan(dir: &Path) {
     let waited = asked.elapsed();
     assert_eq!(scanning.join().unwrap(), 0);
     assert!(waited < Duration::from_millis(500), "{waited:?}: the registry was locked while a helper ran");
+    // The same while a rescan (the scan of every search folder) runs.
+    let stuck = entered(&busy, "hang-entry");
+    std::fs::remove_file(&stuck).unwrap();
+    let rescanning = std::thread::spawn(soundcraft_vst3_host::rescan);
+    assert!(wait_for(&stuck, TIMEOUT), "the rescan never got stuck");
+    let asked = Instant::now();
+    let _ = (soundcraft_vst3_host::cached(), soundcraft_vst3_host::skipped());
+    let waited = asked.elapsed();
+    rescanning.join().unwrap();
+    assert!(waited < Duration::from_millis(500), "{waited:?}: the registry was locked while a rescan ran");
     // Later rescans in this process may load it.
     std::fs::remove_file(hangs.unwrap()).unwrap();
     soundcraft_vst3_host::set_scan_helper(None);
