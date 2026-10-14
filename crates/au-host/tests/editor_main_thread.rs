@@ -45,6 +45,14 @@ mod macos {
         })
     }
 
+    /// How many of the process's windows are SoundCraft's plugin window (shared with VST3).
+    fn plugin_windows(mtm: MainThreadMarker) -> usize {
+        autoreleasepool(|_| {
+            let all = NSApplication::sharedApplication(mtm).windows();
+            (0..all.count()).filter(|&i| all.objectAtIndex(i).class().name().to_bytes().ends_with(b"SoundCraftPluginWindow")).count()
+        })
+    }
+
     /// Runs the main run loop for `secs`, as the app does between frames.
     fn spin(secs: f64) {
         autoreleasepool(|_| NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(secs)));
@@ -95,6 +103,7 @@ mod macos {
                 p.open_editor_hidden().expect("open");
                 assert!(ed.is_open(), "{id}: open");
                 assert_eq!(windows(mtm), (base + 1, 0), "{id}: one hidden window");
+                assert_eq!(plugin_windows(mtm), 1, "{id}: SoundCraft's plugin window");
                 spin(0.02);
                 // The unit is re-initialized and renders while its view is up.
                 p.prepare(if round % 2 == 0 { 96_000.0 } else { 48_000.0 }, 512, 2);
@@ -109,6 +118,7 @@ mod macos {
                 ed.close();
                 assert!(!ed.is_open(), "{id}: closed");
                 assert_eq!(windows(mtm), (base, 0), "{id}: the window is gone");
+                assert_eq!(plugin_windows(mtm), 0);
                 spin(0.02);
             }
             let grown = rss_kib().saturating_sub(rss);

@@ -2,6 +2,8 @@
 //!
 //! - [`open_documents`]: the files macOS opens with SoundCraft (Finder, the Dock, `open -a`) reach
 //!   the app.
+//! - `plugin_window` (macOS only): the window hosted plugin editors live in, shared by the VST3
+//!   and Audio Unit hosts; it hands the keys a plugin does not take to SoundCraft's own window.
 //!
 //! # Safety
 //!
@@ -17,3 +19,5 @@
 mod ffi;
 
 pub mod open_documents;
+#[cfg(target_os = "macos")]
+pub mod plugin_window;

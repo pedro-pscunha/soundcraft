@@ -154,6 +154,13 @@ impl Vst3Plugin {
         self.inst.editor().ok_or_else(|| "this plugin has no edit controller".to_string())?.probe()
     }
 
+    /// Like [`Plugin::open_editor`], but the window is never ordered on screen: the view is made
+    /// and attached to the window as for a shown one. For tests.
+    #[cfg(feature = "testing")]
+    pub fn open_editor_hidden(&mut self) -> Result<(), String> {
+        self.inst.editor().ok_or_else(|| "this plugin has no editor".to_string())?.open(self.info.name, false)
+    }
+
     /// Re-reads every parameter value from the controller (after a state load) and drops
     /// changes still queued from before it.
     fn refresh_values(&mut self) {
@@ -405,7 +412,7 @@ impl Plugin for Vst3Plugin {
     }
 
     fn open_editor(&mut self) -> Result<(), String> {
-        self.inst.editor().ok_or_else(|| "this plugin has no editor".to_string())?.open(self.info.name)
+        self.inst.editor().ok_or_else(|| "this plugin has no editor".to_string())?.open(self.info.name, true)
     }
 
     fn close_editor(&mut self) {
@@ -475,7 +482,7 @@ impl PluginEditor for Vst3Editor {
     fn open(&mut self) -> Result<(), String> {
         // Edits reported before the editor opened (e.g. during setup) are stale.
         let _ = self.host.take_edits();
-        self.link.open(self.info.name)
+        self.link.open(self.info.name, true)
     }
 
     fn close(&mut self) {

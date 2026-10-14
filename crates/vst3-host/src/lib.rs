@@ -28,8 +28,10 @@
 //! mode at the next `prepare` (and pass it in every `process` call); otherwise it is `kRealtime`.
 //! A plugin that refuses `kOffline` renders in `kRealtime` (logged once per instance).
 //!
-//! Plugin editors (`IPlugView`): on macOS the view is attached to the content `NSView` of a host
-//! `NSWindow` (titled and closable, floating above the app, resized on `IPlugFrame::resizeView`);
+//! Plugin editors (`IPlugView`): on macOS the view is attached to the content `NSView` of
+//! SoundCraft's plugin window (`soundcraft_macos::plugin_window`, shared with the Audio Unit host:
+//! titled and closable, floating above the app, resized on `IPlugFrame::resizeView`, and handing
+//! the keys the view does not take to SoundCraft's own window);
 //! on Windows it is attached to a host `HWND` owned by the app's window (no taskbar button,
 //! closing it hides it until the link tears it down).
 //! [`Plugin::open_editor`] opens it directly; [`Plugin::editor`] returns a handle usable on the

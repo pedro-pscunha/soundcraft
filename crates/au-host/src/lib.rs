@@ -35,8 +35,9 @@
 //! Editors: every unit has one ([`Plugin::editor`]). It shows the unit's own Cocoa view (the
 //! `AUCocoaUIBase` factory its `kAudioUnitProperty_CocoaUI` names), or Apple's generic view
 //! (`AUGenericView`, every parameter including the expert ones) when it has none or it fails to
-//! load, in a titled, closable window floating above the app's windows, like the VST3 host's. All
-//! of it runs on the main thread. The window follows the view when the view resizes itself (checked
+//! load, in SoundCraft's plugin window (`soundcraft_macos::plugin_window`, shared with the VST3
+//! host: titled, closable, floating above the app's windows, and handing the keys the view does
+//! not take to SoundCraft's own window). All of it runs on the main thread. The window follows the view when the view resizes itself (checked
 //! each `idle`), and closing it (by the user, [`Plugin::close_editor`] or the instance going) takes
 //! the view down and releases it. A view may outlive its window for a few run-loop turns (a
 //! plugin's timer holds it: Pro-L 2's for some 0.1 s) and may still call into its unit meanwhile,

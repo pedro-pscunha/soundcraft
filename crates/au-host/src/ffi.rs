@@ -1377,22 +1377,20 @@ impl Drop for Instance {
     }
 }
 
-/// A unit's view in a host window. The view is the unit's own Cocoa view (the factory class its
-/// `kAudioUnitProperty_CocoaUI` names, conforming to `AUCocoaUIBase`), or Apple's `AUGenericView`
-/// when it publishes none or it fails to load. Every function takes a `MainThreadMarker`: AppKit
-/// objects are only touched on the main thread.
+/// A unit's view in SoundCraft's plugin window (`soundcraft_macos::plugin_window`, shared with the
+/// VST3 host; it hands the keys the view does not take to SoundCraft's own window). The view is
+/// the unit's own Cocoa view (the factory class its `kAudioUnitProperty_CocoaUI` names,
+/// conforming to `AUCocoaUIBase`), or Apple's `AUGenericView` when it publishes none or it fails
+/// to load. Every function takes a `MainThreadMarker`: AppKit objects are only touched on the main
+/// thread.
 mod window {
     use super::{AudioUnit, CFTypeRef, cf_string, cocoa_ui, release};
     use objc2::rc::{Allocated, Retained, Weak, autoreleasepool};
     use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2::{MainThreadMarker, MainThreadOnly, msg_send, sel};
-    use objc2_app_kit::{NSApplication, NSBackingStoreType, NSFloatingWindowLevel, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask};
-    use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, NSString, NSURL};
-
-    /// The window's content size when a view reports none.
-    const DEFAULT_SIZE: NSSize = NSSize::new(400.0, 300.0);
-    /// Largest window side.
-    const MAX_SIDE: f64 = 16_384.0;
+    use objc2::{MainThreadMarker, msg_send, sel};
+    use objc2_app_kit::NSView;
+    use objc2_foundation::{NSBundle, NSPoint, NSSize, NSString, NSURL};
+    use soundcraft_macos::plugin_window::{DEFAULT_CONTENT, PluginWindow};
 
     /// A view and, for a unit's own view, the factory that made it (kept until the view goes).
     struct View {
@@ -1457,43 +1455,18 @@ mod window {
         Ok(View { view, factory: None })
     }
 
-    /// The window content size for a view's frame size (`None` when it has none).
-    fn content_size(s: NSSize) -> Option<NSSize> {
-        (s.width.is_finite() && s.height.is_finite() && s.width >= 1.0 && s.height >= 1.0)
-            .then(|| NSSize::new(s.width.min(MAX_SIDE).round(), s.height.min(MAX_SIDE).round()))
+    /// True when a view's frame size is a size (a view may report none).
+    fn has_size(s: NSSize) -> bool {
+        s.width.is_finite() && s.height.is_finite() && s.width >= 1.0 && s.height >= 1.0
     }
 
-    /// An `NSWindow` (titled, closable, floating above the app's windows) like the VST3 host's.
-    fn host_window(mtm: MainThreadMarker, title: &str, size: NSSize) -> Retained<NSWindow> {
-        let _app = NSApplication::sharedApplication(mtm);
-        let rect = NSRect::new(NSPoint::new(200.0, 200.0), size);
-        // Plugin editors are transient windows; in particular not minimizable (a minimized window
-        // becomes a Dock thumbnail).
-        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
-        // SAFETY: a freshly allocated window on the main thread; valid rect and style.
-        let window =
-            unsafe { NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), rect, style, NSBackingStoreType::Buffered, false) };
-        // SAFETY: we keep our own retain and release it in `Editor::close`, so AppKit must not
-        // release the window when the user closes it.
-        unsafe { window.setReleasedWhenClosed(false) };
-        window.setTitle(&NSString::from_str(title));
-        window.setLevel(NSFloatingWindowLevel);
-        window.setHidesOnDeactivate(true);
-        window.setExcludedFromWindowsMenu(true);
-        window.setCollectionBehavior(NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle);
-        window.center();
-        window
-    }
-
-    /// An open editor: the view in its host window. Holds one retain each of the window, the view
+    /// An open editor: the view in its window. Holds the window and one retain each of the view
     /// and the view's factory, released in [`Editor::close`].
     pub struct Editor {
-        window: *mut NSWindow,
+        window: PluginWindow,
         view: *mut NSView,
         /// Null for the generic view.
         factory: *mut AnyObject,
-        /// Ordered on screen (never, for an editor opened hidden).
-        shown: bool,
     }
 
     // SAFETY: the pointers are only dereferenced on the main thread (every method takes a
@@ -1505,25 +1478,19 @@ mod window {
         pub fn open(mtm: MainThreadMarker, unit: AudioUnit, title: &str, show: bool) -> Result<Editor, String> {
             autoreleasepool(|_| {
                 let View { view, factory } = make_view(mtm, unit)?;
-                let size = content_size(view.frame().size).unwrap_or_else(|| {
-                    view.setFrameSize(DEFAULT_SIZE);
-                    DEFAULT_SIZE
-                });
-                let window = host_window(mtm, title, size);
-                let Some(content) = window.contentView() else {
-                    window.close();
-                    return Err("the editor window has no content view".into());
-                };
+                let mut size = view.frame().size;
+                if !has_size(size) {
+                    view.setFrameSize(DEFAULT_CONTENT);
+                    size = DEFAULT_CONTENT;
+                }
+                let window = PluginWindow::new(mtm, title, size);
+                // The window goes (closed and released) when it is dropped on these early returns.
+                let content = window.content_view(mtm).ok_or_else(|| "the editor window has no content view".to_string())?;
                 // The window follows the view's size (`fit`), never the other way round.
                 content.setAutoresizesSubviews(false);
                 view.setFrameOrigin(NSPoint::new(0.0, 0.0));
                 content.addSubview(&view);
-                let mut e = Editor {
-                    window: Retained::into_raw(window),
-                    view: Retained::into_raw(view),
-                    factory: factory.map_or(std::ptr::null_mut(), Retained::into_raw),
-                    shown: false,
-                };
+                let mut e = Editor { window, view: Retained::into_raw(view), factory: factory.map_or(std::ptr::null_mut(), Retained::into_raw) };
                 // The view may have sized itself on joining the window.
                 e.fit(mtm);
                 if show {
@@ -1531,11 +1498,6 @@ mod window {
                 }
                 Ok(e)
             })
-        }
-
-        fn window(&self, _mtm: MainThreadMarker) -> Option<&NSWindow> {
-            // SAFETY: we hold a retain of the window (from `open`) until `close`.
-            unsafe { self.window.as_ref() }
         }
 
         fn view(&self, _mtm: MainThreadMarker) -> Option<&NSView> {
@@ -1551,35 +1513,27 @@ mod window {
 
         /// Orders the window front.
         pub fn show(&mut self, mtm: MainThreadMarker) {
-            if let Some(w) = self.window(mtm) {
-                w.makeKeyAndOrderFront(None);
-                self.shown = true;
-            }
+            self.window.show(mtm);
         }
 
-        /// The user closed the window. While the app is inactive its editor windows are hidden
-        /// (`hidesOnDeactivate`), which is not closing them.
+        /// The user closed the window (hidden while the app is inactive is still open).
         pub fn closed_by_user(&self, mtm: MainThreadMarker) -> bool {
-            self.shown && !self.window(mtm).is_some_and(|w| w.isVisible()) && NSApplication::sharedApplication(mtm).isActive()
+            self.window.closed_by_user(mtm)
         }
 
         /// Fits the window to the view when the view resized itself, keeping the window's top-left
         /// corner where it is.
         pub fn fit(&self, mtm: MainThreadMarker) {
-            let (Some(w), Some(v)) = (self.window(mtm), self.view(mtm)) else { return };
+            let Some(v) = self.view(mtm) else { return };
             autoreleasepool(|_| {
                 let f = v.frame();
-                let Some(size) = content_size(f.size) else { return };
+                if !has_size(f.size) {
+                    return;
+                }
                 if f.origin.x != 0.0 || f.origin.y != 0.0 {
                     v.setFrameOrigin(NSPoint::new(0.0, 0.0));
                 }
-                let content = w.contentRectForFrameRect(w.frame());
-                if (content.size.width - size.width).abs() < 0.5 && (content.size.height - size.height).abs() < 0.5 {
-                    return;
-                }
-                let top = content.origin.y + content.size.height;
-                let new = NSRect::new(NSPoint::new(content.origin.x, top - size.height), size);
-                w.setFrame_display(w.frameRectForContentRect(new), true);
+                self.window.fit(mtm, f.size);
             });
         }
 
@@ -1589,20 +1543,18 @@ mod window {
         /// it may still call into the unit meanwhile) is handed back.
         pub fn close(self, mtm: MainThreadMarker) -> Option<ClosedView> {
             let mut view = None;
+            let Editor { window, view: raw_view, factory } = self;
             autoreleasepool(|_| {
                 // SAFETY: each pointer is null or holds the retain taken in `open`, released here
                 // exactly once (`self` is consumed); main thread (the marker).
                 unsafe {
-                    if let Some(v) = Retained::from_raw(self.view) {
+                    if let Some(v) = Retained::from_raw(raw_view) {
                         view = Some(ClosedView(Weak::from_retained(&v)));
                         v.removeFromSuperview();
                     }
-                    drop(Retained::from_raw(self.factory));
-                    if let Some(w) = Retained::from_raw(self.window) {
-                        w.orderOut(None);
-                        w.close();
-                    }
+                    drop(Retained::from_raw(factory));
                 }
+                window.close(mtm);
             });
             view.filter(|v| v.alive(mtm))
         }

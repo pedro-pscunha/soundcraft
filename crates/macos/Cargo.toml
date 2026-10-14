@@ -1,11 +1,15 @@
 [package]
 name = "soundcraft-macos"
-description = "SoundCraft's macOS app integration: hands the app the files opened from Finder, the Dock or `open -a` (an isolated unsafe FFI crate; a no-op elsewhere)"
+description = "SoundCraft's macOS app integration: the files opened from Finder, the Dock or `open -a`, and the window plugin editors live in (an isolated unsafe FFI crate; a no-op elsewhere)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+
+[features]
+# Test seams for the main-thread integration tests (never on in the app).
+testing = []
 
 [dependencies]
 log.workspace = true
@@ -13,9 +17,20 @@ log.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 thiserror.workspace = true
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSNotification", "NSOperation", "NSString", "NSURL", "block2"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry", "NSNotification", "NSOperation", "NSString", "NSURL", "block2"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSApplicationScripting", "NSEvent", "NSGraphics", "NSResponder", "NSView", "NSWindow"] }
 block2 = "0.6"
+
+# The plugin window test runs on the main thread (`harness = false`) with the test seams on.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+soundcraft-macos = { path = ".", features = ["testing"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSResponder", "NSView", "NSWindow"] }
+
+[[test]]
+name = "plugin_window"
+harness = false
 
 # An isolated unsafe helper crate (craftrules never-crash), like soundcraft-au-host: this crate
 # opts out of the workspace `unsafe_code = "forbid"` for itself only. It denies unsafe everywhere

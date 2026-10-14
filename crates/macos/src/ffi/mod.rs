@@ -2,3 +2,4 @@
 //! `// SAFETY:` comment; what leaves this module is a safe API.
 
 pub mod open_documents;
+pub mod plugin_window;

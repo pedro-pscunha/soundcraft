@@ -1,7 +1,8 @@
 //! VST3 editors on the process main thread (`harness = false`: the standard harness never runs
-//! tests there). Opening a real window would flash on screen, so this only checks what the
-//! main thread changes without one: the view probe and the parameter round trip through the
-//! controller. The window itself is exercised manually (see `installed_plugins_smoke`).
+//! tests there). Nothing may reach the screen: the view probe and the parameter round trip need no
+//! window, and on macOS the editor opens in SoundCraft's plugin window without ever being ordered
+//! front (`open_editor_hidden`). The shown window is the same one ordered front (checked by hand in
+//! the app; see `installed_plugins_smoke`).
 
 mod common;
 
@@ -23,8 +24,53 @@ fn main() {
     ed.set_param("7", 1.5);
     ed.set_param("nope", 1.0);
     assert!(ed.idle().is_empty(), "set_param is not reported back as an edit");
+    #[cfg(target_os = "macos")]
+    macos::shared_window(&mut p, ed.as_mut());
     drop(p);
     assert!(!ed.is_open());
     assert!(ed.open().is_err(), "the plugin is gone");
     println!("editor_main_thread: ok");
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2::MainThreadMarker;
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::NSApplication;
+    use soundcraft_dsp::PluginEditor;
+    use soundcraft_vst3_host::Vst3Plugin;
+
+    /// The process's windows: (all, visible, how many are SoundCraft's plugin window).
+    fn windows(mtm: MainThreadMarker) -> (usize, usize, usize) {
+        autoreleasepool(|_| {
+            let all = NSApplication::sharedApplication(mtm).windows();
+            let n = all.count();
+            let visible = (0..n).filter(|&i| all.objectAtIndex(i).isVisible()).count();
+            let plugin = (0..n).filter(|&i| all.objectAtIndex(i).class().name().to_bytes().ends_with(b"SoundCraftPluginWindow")).count();
+            (n, visible, plugin)
+        })
+    }
+
+    /// The view attaches to SoundCraft's plugin window, which idle keeps while hidden and close
+    /// takes down.
+    pub fn shared_window(p: &mut Vst3Plugin, ed: &mut dyn PluginEditor) {
+        let mtm = MainThreadMarker::new().expect("the main thread");
+        let (base, visible, plugin) = windows(mtm);
+        assert_eq!((visible, plugin), (0, 0));
+        for _ in 0..3 {
+            autoreleasepool(|_| p.open_editor_hidden()).expect("open");
+            assert!(ed.is_open());
+            assert_eq!(windows(mtm), (base + 1, 0, 1), "one hidden plugin window");
+            autoreleasepool(|_| p.open_editor_hidden()).expect("again");
+            assert_eq!(windows(mtm), (base + 1, 0, 1), "opening again keeps the window");
+            assert!(ed.idle().is_empty());
+            assert!(ed.is_open(), "idle keeps a hidden editor");
+            autoreleasepool(|_| ed.close());
+            assert!(!ed.is_open());
+            assert_eq!(windows(mtm), (base, 0, 0), "the window is gone");
+        }
+        // Left open: the plugin's drop (in `main`) closes it.
+        autoreleasepool(|_| p.open_editor_hidden()).expect("open");
+        assert_eq!(windows(mtm).2, 1);
+    }
 }

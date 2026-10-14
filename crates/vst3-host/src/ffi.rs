@@ -1671,16 +1671,19 @@ impl EditorLink {
         Ok((w as u32, h as u32))
     }
 
-    /// Opens (or raises) the editor in a host window. Main thread only.
-    pub fn open(&self, title: &str) -> Result<(), String> {
+    /// Opens (or raises) the editor in a host window. With `show` false the window is never
+    /// ordered on screen (tests). Main thread only.
+    pub fn open(&self, title: &str, show: bool) -> Result<(), String> {
         if !window::on_main_thread() {
             return Err("plugin editors must be opened on the main thread".into());
         }
         let platform = window::PLATFORM_TYPE.ok_or_else(|| "VST3 editors are not hosted on this platform yet".to_string())?;
         let mut g = self.lock();
-        if let Some(w) = &g.window {
+        if let Some(w) = g.window.as_mut() {
             if !w.closed_by_user() {
-                w.raise();
+                if show {
+                    w.raise();
+                }
                 return Ok(());
             }
             // The user closed the window: start over.
@@ -1695,7 +1698,7 @@ impl EditorLink {
         // SAFETY: valid view; `r` is writable. On failure the default size stays.
         unsafe { view.getSize(&mut r) };
         let (w, h) = rect_size(&r);
-        let win = window::HostWindow::new(title, w, h)?;
+        let mut win = window::HostWindow::new(title, w, h)?;
         let frame = ComWrapper::new(PlugFrame { window: std::sync::atomic::AtomicPtr::new(win.raw()) });
         if let Some(f) = frame.as_com_ref::<sb::IPlugFrame>() {
             // SAFETY: valid view; the frame outlives the view's attachment (kept in `g.frame`
@@ -1709,7 +1712,9 @@ impl EditorLink {
             win.close();
             return Err("the editor could not attach to its window".into());
         }
-        win.raise();
+        if show {
+            win.raise();
+        }
         g.view = Some(view);
         g.frame = Some(frame);
         g.window = Some(win);
@@ -1841,7 +1846,7 @@ impl EditorLink {
                     std::mem::forget(v);
                     leaked = true;
                 }
-                // `HostWindow` has no destructor: dropping it leaks its retain on purpose.
+                // A `HostWindow` dropped off the main thread leaks its window, never touching it.
                 g.window = None;
                 if let Some(f) = g.frame.take() {
                     std::mem::forget(f);
@@ -1854,13 +1859,16 @@ impl EditorLink {
     }
 }
 
-/// The platform host window for plugin views.
+/// The platform host window for plugin views: SoundCraft's shared plugin editor window
+/// (`soundcraft_macos::plugin_window`), whose content view is the plugin view's parent. It hands
+/// the keys the plugin does not take to SoundCraft's own window.
 #[cfg(target_os = "macos")]
 mod window {
+    use objc2::MainThreadMarker;
     use objc2::rc::Retained;
-    use objc2::{MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSApplication, NSBackingStoreType, NSFloatingWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask};
-    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::NSSize;
+    use soundcraft_macos::plugin_window::{PluginWindow, fit_content};
     use std::ffi::{c_char, c_void};
 
     pub const PLATFORM_TYPE: Option<*const c_char> = Some(vst3::Steinberg::kPlatformTypeNSView);
@@ -1869,95 +1877,51 @@ mod window {
         MainThreadMarker::new().is_some()
     }
 
-    /// An `NSWindow` (titled, closable, floating above the app's windows) whose content view is
-    /// the plugin view's parent. Holds one retain of the window; main thread only.
-    pub struct HostWindow {
-        window: *mut NSWindow,
-    }
-
-    // SAFETY: the pointer is only dereferenced on the main thread (every method checks
-    // `MainThreadMarker`); the struct merely carries the retain between threads' locks.
-    unsafe impl Send for HostWindow {}
+    /// The editor's window; main thread only (a window dropped elsewhere is leaked).
+    pub struct HostWindow(PluginWindow);
 
     impl HostWindow {
-        fn get(&self) -> Option<&NSWindow> {
-            MainThreadMarker::new()?;
-            // SAFETY: we hold a retain of this window (from `new`) until `close`.
-            unsafe { self.window.as_ref() }
-        }
-
         pub fn new(title: &str, w: f64, h: f64) -> Result<HostWindow, String> {
             let mtm = MainThreadMarker::new().ok_or_else(|| "not on the main thread".to_string())?;
-            let _app = NSApplication::sharedApplication(mtm);
-            let rect = NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(w, h));
-            // Plugin editors are transient windows. In particular they must not be
-            // minimizable: minimized NSWindows become persistent thumbnails in the macOS Dock,
-            // which made every editor visited in a session look like another running app.
-            let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
-            // SAFETY: a freshly allocated window on the main thread; valid rect and style.
-            let window = unsafe {
-                NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), rect, style, NSBackingStoreType::Buffered, false)
-            };
-            // SAFETY: we keep our own retain and release it in `close`, so AppKit must not
-            // release the window when the user closes it.
-            unsafe { window.setReleasedWhenClosed(false) };
-            window.setTitle(&NSString::from_str(title));
-            window.setLevel(NSFloatingWindowLevel);
-            window.setHidesOnDeactivate(true);
-            window.setExcludedFromWindowsMenu(true);
-            window.setCollectionBehavior(NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle);
-            window.center();
-            Ok(HostWindow { window: Retained::into_raw(window) })
+            Ok(HostWindow(PluginWindow::new(mtm, title, NSSize::new(w, h))))
         }
 
-        /// The raw window pointer (for the plug frame's resizes).
+        /// The raw window pointer (for the plug frame's resizes); null off the main thread.
         pub fn raw(&self) -> *mut c_void {
-            self.window.cast()
+            MainThreadMarker::new().map_or(std::ptr::null_mut(), |mtm| std::ptr::from_ref(self.0.window(mtm)).cast_mut().cast())
         }
 
         /// The content view (`NSView*`) the plugin view attaches to; null when unavailable.
         pub fn parent(&self) -> *mut c_void {
-            self.get().and_then(|w| w.contentView()).map_or(std::ptr::null_mut(), |v| Retained::as_ptr(&v).cast_mut().cast())
+            MainThreadMarker::new().and_then(|mtm| self.0.content_view(mtm)).map_or(std::ptr::null_mut(), |v| Retained::as_ptr(&v).cast_mut().cast())
         }
 
-        pub fn raise(&self) {
-            if let Some(w) = self.get() {
-                w.makeKeyAndOrderFront(None);
+        pub fn raise(&mut self) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                self.0.show(mtm);
             }
         }
 
-        pub fn is_visible(&self) -> bool {
-            self.get().is_some_and(|w| w.isVisible())
-        }
-
-        /// The user closed the window. It also hides while SoundCraft is in the background
-        /// (`setHidesOnDeactivate`), and comes back when the app does: hidden counts as closed
-        /// only while the app is active. Main thread only (false elsewhere).
+        /// The user closed the window (hidden while SoundCraft is in the background is still
+        /// open). Main thread only (false elsewhere).
         pub fn closed_by_user(&self) -> bool {
-            let Some(mtm) = MainThreadMarker::new() else { return false };
-            !self.is_visible() && NSApplication::sharedApplication(mtm).isActive()
+            MainThreadMarker::new().is_some_and(|mtm| self.0.closed_by_user(mtm))
         }
 
         pub fn close(self) {
-            if let Some(w) = self.get() {
-                w.orderOut(None);
-                w.close();
-            }
-            if MainThreadMarker::new().is_some() {
-                // SAFETY: balances the retain taken in `new`; nothing uses the pointer after this.
-                drop(unsafe { Retained::from_raw(self.window) });
-            }
+            drop(self.0);
         }
     }
 
-    /// Resizes a host window's content (`window` from [`HostWindow::raw`]); main thread only.
+    /// Fits a host window to its view's new size (`window` from [`HostWindow::raw`]), keeping its
+    /// top-left corner; main thread only.
     pub fn resize(window: *mut c_void, w: f64, h: f64) {
         if MainThreadMarker::new().is_none() {
             return;
         }
         // SAFETY: null or a window the editor link keeps retained while the frame is attached.
         if let Some(win) = unsafe { window.cast::<NSWindow>().as_ref() } {
-            win.setContentSize(NSSize::new(w, h));
+            fit_content(win, NSSize::new(w, h));
         }
     }
 }

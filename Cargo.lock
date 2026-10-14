@@ -3594,6 +3594,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "serde",
  "soundcraft-dsp",
+ "soundcraft-macos",
  "thiserror 2.0.21",
 ]
 
@@ -3686,6 +3687,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "soundcraft-macos",
  "thiserror 2.0.21",
 ]
 
@@ -3801,6 +3803,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "serde",
  "soundcraft-dsp",
+ "soundcraft-macos",
+ "soundcraft-vst3-host",
  "thiserror 2.0.21",
  "vst3",
  "windows-sys 0.61.2",
