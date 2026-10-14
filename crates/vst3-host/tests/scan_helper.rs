@@ -19,8 +19,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Short, so the hanging bundle costs little; long enough for a debug build to load the fixture.
+/// Short, so the hanging bundle costs little; long enough for a debug build to load the fixture
+/// once its helper has greeted (starting the helper has the default, generous limit).
 const TIMEOUT: Duration = Duration::from_secs(3);
+/// The longest a test waits for what should happen (a helper reaching a plugin): generous, since a
+/// busy machine can be slow to start a process, and costing nothing when it is not.
+const WAIT: Duration = Duration::from_secs(30);
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -54,7 +58,7 @@ fn main() {
         let dir = bundle.parent().unwrap().to_path_buf();
         let stuck = entered(&bundle, "hang-with-child");
         std::thread::spawn(move || soundcraft_vst3_host::scan_paths_with(&[dir], &slow));
-        std::process::exit(if wait_for(&stuck, Duration::from_secs(10)) { 0 } else { 1 });
+        std::process::exit(if wait_for(&stuck, WAIT) { 0 } else { 1 });
     }
     // A fresh process for `adding_a_folder_first_keeps_the_standard_ones`: its standard folders hold
     // `standard`; `extra` is added before anything has scanned.
@@ -67,7 +71,7 @@ fn main() {
         let (slow, other) = (PathBuf::from(slow), PathBuf::from(other));
         soundcraft_vst3_host::set_scan_helper(Some(helper()));
         let first = std::thread::spawn(soundcraft_vst3_host::scan);
-        assert!(wait_for(&entered(&slow, "hang-entry"), TIMEOUT), "the scan never got stuck");
+        assert!(wait_for(&entered(&slow, "hang-entry"), WAIT), "the scan never got stuck");
         soundcraft_vst3_host::set_scan_helper(Some(ScanHelper { exe: other.join("no-such-helper"), ..helper() }));
         soundcraft_vst3_host::add_search_dir(&other);
         first.join().unwrap();
@@ -86,7 +90,7 @@ fn main() {
         let (slow, late) = (PathBuf::from(slow), PathBuf::from(late));
         soundcraft_vst3_host::set_scan_helper(Some(helper()));
         let first = std::thread::spawn(soundcraft_vst3_host::scan);
-        assert!(wait_for(&entered(&slow, "hang-entry"), TIMEOUT), "the scan never got stuck");
+        assert!(wait_for(&entered(&slow, "hang-entry"), WAIT), "the scan never got stuck");
         let held = soundcraft_vst3_host::add_search_dir(&late);
         first.join().unwrap();
         let found: Vec<PathBuf> = soundcraft_vst3_host::scan().into_iter().map(|d| d.path).collect();
@@ -115,7 +119,7 @@ fn main() {
             // Back at once, as another caller would be (automation, a project load).
             soundcraft_vst3_host::scan();
         });
-        assert!(wait_for(&stuck, TIMEOUT), "the scan never got stuck");
+        assert!(wait_for(&stuck, WAIT), "the scan never got stuck");
         soundcraft_vst3_host::ask_for_rescan();
         first.join().unwrap();
         let ok = launches(&crashy) > crashed && soundcraft_vst3_host::skipped().iter().any(|s| s.path == crashy && !s.from_cache);
@@ -129,7 +133,8 @@ fn main() {
     if let [mode, exe, cache, dir] = args.as_slice()
         && mode == "--rescan-with"
     {
-        let failing = ScanHelper { exe: exe.into(), cache: Some(cache.into()), parallel: 1, ..helper() };
+        // These helpers fail on SoundCraft's side; one never greets, so its startup ends quickly.
+        let failing = ScanHelper { exe: exe.into(), cache: Some(cache.into()), parallel: 1, startup: TIMEOUT, ..helper() };
         soundcraft_vst3_host::set_scan_helper(Some(failing));
         soundcraft_vst3_host::add_search_dir(Path::new(dir));
         let started = Instant::now();
@@ -648,7 +653,7 @@ fn the_registry_answers_while_helpers_scan(dir: &Path) {
     soundcraft_vst3_host::set_scan_helper(Some(helper()));
     let folder = dir.to_path_buf();
     let scanning = std::thread::spawn(move || soundcraft_vst3_host::add_search_dir(&folder));
-    assert!(wait_for(&entered(&busy, "hang-entry"), TIMEOUT), "the scan never got stuck");
+    assert!(wait_for(&entered(&busy, "hang-entry"), WAIT), "the scan never got stuck");
     let asked = Instant::now();
     let _ = (soundcraft_vst3_host::cached(), soundcraft_vst3_host::skipped());
     let waited = asked.elapsed();
@@ -658,7 +663,7 @@ fn the_registry_answers_while_helpers_scan(dir: &Path) {
     let stuck = entered(&busy, "hang-entry");
     std::fs::remove_file(&stuck).unwrap();
     let rescanning = std::thread::spawn(soundcraft_vst3_host::rescan);
-    assert!(wait_for(&stuck, TIMEOUT), "the rescan never got stuck");
+    assert!(wait_for(&stuck, WAIT), "the rescan never got stuck");
     let asked = Instant::now();
     let _ = (soundcraft_vst3_host::cached(), soundcraft_vst3_host::skipped());
     let waited = asked.elapsed();
@@ -679,7 +684,7 @@ fn a_rescan_during_a_scan_wins(dir: &Path) {
     std::fs::write(&hang, b"").unwrap();
     let before = launches(&raced);
     let first = std::thread::spawn(soundcraft_vst3_host::rescan);
-    assert!(wait_for(&entered(&raced, "hang-entry"), TIMEOUT), "the first rescan never got stuck");
+    assert!(wait_for(&entered(&raced, "hang-entry"), WAIT), "the first rescan never got stuck");
     // The first rescan is stuck on the bundle; it is fixed, and a second rescan is asked for.
     std::fs::remove_file(&hang).unwrap();
     soundcraft_vst3_host::rescan();

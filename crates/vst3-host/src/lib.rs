@@ -17,7 +17,8 @@
 //! loaded in a helper process (the app's own executable, run as
 //! `<exe> --soundcraft-scan-vst3 <bundle>` and answering through [`run_scan_helper`]), at most
 //! [`HELPER_PARALLEL`] at a time, which prints the bundle's plugins as one line of JSON. A helper
-//! that takes longer than [`HELPER_TIMEOUT`] is killed; a bundle whose helper times out, crashes
+//! that takes longer than [`HELPER_TIMEOUT`] over the bundle (from its greeting; starting up has
+//! [`HELPER_STARTUP`]) is killed; a bundle whose helper times out, crashes
 //! or fails is logged once with the reason and skipped, and remembered ([`skipped`]) so later scans
 //! in this run do not try it again until [`rescan`] (across runs: the scan cache, below). A plugin
 //! that hangs in its module entry (a PACE/iLok-protected one without its licence service) or
@@ -200,9 +201,14 @@ pub enum Vst3Error {
 /// `<exe> --soundcraft-scan-vst3 <bundle>` (see [`run_scan_helper`]).
 pub const SCAN_HELPER_FLAG: &str = "--soundcraft-scan-vst3";
 
-/// How long a scan helper may take over one bundle before it is killed and the bundle skipped
-/// (the slowest plugins seen, Omnisphere and Keyscape, take a few seconds).
+/// How long a scan helper may take over one bundle, from its greeting, before it is killed and the
+/// bundle skipped (the slowest plugins seen, Omnisphere and Keyscape, take a few seconds).
 pub const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a scan helper may take to start and greet. That is SoundCraft's own time, not the
+/// bundle's, which starts with the greeting: a machine busy enough to slow a process start never
+/// makes a bundle look slow. A helper that never greets fails on SoundCraft's side.
+pub const HELPER_STARTUP: Duration = Duration::from_secs(30);
 
 /// How many scan helpers run at once. A helper stuck in a plugin is idle, so several stuck ones
 /// cost one time limit rather than one each.
@@ -214,8 +220,10 @@ pub struct ScanHelper {
     /// The executable to run as `<exe> --soundcraft-scan-vst3 <bundle>`: a SoundCraft app that
     /// answers through [`run_scan_helper`].
     pub exe: PathBuf,
-    /// How long one bundle may take ([`HELPER_TIMEOUT`]).
+    /// How long one bundle may take, from the helper's greeting ([`HELPER_TIMEOUT`]).
     pub timeout: Duration,
+    /// How long a helper may take to greet ([`HELPER_STARTUP`]).
+    pub startup: Duration,
     /// How many helpers run at once ([`HELPER_PARALLEL`]).
     pub parallel: usize,
     /// The scan cache file (none: every scan starts a helper for every bundle). Bundles whose
@@ -229,7 +237,7 @@ pub struct ScanHelper {
 impl ScanHelper {
     /// Helpers started from `exe`, with the default time limit and parallelism.
     pub fn new(exe: PathBuf) -> ScanHelper {
-        ScanHelper { exe, timeout: HELPER_TIMEOUT, parallel: HELPER_PARALLEL, cache: None }
+        ScanHelper { exe, timeout: HELPER_TIMEOUT, startup: HELPER_STARTUP, parallel: HELPER_PARALLEL, cache: None }
     }
 }
 

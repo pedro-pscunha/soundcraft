@@ -233,17 +233,25 @@ pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Resu
     slots.into_iter().map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner).unwrap_or_else(|| Err(Skip::Host(why.clone())))).collect()
 }
 
-/// Runs one helper on `bundle` and waits for its answer, at most `helper.timeout`.
+/// Runs one helper on `bundle` and waits for its answer: at most `helper.startup` for its greeting,
+/// then at most `helper.timeout`.
 fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, Skip> {
-    let limit = helper.timeout.min(MAX_TIMEOUT);
+    let limits = Limits { startup: helper.startup.min(MAX_TIMEOUT), bundle: helper.timeout.min(MAX_TIMEOUT) };
     let mut running = Running::spawn(helper, bundle)?;
-    let (ended, hello) = running.await_answer(limit);
+    let (ended, hello) = running.await_answer(limits);
     let tail = running.stderr_tail();
     if !tail.trim().is_empty() {
         log::debug!("vst3 scan helper for {}: {}", bundle.display(), tail.trim_end());
     }
     running.release();
-    classify(ended, hello.as_deref(), &tail, bundle, limit, &helper.exe)
+    classify(ended, hello.as_deref(), &tail, bundle, limits, &helper.exe)
+}
+
+/// A helper's time limits: to greet, then over the bundle.
+#[derive(Clone, Copy)]
+struct Limits {
+    startup: Duration,
+    bundle: Duration,
 }
 
 /// How a helper's run ended, before it is judged.
@@ -317,17 +325,23 @@ impl Running {
         })
     }
 
-    /// Waits for the answer, at most `limit`; once it is in, the helper has [`EXIT_GRACE`] to exit
-    /// before it is killed (the answer counts either way). Also returns the protocol the helper
-    /// greeted with, if it did.
-    fn await_answer(&mut self, limit: Duration) -> (Ended, Option<String>) {
-        let mut deadline = Instant::now() + limit;
+    /// Waits for the greeting, at most `limits.startup`, then for the answer, at most
+    /// `limits.bundle`; once it is in, the helper has [`EXIT_GRACE`] to exit before it is killed
+    /// (the answer counts either way). Also returns the protocol the helper greeted with, if it did.
+    fn await_answer(&mut self, limits: Limits) -> (Ended, Option<String>) {
+        let mut deadline = Instant::now() + limits.startup;
         let mut answer: Option<Answer> = None;
         let mut hello: Option<String> = None;
         loop {
             while let Ok(line) = self.lines.try_recv() {
                 match line {
-                    Line::Hello(v) => hello = Some(v),
+                    // The bundle's time starts now (its code runs only after the greeting).
+                    Line::Hello(v) => {
+                        if hello.is_none() && answer.is_none() {
+                            deadline = Instant::now() + limits.bundle;
+                        }
+                        hello = Some(v);
+                    }
                     Line::Answer(a) => {
                         if answer.is_none() {
                             deadline = deadline.min(Instant::now() + EXIT_GRACE);
@@ -424,12 +438,12 @@ impl Running {
 /// The plugins of a helper's run, or why there are none. `hello` is the protocol it greeted with,
 /// `tail` the end of its standard error. A run without this protocol's greeting is SoundCraft's
 /// failure ([`Skip::Host`]): an older or newer SoundCraft, or a program that is no scan helper.
-fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limit: Duration, exe: &Path) -> Result<Vec<Vst3Descriptor>, Skip> {
+fn classify(ended: Ended, hello: Option<&str>, tail: &str, bundle: &Path, limits: Limits, exe: &Path) -> Result<Vec<Vst3Descriptor>, Skip> {
     let why = |what: String| match last_line(tail) {
         Some(l) => format!("{what}; its last output: {l}"),
         None => what,
     };
-    judge(ended, hello, why, bundle, limit, exe).map_err(|skip| match skip {
+    judge(ended, hello, why, bundle, limits, exe).map_err(|skip| match skip {
         Skip::Bundle(r) => Skip::Bundle(clean_reason(&r)),
         Skip::TimedOut(r) => Skip::TimedOut(clean_reason(&r)),
         Skip::Host(r) => Skip::Host(clean_reason(&r)),
@@ -442,13 +456,15 @@ fn judge(
     hello: Option<&str>,
     why: impl Fn(String) -> String,
     bundle: &Path,
-    limit: Duration,
+    limits: Limits,
     exe: &Path,
 ) -> Result<Vec<Vst3Descriptor>, Skip> {
+    let limit = limits.bundle;
     if hello != Some(PROTOCOL) {
         let how = match &ended {
             Ended::Answered(_) => "answered".to_string(),
-            Ended::TimedOut => format!("timed out after {limit:?}"),
+            // A greeting of another protocol started the bundle's time; none, the startup's.
+            Ended::TimedOut => format!("timed out after {:?}", if hello.is_some() { limits.bundle } else { limits.startup }),
             Ended::Exited(st) => format!("exited ({st})"),
             Ended::Lost => "stopped".to_string(),
         };
@@ -707,25 +723,40 @@ mod tests {
         let other_host = Vst3Descriptor { id: "clap:com.x".into(), ..good.clone() };
         let mismatched = Vst3Descriptor { id: "vst3:00000000000000000000000000000000".into(), ..good.clone() };
         let not_hex = Vst3Descriptor { id: "vst3:ZZ".into(), class_id: "ZZ".into(), ..good.clone() };
-        let r = classify(
-            Ended::Answered(Answer::Ok(vec![other_host, good.clone(), mismatched, not_hex])),
-            Some(PROTOCOL),
-            "",
-            bundle,
-            Duration::ZERO,
-            bundle,
-        );
+        let none = Limits { startup: Duration::ZERO, bundle: Duration::ZERO };
+        let r = classify(Ended::Answered(Answer::Ok(vec![other_host, good.clone(), mismatched, not_hex])), Some(PROTOCOL), "", bundle, none, bundle);
         assert_eq!(r, Ok(vec![Vst3Descriptor { path: bundle.to_path_buf(), ..good }]));
         let hostile = format!("bad\n\u{1b}[31mred{}", "x".repeat(8 << 20));
-        let Err(Skip::Bundle(why)) = classify(Ended::Answered(Answer::Error(hostile)), Some(PROTOCOL), "", bundle, Duration::ZERO, bundle) else {
-            panic!()
-        };
+        let Err(Skip::Bundle(why)) = classify(Ended::Answered(Answer::Error(hostile)), Some(PROTOCOL), "", bundle, none, bundle) else { panic!() };
         assert!(why.chars().count() <= MAX_REASON && why.starts_with("bad  [31mred"), "{why:?}");
-        let Err(Skip::TimedOut(why)) = classify(Ended::TimedOut, Some(PROTOCOL), "line one\nlast \u{7}line", bundle, Duration::from_secs(1), bundle)
-        else {
+        let limits = Limits { startup: Duration::from_secs(2), bundle: Duration::from_secs(1) };
+        let Err(Skip::TimedOut(why)) = classify(Ended::TimedOut, Some(PROTOCOL), "line one\nlast \u{7}line", bundle, limits, bundle) else {
             panic!()
         };
         assert_eq!(why, "timed out after 1s; its last output: last  line");
+        // No greeting: the helper's startup ran out, which is SoundCraft's failure, not the bundle's.
+        let Err(Skip::HostStuck(why)) = classify(Ended::TimedOut, None, "", bundle, limits, bundle) else { panic!() };
+        assert!(why.contains("no greeting; it timed out after 2s"), "{why}");
+    }
+
+    /// The bundle's time limit starts with the greeting: a helper slow to start, as on a busy
+    /// machine, gets its whole limit for the bundle all the same.
+    #[cfg(unix)]
+    #[test]
+    fn the_bundles_time_starts_with_the_greeting() {
+        // A "helper" that starts slowly (1 s before its greeting), then takes 1 s over the bundle.
+        let dir = std::env::temp_dir().join(format!("sc-scan-startup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("slow-start");
+        let answer = serde_json::to_string(&Answer::Ok(Vec::new())).unwrap();
+        let script = format!("#!/bin/sh\nsleep 1\necho '{HELLO}{PROTOCOL}'\nsleep 1\necho '{MARKER}{answer}'\n");
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let roomy = ScanHelper { timeout: Duration::from_millis(1500), startup: Duration::from_secs(10), ..ScanHelper::new(exe.clone()) };
+        assert_eq!(scan_one(&roomy, &dir.join("A.vst3")), Ok(Vec::new()), "1.5 s for the bundle, counted from the greeting");
+        let tight = ScanHelper { startup: Duration::from_millis(300), ..roomy };
+        assert!(matches!(scan_one(&tight, &dir.join("A.vst3")), Err(Skip::HostStuck(_))), "no greeting within its startup");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

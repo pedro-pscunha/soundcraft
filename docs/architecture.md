@@ -72,9 +72,10 @@ it answers `<its executable> --soundcraft-scan-vst3 <bundle>` when started as a 
 otherwise registers its own executable (`/proc/self/exe` on Linux) as the helper. `vst3-host` then loads each bundle in a helper of its
 own, eight at a time, and reads back the plugins as one JSON line. A bundle whose helper crashed
 or failed is logged, skipped and not tried again until it changes, SoundCraft is updated, or a
-rescan. A helper still running after 30 s is killed and its bundle skipped too, but tried once
-more on the next run (a slow start or a busy machine can cause a timeout) before it is cached as
-a skip. SoundCraft's own process loads only the bundles of the plugins it creates. Each bundle's
+rescan. A helper still running 30 s after its greeting is killed and its bundle skipped too, but
+tried once more on the next run (a busy machine can cause a timeout) before it is cached as a
+skip. Starting up and greeting is SoundCraft's own time, with a 30 s limit of its own: a helper
+that never greets fails on SoundCraft's side, and its bundle is not skipped. SoundCraft's own process loads only the bundles of the plugins it creates. Each bundle's
 outcome is cached across runs in the settings folder (`soundcraft_engine::settings`, shared by
 both apps: `plugin-cache/vst3.v1.json`, named after the cache format) under a fingerprint of the
 bundle, so later runs start helpers only for new or changed bundles. The file also records the
