@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-05 shrunk: AU editor views and the shared plugin window; G-13: offline renders' 2 s load wait may be short on a cold disk; an Audio Unit whose view outlives it is leaked uninitialized) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (G-05: CLAP editors are missing embedded on macOS and Linux only, as plugin-parity.md and ROADMAP.md say; previously minor: G-05 shrunk, AU editor views and the shared plugin window) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -19,7 +19,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 | G-02 | **Alpha blocker.** No MIDI device input or output | Hardware / MIDI | [hardware-parity.md](hardware-parity.md) | 20–35 |
 | G-03 | **Alpha blocker.** Cannot exchange sessions with Pro Tools (no AAF/OMF, no `.ptx`) | File formats | [file-format-parity.md](file-format-parity.md) | 50–90 |
 | G-04 | Open correctness bugs in features counted as done (~25 issues) | Stability | this file | 25–40 |
-| G-05 | No embedded CLAP GUIs or VST3 editors on Linux | Ecosystem | [plugin-parity.md](plugin-parity.md) | 6–12 |
+| G-05 | No embedded CLAP editors on macOS or Linux, no VST3 editors on Linux | Ecosystem | [plugin-parity.md](plugin-parity.md) | 6–12 |
 | G-06 | (Record-to-disk part: alpha blocker for the tracking row) Sources decoded whole into RAM; recording into RAM | Performance | [hardware-parity.md](hardware-parity.md) | 15–25 |
 | G-07 | Nothing is compared against Pro Tools' output (no fidelity harness) | Features | this file | 20–30 |
 | G-08 | Built-in plugin catalogue thin and unverified | Features | [plugin-parity.md](plugin-parity.md) | 80–120 |
@@ -99,8 +99,8 @@ launch #142; Linux #45, #107.
   run on macOS and Windows, in one shared floating plugin window on macOS (`crates/macos`) that
   passes the keys a plugin does not use back to SoundCraft; a slot click opens the plugin's own
   editor, its parameters stay under Edit Parameters… (`window.plugin`).
-- **Missing:** embedded CLAP GUIs (CLAP plugins open floating windows of their own); VST3 editors on
-  Linux (X11).
+- **Missing:** embedded CLAP editors on macOS and Linux (there CLAP plugins open floating windows
+  of their own; on Windows they are embedded in a SoundCraft window); VST3 editors on Linux (X11).
 - **Estimate:** ≈ 6–12 h (CLAP embedding and the X11 host window).
 
 ### G-06. Memory-bound media
@@ -228,6 +228,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | G-05 wording: embedded CLAP editors are missing on macOS and Linux (on Windows they are in), as in plugin-parity.md and ROADMAP.md |
 | 2026-10-14 | minor | G-05 shrunk: Audio Unit editor views, VST3 editors on Windows, one shared macOS plugin window with key forwarding; left: embedded CLAP GUIs, VST3 on Linux |
 | 2026-10-14 | minor | G-13: the offline renders' 2 s wait for hosted plugins may be short on a cold disk (only instruments and plugins given a state wait) |
 | 2026-10-14 | minor | G-13: an Audio Unit whose view outlives it by 10 s is uninitialized and leaked, not disposed |

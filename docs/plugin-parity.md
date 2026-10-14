@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (a preset loaded in a plugin's own editor is saved whole; previously minor: Audio Units show their own editor, or Apple's generic view) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (the macOS plugin entitlement row says it is in; previously minor: a preset loaded in a plugin's own editor is saved whole) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -48,7 +48,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing |
 | Editors: AU | — | 🟡 the unit's own Cocoa view, else Apple's generic view, in a floating window; edits made in the view reach the session (verified off screen with Apple's units and FabFilter Pro-L 2) | The shown window not yet checked by hand in the app. Views that wait for parameter notices (Apple's, the generic one) do not follow automation playback: the mixer sets values without notifying |
 | Multiple editor pages | ✅ | 🟡 | #6 |
-| macOS hardened-runtime entitlement for third-party code | ✅ | ❌ | #153, #149 — signed builds refuse third-party VST3 |
+| macOS hardened-runtime entitlement for third-party code | ✅ | ✅ | #153, #149: the signed app and CLI carry `disable-library-validation` and `allow-unsigned-executable-memory` (`packaging/macos/entitlements.plist`), so they load plugins signed by other developers |
 | Sidechain / key input | ✅ | ❌ | All three hosts |
 | ARA 2 (pitch/time editors in the timeline) | ✅ | ❌ | Menu leaves Track/Clip/Window ▸ ARA still missing |
 | Crash isolation | in-process (DSP on HDX) | in-process | Out-of-process hosting would beat Pro Tools |
@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | The macOS hardened-runtime entitlement row: in since 2026-10-13 (#153), as gaps.md G-05 already said |
 | 2026-10-14 | minor | Hosting: a preset loaded in a plugin's own editor is no longer half reverted at load (saves store the values the plugin set by itself over the session's overrides) |
 | 2026-10-13 | minor | Editors: Audio Units show their own Cocoa view, or Apple's generic view, with edits reported to the session |
 | 2026-10-13 | minor | Hosting: offline renders put VST3, CLAP and AU plugins in their offline mode |
