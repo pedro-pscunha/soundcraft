@@ -124,19 +124,28 @@ fn factory_settings_drop_a_hosted_plugins_overrides_and_state() {
 }
 
 /// Sample players load their samples on threads of their own after their state arrives, so an
-/// offline render that made hosted instances waits before its first block, and one without them
-/// does not.
+/// offline render that made a hosted instrument, or a hosted plugin from a stored state, waits
+/// before its first block. One without them, or with only a stateless hosted effect (nothing to
+/// load), does not.
 #[test]
 fn offline_renders_wait_for_hosted_plugins_to_load() {
     install_fixture();
     let mut e = Engine::default();
     let t = dc_track(&mut e, 82);
     let range = Range::new(0, 4800);
-    assert_eq!(soundcraft_mix::RangeRender::new(e.session(), None, range, 512).loading(), None);
-
+    let loading = |e: &Engine| soundcraft_mix::RangeRender::new(e.session(), None, range, 512).loading();
+    assert_eq!(loading(&e), None);
     e.execute("mix.insert", &json!({"track": t.0, "slot": 0, "plugin": GAIN})).unwrap();
+    assert_eq!(loading(&e), None, "a stateless hosted effect has nothing to load");
+    let inst = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+    e.execute("mix.instrument", &json!({"track": inst.0, "plugin": SYNTH})).unwrap();
+    assert!(loading(&e).is_some(), "a hosted instrument may load its sounds");
+    e.execute("track.delete", &json!({"tracks": [inst.0]})).unwrap();
+    assert_eq!(loading(&e), None);
+
+    e.execute("mix.insert_state", &json!({"track": t.0, "slot": 0, "state": soundcraft_model::b64::encode(b"settings")})).unwrap();
     let mut r = soundcraft_mix::RangeRender::new(e.session(), None, range, 512);
-    let left = r.loading().expect("waits for the hosted insert");
+    let left = r.loading().expect("waits for the hosted insert given a state");
     assert!(left <= soundcraft_mix::HOSTED_LOAD_WAIT && left > soundcraft_mix::HOSTED_LOAD_WAIT / 2, "{left:?}");
     let started = std::time::Instant::now();
     assert!(r.next_block(e.session()).is_some());

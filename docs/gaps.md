@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: an Audio Unit whose view outlives it is leaked uninitialized; previously minor: a VST3 instrument with no stored state can stay silent) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (G-13: offline renders' 2 s load wait may be short on a cold disk; an Audio Unit whose view outlives it is leaked uninitialized; previously minor: a VST3 instrument with no stored state can stay silent) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -164,6 +164,11 @@ Known risks, unmeasured:
   engine only in `setState`, so a fresh insert plays silence until a patch is picked in its editor
   or a state is stored (`mix.insert_state`). Pedalboard (JUCE) makes it sound at once; which call
   makes the difference is not known.
+- Offline renders (Bounce Mix, exports) wait 2 s (`HOSTED_LOAD_WAIT`) before their first block
+  when they made a hosted instrument or a hosted plugin from a stored state, since sample players
+  load on threads of their own and report nothing. Keyscape needed 0.1–0.2 s with its samples in
+  the disk cache; a large patch read from a cold disk may need more, and the first notes of such a
+  bounce can still come out silent.
 - An Audio Unit whose view is still alive 10 s after the plugin was removed (a view that never
   deallocates, typically held by a timer of its own) is uninitialized and leaked, never disposed:
   disposing under a live view is a use-after-free. Its uninitialized unit stays in memory until
@@ -219,6 +224,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | G-13: the offline renders' 2 s wait for hosted plugins may be short on a cold disk (only instruments and plugins given a state wait) |
 | 2026-10-14 | minor | G-13: an Audio Unit whose view outlives it by 10 s is uninitialized and leaked, not disposed |
 | 2026-10-13 | minor | G-05 shrunk: plugin entitlements in the signed macOS build. G-13: bounce stalls and old sessions' hosted-plugin defaults noted as risks |
 | 2026-10-13 | minor | G-13: a VST3 instrument with no stored state can stay silent (Keyscape) |
