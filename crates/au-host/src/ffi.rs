@@ -483,22 +483,49 @@ unsafe fn cocoa_ui(unit: AudioUnit) -> Option<(CFTypeRef, CFTypeRef)> {
 /// Parameter edits made in a unit's view: the latest value of each parameter not yet taken.
 /// The editor's parameter listener writes them on whichever thread the view sets a value (lock-
 /// and allocation-free); the editor takes them on the main thread.
+///
+/// A view that loads a preset sends one "any parameter" notice, which AudioToolbox hands the
+/// listener as one call per parameter it listens to, each with the parameter's current value: the
+/// unchanged ones too. So the editor reports only values that differ from what the host last knew
+/// of each parameter (`known`).
 pub struct Edits {
     /// `(AudioUnitParameterID, index)`, sorted by id.
     index: Vec<(u32, usize)>,
     /// By index: `PENDING` plus the value's bits, or 0 once taken.
     slots: Vec<AtomicU64>,
     any: AtomicBool,
+    /// By index: the bits of the last value the host knows the unit has (one it set, showed in
+    /// the view, read after a state load, or reported as an edit).
+    known: Vec<AtomicU32>,
 }
 
 const PENDING: u64 = 1 << 32;
 
 impl Edits {
-    /// Edits of the parameters `ids`, reported by their index in `ids`.
-    pub fn new(ids: &[u32]) -> Edits {
+    /// Edits of the parameters `ids`, reported by their index in `ids`; `values` are what the host
+    /// knows of them now (by index).
+    pub fn new(ids: &[u32], values: &[f32]) -> Edits {
         let mut index: Vec<(u32, usize)> = ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         index.sort_unstable();
-        Edits { index, slots: ids.iter().map(|_| AtomicU64::new(0)).collect(), any: AtomicBool::new(false) }
+        Edits {
+            index,
+            slots: ids.iter().map(|_| AtomicU64::new(0)).collect(),
+            any: AtomicBool::new(false),
+            known: (0..ids.len()).map(|i| AtomicU32::new(values.get(i).copied().unwrap_or(f32::NAN).to_bits())).collect(),
+        }
+    }
+
+    /// Notes that parameter `i` has `value` as far as the host knows (lock-free: the audio thread
+    /// calls it too).
+    pub fn know(&self, i: usize, value: f32) {
+        if let Some(k) = self.known.get(i) {
+            k.store(value.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// The value the host last knew parameter `i` has.
+    pub fn known(&self, i: usize) -> Option<f32> {
+        self.known.get(i).map(|k| f32::from_bits(k.load(Ordering::Relaxed)))
     }
 
     fn record(&self, id: u32, value: f32) {
@@ -1018,6 +1045,15 @@ impl Instance {
     pub fn set_param(&self, id: u32, value: f32) -> bool {
         // SAFETY: the unit is live; the call only takes plain values.
         unsafe { AudioUnitSetParameter(self.unit, id, SCOPE_GLOBAL, 0, value, 0) == 0 }
+    }
+
+    /// Tells the unit's parameter listeners that any parameter may have changed, as a view does
+    /// after it loads a preset.
+    #[cfg(test)]
+    pub fn notify_any(&self) {
+        let any = AudioUnitParameter { unit: self.unit, id: ANY_PARAMETER, scope: SCOPE_GLOBAL, element: 0 };
+        // SAFETY: the unit is live; `any` is a local; no sending listener or object.
+        unsafe { AUParameterListenerNotify(ptr::null_mut(), ptr::null_mut(), &any) };
     }
 
     /// Sets a value the way the unit's view does when the user turns a control: `AUParameterSet`,

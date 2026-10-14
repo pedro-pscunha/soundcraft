@@ -47,9 +47,9 @@ pub struct AuPlugin {
 impl AuPlugin {
     pub(crate) fn new(inst: Instance, info: &'static PluginInfo, has_input: bool, takes_midi: bool) -> AuPlugin {
         let ids: Vec<u32> = info.params.iter().map(|p| p.id.parse::<u32>().unwrap_or(u32::MAX)).collect();
-        let values = info.params.iter().zip(&ids).map(|(p, &id)| inst.get_param(id).map_or(p.default, |v| p.clamp(v))).collect();
+        let values: Vec<f32> = info.params.iter().zip(&ids).map(|(p, &id)| inst.get_param(id).map_or(p.default, |v| p.clamp(v))).collect();
         AuPlugin {
-            edits: Arc::new(Edits::new(&ids)),
+            edits: Arc::new(Edits::new(&ids, &values)),
             inst,
             info,
             ids,
@@ -87,9 +87,10 @@ impl AuPlugin {
 
     /// Re-reads every parameter value from the unit (after a state load).
     fn refresh_values(&mut self) {
-        for ((slot, p), &id) in self.values.iter_mut().zip(self.info.params).zip(&self.ids) {
+        for (i, ((slot, p), &id)) in self.values.iter_mut().zip(self.info.params).zip(&self.ids).enumerate() {
             if let Some(v) = self.inst.get_param(id) {
                 *slot = p.clamp(v);
+                self.edits.know(i, *slot);
             }
         }
     }
@@ -155,6 +156,7 @@ impl Plugin for AuPlugin {
         if let Some(slot) = self.values.get_mut(i) {
             *slot = v;
         }
+        self.edits.know(i, v);
         self.inst.set_param(aid, v);
         true
     }
@@ -340,15 +342,28 @@ impl PluginEditor for AuEditor {
         self.link.editor_open()
     }
 
+    /// The view's edits since the last call, leaving out values the host already knows: a preset
+    /// loaded in the view notifies every parameter, the unchanged ones too (see `Edits`).
     fn idle(&mut self) -> Vec<(String, f32)> {
         self.link.editor_idle();
-        self.edits.take().into_iter().filter_map(|(i, v)| self.info.params.get(i).map(|p| (p.id.to_string(), p.clamp(v)))).collect()
+        let mut out = Vec::new();
+        for (i, v) in self.edits.take() {
+            let Some(p) = self.info.params.get(i) else { continue };
+            let v = p.clamp(v);
+            if self.edits.known(i) != Some(v) {
+                self.edits.know(i, v);
+                out.push((p.id.to_string(), v));
+            }
+        }
+        out
     }
 
     fn set_param(&mut self, id: &str, value: f32) {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return };
         if let (Some(p), Some(&aid)) = (self.info.params.get(i), self.ids.get(i)) {
-            self.link.show_param(aid, p.clamp(value));
+            let v = p.clamp(value);
+            self.edits.know(i, v);
+            self.link.show_param(aid, v);
         }
     }
 }
@@ -414,6 +429,43 @@ mod tests {
         assert!(ed.idle().is_empty());
         ed.set_param(mix.id, 50.0);
         assert!(!ed.is_open());
+    }
+
+    /// A view that loads a preset changes the unit's values without a notice per parameter and
+    /// then tells listeners that any parameter may have changed, which reaches the editor's
+    /// listener as a call for every parameter with its current value. The editor's idle reports
+    /// only the values that differ from what the host knows: here the delay time the "preset"
+    /// changed, not the dry/wet mix the host set itself nor the untouched rest. AUDelay ships with
+    /// macOS; skipped where missing.
+    #[test]
+    fn a_preset_loaded_in_the_view_reaches_the_editor() {
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let mut ed = p.editor().expect("every unit has an editor");
+        let (Some(mix), Some(time)) = (p.info.params.first(), p.info.params.get(1)) else { panic!("AUDelay has parameters") };
+        let (Some(&mix_id), Some(&time_id)) = (p.ids.first(), p.ids.get(1)) else { panic!("ids") };
+        p.inst.link().listen(&p.ids, &p.edits);
+        assert!(p.set_param(mix.id, 30.0), "the host's own value");
+        ed.set_param(mix.id, 35.0);
+        // The "preset": values changed behind every listener's back, then one notice.
+        assert!(p.inst.set_param(time_id, 1.5));
+        assert!(ed.idle().is_empty(), "no notice yet");
+        p.inst.notify_any();
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            got = ed.idle();
+            if !got.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(got, vec![(time.id.to_string(), 1.5)], "only what the preset changed");
+        assert_eq!(p.inst.get_param(mix_id), Some(35.0));
+        assert!(ed.idle().is_empty(), "reported once");
+        // The host's own changes are known: a notice after them reports nothing.
+        assert!(p.set_param(time.id, 0.5));
+        p.inst.notify_any();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(ed.idle().is_empty());
     }
 
     /// The mode reaches a unit that has one (AURoundTripAAC reports its `OfflineRender`

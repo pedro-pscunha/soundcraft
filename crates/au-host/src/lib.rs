@@ -50,10 +50,16 @@
 //! `AUParameterSet`, which tells parameter listeners, and the editor listens to every hosted
 //! parameter while it is open. The host's own changes are not reported back: its `set_param`
 //! (`AudioUnitSetParameter`) tells no listener, and [`PluginEditor::set_param`] and state loads
-//! name the editor's listener as their sender. Whatever a view changes without telling listeners
-//! (a preset it loads, settings that are no parameters) is in the unit's `ClassInfo`, which the
-//! app reads from each live instance before it saves, so it is kept either way. An instrument's
-//! edits reach the session that way only: the app keeps no parameter edits for instruments.
+//! name the editor's listener as their sender. A view that loads a preset tells listeners that
+//! any parameter may have changed, which reaches the editor's listener as one call per parameter
+//! with its current value, the unchanged ones too: [`PluginEditor::idle`] reports only values that
+//! differ from the last the host knew of each parameter (set, shown, read after a state load or
+//! reported), so the session gets what the preset changed and nothing else. What a view changes
+//! without telling listeners at all, and settings that are no parameters, are only in the unit's
+//! `ClassInfo`, which the app reads from each live instance before it saves; a parameter value the
+//! session already holds for such a parameter is not refreshed from it, and is applied over the
+//! saved state when the session loads. An instrument's edits reach the session through its state
+//! only: the app keeps no parameter edits for instruments.
 //!
 //! Not hosted yet: sidechain/extra buses, and parameters outside the global scope.
 //!
