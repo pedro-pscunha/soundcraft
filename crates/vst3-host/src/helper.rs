@@ -169,71 +169,110 @@ pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Resu
 
 /// Runs one helper on `bundle` and waits for its answer, at most `helper.timeout`.
 fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, Skip> {
-    let mut cmd = Command::new(&helper.exe);
-    cmd.arg(SCAN_HELPER_FLAG)
-        .arg(bundle)
-        .env(HOST_ENV, std::process::id().to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        /// No console window for a console-subsystem helper.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut child = cmd.spawn().map_err(|e| Skip::Host(format!("cannot start the scan helper {}: {e}", helper.exe.display())))?;
-    let err_tail = drain_stderr(&mut child);
-    let Some(answers) = read_answers(&mut child) else {
-        end(&mut child);
-        return Err(Skip::Host("cannot read the scan helper's output".into()));
-    };
-    let mut deadline = Instant::now() + helper.timeout.min(MAX_TIMEOUT);
-    let mut answer: Option<String> = None;
-    let mut timed_out = false;
-    let status = loop {
-        if answer.is_none()
-            && let Ok(a) = answers.try_recv()
-        {
-            answer = Some(a);
-            deadline = deadline.min(Instant::now() + EXIT_GRACE);
-        }
-        match child.try_wait() {
-            Ok(Some(st)) => break Some(st),
-            Ok(None) => {}
-            Err(_) => {
-                end(&mut child);
-                break None;
-            }
-        }
-        if Instant::now() >= deadline {
-            timed_out = answer.is_none();
-            end(&mut child);
-            break None;
-        }
-        std::thread::sleep(POLL);
-    };
-    // A helper that has just exited may still have its answer in the pipe (the reader stops
-    // waiting at the end of the output).
-    if answer.is_none() && !timed_out {
-        answer = answers.recv_timeout(EXIT_GRACE).ok();
-    }
-    let tail = String::from_utf8_lossy(&err_tail.lock().unwrap_or_else(PoisonError::into_inner)).into_owned();
+    let limit = helper.timeout.min(MAX_TIMEOUT);
+    let mut running = Running::spawn(helper, bundle)?;
+    let ended = running.await_answer(limit);
+    let tail = running.stderr_tail();
     if !tail.trim().is_empty() {
         log::debug!("vst3 scan helper for {}: {}", bundle.display(), tail.trim_end());
     }
-    let why = |what: String| match last_line(&tail) {
+    classify(ended, &tail, bundle, limit)
+}
+
+/// How a helper's run ended, before it is judged.
+#[derive(Debug)]
+enum Ended {
+    /// It printed an answer (the text after [`MARKER`]), whatever happened next.
+    Answered(String),
+    /// It exited without an answer.
+    Exited(ExitStatus),
+    /// It ran past its time limit without an answer, and was killed.
+    TimedOut,
+    /// Its state could not be read; it was killed.
+    Lost,
+}
+
+/// A helper process and the threads reading its output.
+struct Running {
+    child: Child,
+    answers: mpsc::Receiver<String>,
+    err_tail: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Running {
+    fn spawn(helper: &ScanHelper, bundle: &Path) -> Result<Running, Skip> {
+        let mut cmd = Command::new(&helper.exe);
+        cmd.arg(SCAN_HELPER_FLAG)
+            .arg(bundle)
+            .env(HOST_ENV, std::process::id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            /// No console window for a console-subsystem helper.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| Skip::Host(format!("cannot start the scan helper {}: {e}", helper.exe.display())))?;
+        let err_tail = drain_stderr(&mut child);
+        let Some(answers) = read_answers(&mut child) else {
+            end(&mut child);
+            return Err(Skip::Host("cannot read the scan helper's output".into()));
+        };
+        Ok(Running { child, answers, err_tail })
+    }
+
+    /// Waits for the answer, at most `limit`; once it is in, the helper has [`EXIT_GRACE`] to exit
+    /// before it is killed (the answer counts either way).
+    fn await_answer(&mut self, limit: Duration) -> Ended {
+        let mut deadline = Instant::now() + limit;
+        let mut answer: Option<String> = None;
+        loop {
+            if answer.is_none()
+                && let Ok(a) = self.answers.try_recv()
+            {
+                answer = Some(a);
+                deadline = deadline.min(Instant::now() + EXIT_GRACE);
+            }
+            match self.child.try_wait() {
+                // A helper that has just exited may still have its answer in the pipe (the reader
+                // stops waiting at the end of the output).
+                Ok(Some(st)) => return answer.or_else(|| self.answers.recv_timeout(EXIT_GRACE).ok()).map_or(Ended::Exited(st), Ended::Answered),
+                Ok(None) => {}
+                Err(_) => {
+                    end(&mut self.child);
+                    return answer.map_or(Ended::Lost, Ended::Answered);
+                }
+            }
+            if Instant::now() >= deadline {
+                end(&mut self.child);
+                // An answer that came in since the look above still counts.
+                return answer.or_else(|| self.answers.recv_timeout(EXIT_GRACE).ok()).map_or(Ended::TimedOut, Ended::Answered);
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    fn stderr_tail(&self) -> String {
+        String::from_utf8_lossy(&self.err_tail.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
+    }
+}
+
+/// The plugins of a helper's run, or why there are none. `tail` is the end of its standard error.
+fn classify(ended: Ended, tail: &str, bundle: &Path, limit: Duration) -> Result<Vec<Vst3Descriptor>, Skip> {
+    let why = |what: String| match last_line(tail) {
         Some(l) => format!("{what}; its last output: {l}"),
         None => what,
     };
-    match (answer, status) {
-        (Some(a), _) => {
+    match ended {
+        Ended::Answered(a) => {
             parse_answer(&a).map(|ds| ds.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()).map_err(Skip::Bundle)
         }
-        (None, _) if timed_out => Err(Skip::Bundle(why(format!("timed out after {:?}", helper.timeout)))),
-        (None, Some(st)) => Err(Skip::Bundle(why(ended(st)))),
-        (None, None) => Err(Skip::Host(why("the scan helper stopped without an answer".into()))),
+        Ended::TimedOut => Err(Skip::Bundle(why(format!("timed out after {limit:?}")))),
+        Ended::Exited(st) => Err(Skip::Bundle(why(ended_reason(st)))),
+        Ended::Lost => Err(Skip::Host(why("the scan helper stopped without an answer".into()))),
     }
 }
 
@@ -247,7 +286,7 @@ fn parse_answer(json: &str) -> Result<Vec<Vst3Descriptor>, String> {
 }
 
 /// How a helper that never answered ended.
-fn ended(st: ExitStatus) -> String {
+fn ended_reason(st: ExitStatus) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;

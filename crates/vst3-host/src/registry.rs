@@ -68,23 +68,34 @@ fn merge(out: &mut Vec<Vst3Descriptor>, found: Vec<Vst3Descriptor>) {
     }
 }
 
-/// Scans `dirs`, sorted by name. In this process without a helper: unloadable files are logged and
-/// skipped. With one: bundles in `skipped` are left out, and a bundle its helper cannot scan is
-/// logged and added to `skipped`. With a scan cache too, unchanged bundles come from the cache
-/// unless `fresh` (a rescan), and what the helpers find is written back to it.
+/// Scans `dirs`, sorted by name: in helpers when there is one, else in this process.
 fn scan_dirs(dirs: &[PathBuf], helper: Option<&ScanHelper>, skipped: &mut Vec<SkippedBundle>, fresh: bool) -> Vec<Vst3Descriptor> {
     let bundles = paths::find_bundles(dirs);
-    let mut out: Vec<Vst3Descriptor> = Vec::new();
-    let Some(h) = helper else {
-        for path in bundles {
-            match load_bundle(&path) {
-                Ok(ds) => merge(&mut out, ds),
-                Err(e) => log::warn!("{e}"),
-            }
-        }
-        out.sort_by_key(|d| d.name.to_lowercase());
-        return out;
+    let mut out = match helper {
+        Some(h) => scan_in_helpers(bundles, h, skipped, fresh),
+        None => scan_in_process(bundles),
     };
+    out.sort_by_key(|d| d.name.to_lowercase());
+    out
+}
+
+/// Loads every bundle here; unloadable ones are logged and left out.
+fn scan_in_process(bundles: Vec<PathBuf>) -> Vec<Vst3Descriptor> {
+    let mut out = Vec::new();
+    for path in bundles {
+        match load_bundle(&path) {
+            Ok(ds) => merge(&mut out, ds),
+            Err(e) => log::warn!("{e}"),
+        }
+    }
+    out
+}
+
+/// Scans bundles in helpers. Bundles in `skipped` are left out, and a bundle its helper cannot scan
+/// is logged and added to `skipped`. With a scan cache, unchanged bundles come from the cache unless
+/// `fresh` (a rescan), and what the helpers find is written back to it.
+fn scan_in_helpers(bundles: Vec<PathBuf>, h: &ScanHelper, skipped: &mut Vec<SkippedBundle>, fresh: bool) -> Vec<Vst3Descriptor> {
+    let mut out = Vec::new();
     let bundles: Vec<PathBuf> = bundles.into_iter().filter(|p| !skipped.iter().any(|s| &s.path == p)).collect();
     let mut cache = h.cache.as_deref().map(ScanCache::load);
     let prints: Vec<Option<Fingerprint>> = bundles.iter().map(|p| cache.as_ref().and_then(|_| cache::fingerprint(p))).collect();
@@ -140,7 +151,6 @@ fn scan_dirs(dirs: &[PathBuf], helper: Option<&ScanHelper>, skipped: &mut Vec<Sk
         c.drop_gone();
         c.save();
     }
-    out.sort_by_key(|d| d.name.to_lowercase());
     out
 }
 

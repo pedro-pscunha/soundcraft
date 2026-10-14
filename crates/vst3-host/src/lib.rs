@@ -245,9 +245,6 @@ mod api {
     pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
         registry::scan_paths_with(dirs, helper)
     }
-    pub fn scan_bundle_for_helper(path: &Path) -> (String, bool) {
-        helper::answer(path)
-    }
     pub fn run_scan_helper(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
         helper::run(args)
     }
@@ -288,9 +285,6 @@ mod api {
     }
     pub fn scan_paths_with(_dirs: &[PathBuf], _helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
         (Vec::new(), Vec::new())
-    }
-    pub fn scan_bundle_for_helper(_path: &Path) -> (String, bool) {
-        (String::new(), false)
     }
     pub fn run_scan_helper(_args: impl IntoIterator<Item = OsString>) -> Option<i32> {
         None
@@ -390,12 +384,6 @@ pub fn skipped() -> Vec<SkippedBundle> {
 /// bundles skipped.
 pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
     api::scan_paths_with(dirs, helper)
-}
-
-/// What a scan helper prints for one bundle (loaded in this process): one line, and whether the
-/// bundle loaded. [`run_scan_helper`] prints it.
-pub fn scan_bundle_for_helper(path: &Path) -> (String, bool) {
-    api::scan_bundle_for_helper(path)
 }
 
 /// Answers a scan request when `args` (the process arguments after the executable) are

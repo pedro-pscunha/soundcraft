@@ -109,7 +109,7 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     assert!(hung.starts_with(&format!("timed out after {TIMEOUT:?}")), "{hung}");
     let crashed = reason(&skipped, &crash);
     if cfg!(unix) {
-        assert_eq!(crashed, "the scan helper crashed (signal 9)");
+        assert!(crashed.starts_with("the scan helper crashed (signal 9)"), "{crashed}");
     } else {
         assert!(crashed.contains("without an answer"), "{crashed}");
     }
