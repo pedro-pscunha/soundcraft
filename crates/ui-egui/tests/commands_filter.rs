@@ -36,3 +36,14 @@ fn absent_or_empty_filter_lists_every_ui_command() {
         assert!(ids.contains(&"track.new"));
     }
 }
+
+#[test]
+fn window_plugin_lists_its_parameters() {
+    let rows = commands(json!({"filter": "window.plugin"}));
+    assert_eq!(ids(&rows), ["window.plugin"]);
+    let params = rows[0]["params"].as_str().unwrap();
+    for key in ["track", "slot", "view", "value", "instrument", "parameters"] {
+        assert!(params.contains(key), "{key} in {params}");
+    }
+    assert_eq!(commands(json!({"filter": "window.search"}))[0]["params"], "{}");
+}
