@@ -254,6 +254,10 @@ pub struct SoundApp {
     /// When the recent sessions were last checked for existence, which list, and the result.
     recent_checked: Option<(f64, Vec<String>, Vec<bool>)>,
     pub player: Option<Player>,
+    /// Makes the player each time SoundCraft reopens the audio devices (Setup › Playback Engine,
+    /// `ui.audio_device`, Reconnect): `Player::with_config`, which opens them. Tests put a player
+    /// that opens none here (`Player::without_device`, the playback crate's `test-util`).
+    pub open_player: fn(std::sync::Arc<soundcraft_model::Session>, &soundcraft_playback::AudioConfig) -> Player,
     /// Input capture, opened on first record.
     pub recorder: Option<soundcraft_playback::record::Recorder>,
     record_start: Samples,
@@ -354,6 +358,7 @@ impl SoundApp {
             recent_checked: None,
             engine,
             player,
+            open_player: Player::with_config,
             recorder: None,
             record_start: 0,
             punch: None,
@@ -822,7 +827,7 @@ impl SoundApp {
         // The input reopens on the next record or monitor with the new choice.
         self.recorder = None;
         self.recorder_failed = false;
-        let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
+        let player = (self.open_player)(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
         Ok(())
@@ -917,7 +922,7 @@ impl SoundApp {
         }
         self.recorder = None;
         self.recorder_failed = false;
-        self.player = Some(Player::with_config(self.engine.session_arc(), &self.ui.audio));
+        self.player = Some((self.open_player)(self.engine.session_arc(), &self.ui.audio));
     }
 
     fn finish_recording(&mut self) {
