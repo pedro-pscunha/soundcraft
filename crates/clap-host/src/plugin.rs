@@ -95,6 +95,13 @@ impl ClapPlugin {
         self.queue.retain(|e| !matches!(e, Event::Param { .. }));
     }
 
+    /// Whether the plugin asked for `on_main_thread` and has not had the call yet. For tests (the
+    /// `testing` feature).
+    #[cfg(feature = "testing")]
+    pub fn callback_requested(&self) -> bool {
+        self.inst.callback_requested()
+    }
+
     /// Loads `data` the way a plugin loads a preset in its own browser: its values change without
     /// the host being told per parameter. For tests (the `testing` feature).
     #[cfg(feature = "testing")]
@@ -376,6 +383,13 @@ struct ClapStateReader {
 impl PluginStateReader for ClapStateReader {
     fn save_state(&mut self) -> Option<Vec<u8>> {
         self.link.save_state()
+    }
+
+    /// Makes a requested `on_main_thread` call every UI frame. An open editor's `idle` makes it
+    /// too, but a plugin with no editor, or one never opened, asks for it from the audio thread as
+    /// well, and nothing else would answer until the next save.
+    fn idle(&mut self) {
+        self.link.service_callback();
     }
 
     /// The plugin's values (`get_value`) next to the ones it is known to have been handed, which

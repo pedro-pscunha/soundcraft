@@ -39,6 +39,7 @@ fn main() {
     assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 1.5, host: 1.5 })]);
     ed.close();
     assert!(!ed.is_open());
+    reader_idle_answers_callbacks();
     // Through the Plugin trait as well.
     p.open_editor().expect("open via the trait");
     assert!(ed.is_open(), "the handle sees the same editor");
@@ -52,6 +53,21 @@ fn main() {
     assert!(ed.open().is_err());
     assert!(ed.idle().is_empty());
     ed.close();
+    /// The state reader's `idle` (every UI frame) makes a requested `on_main_thread` call: for a
+    /// plugin with no editor, or with one that is not idled, nothing else would make it until a save.
+    fn reader_idle_answers_callbacks() {
+        let mut p = soundcraft_clap_host::instantiate_plugin(GAIN).expect("fixture");
+        p.prepare(48_000.0, 64, 2);
+        // The fixture asks for the call while its GUI exists, from the block that changed the gain.
+        p.editor().expect("editor handle").open().expect("open on the main thread");
+        let mut reader = p.state_reader().expect("the gain fixture has clap.state");
+        assert!(p.set_param("7", 1.5));
+        p.process(&mut vec![vec![1.0f32; 64]; 2], 64);
+        assert!(p.callback_requested(), "the block asked for on_main_thread");
+        reader.idle();
+        assert!(!p.callback_requested(), "the reader's idle made the call");
+    }
+
     #[cfg(target_os = "macos")]
     macos::dropped_elsewhere();
     println!("editor_main_thread: ok");

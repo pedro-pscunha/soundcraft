@@ -1295,6 +1295,12 @@ impl Instance {
         unsafe { load(self.plugin, &stream) }
     }
 
+    /// Whether the plugin asked for `on_main_thread` and has not had the call yet (`testing`).
+    #[cfg(feature = "testing")]
+    pub fn callback_requested(&self) -> bool {
+        self.state.callback.load(Ordering::Relaxed)
+    }
+
     /// Runs `on_main_thread` if the plugin asked for a callback.
     pub fn service_callback(&mut self) {
         if self.state.callback.swap(false, Ordering::Relaxed)

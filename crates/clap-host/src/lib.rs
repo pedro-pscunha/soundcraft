@@ -31,7 +31,10 @@
 //! a message to a message-only window of SoundCraft's). Values the host sets reach the plugin as
 //! events of the next block; the state reader takes a value as the plugin's from then on, and reads
 //! the plugin's own values (`get_value`) after running a pending `on_main_thread`, so a value not
-//! handed over yet is not taken for one the plugin set by itself.
+//! handed over yet is not taken for one the plugin set by itself. A requested `on_main_thread` is
+//! made every UI frame by the editor's `idle` and the state reader's `idle` (`Player::idle`), so a
+//! plugin with no editor open gets it too; one with neither `clap.gui` nor `clap.state` gets it
+//! only when it is prepared.
 //!
 //! Offline renders ([`Plugin::set_render_mode`]) reach plugins with `clap.render` as
 //! `CLAP_RENDER_OFFLINE`, set while deactivated in the next `prepare`. A plugin with a hard
