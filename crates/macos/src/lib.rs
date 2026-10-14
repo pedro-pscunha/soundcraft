@@ -6,6 +6,8 @@
 //!   the app.
 //! - `plugin_window` (macOS only): the window hosted plugin editors live in, shared by the VST3
 //!   and Audio Unit hosts; it hands the keys a plugin does not take to SoundCraft's own window.
+//!   Also `plugin_window::on_main_queue`, which the VST3 and CLAP hosts use to
+//!   tear down an editor whose instance was dropped on another thread.
 //!
 //! # Safety
 //!
