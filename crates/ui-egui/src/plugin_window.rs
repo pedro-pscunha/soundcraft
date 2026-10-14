@@ -197,8 +197,10 @@ fn slot_param(v: Option<&Value>) -> Option<usize> {
 }
 
 /// How long after SoundCraft becomes the active application a press still counts as the click that
-/// brought it forward.
-const ACTIVATING: Duration = Duration::from_millis(150);
+/// brought it forward. The press is timed when egui handles it, and the first frame after the app
+/// comes forward can be slow (the window server, the GPU waking up), so this is generous: a second,
+/// deliberate click that soon after is unlikely, and it would only raise instead of close.
+const ACTIVATING: Duration = Duration::from_millis(400);
 
 /// When the pointer was last pressed in a SoundCraft window, to tell the click that brings
 /// SoundCraft forward from later ones ([`slot_click`]).
