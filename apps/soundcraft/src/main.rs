@@ -251,7 +251,7 @@ fn main() -> eframe::Result {
     // A plugin that hangs or crashes while it is scanned is skipped instead of freezing or ending
     // the app (the scan helper is this same signed executable, so it has the same entitlements).
     match std::env::current_exe() {
-        Ok(exe) => soundcraft_engine::scan_plugins_in_helpers(exe),
+        Ok(exe) => soundcraft_engine::scan_plugins_in_helpers(exe, soundcraft_engine::settings::vst3_scan_cache()),
         Err(e) => log::warn!("plugins are scanned in this process: cannot find this executable: {e}"),
     }
 

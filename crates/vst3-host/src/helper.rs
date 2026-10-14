@@ -44,6 +44,24 @@ const HOST_ENV: &str = "SOUNDCRAFT_SCAN_HOST_PID";
 #[cfg(unix)]
 const HOST_POLL: Duration = Duration::from_millis(250);
 
+/// Why a helper gave no plugins for a bundle.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Skip {
+    /// The bundle's doing: its helper timed out, crashed, or the bundle did not load. Kept in the
+    /// scan cache across runs.
+    Bundle(String),
+    /// SoundCraft's side: the helper could not be started or read. Not kept across runs.
+    Host(String),
+}
+
+impl Skip {
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Skip::Bundle(r) | Skip::Host(r) => r,
+        }
+    }
+}
+
 /// What a helper prints after [`MARKER`].
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,8 +138,8 @@ fn end_with_host() {
 
 /// The host side: scans each bundle in its own helper, at most `helper.parallel` at a time. One
 /// result per bundle, in order: its plugins (with `path` set to the bundle) or why it was skipped.
-pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Result<Vec<Vst3Descriptor>, String>> {
-    let slots: Vec<Mutex<Option<Result<Vec<Vst3Descriptor>, String>>>> = bundles.iter().map(|_| Mutex::new(None)).collect();
+pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Result<Vec<Vst3Descriptor>, Skip>> {
+    let slots: Vec<Mutex<Option<Result<Vec<Vst3Descriptor>, Skip>>>> = bundles.iter().map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
     let work = || {
         loop {
@@ -143,11 +161,14 @@ pub(crate) fn scan_bundles(helper: &ScanHelper, bundles: &[PathBuf]) -> Vec<Resu
             work();
         }
     });
-    slots.into_iter().map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner).unwrap_or_else(|| Err("not scanned".into()))).collect()
+    slots
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner).unwrap_or_else(|| Err(Skip::Host("not scanned".into()))))
+        .collect()
 }
 
 /// Runs one helper on `bundle` and waits for its answer, at most `helper.timeout`.
-fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, String> {
+fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, Skip> {
     let mut cmd = Command::new(&helper.exe);
     cmd.arg(SCAN_HELPER_FLAG)
         .arg(bundle)
@@ -162,11 +183,11 @@ fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, S
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start the scan helper {}: {e}", helper.exe.display()))?;
+    let mut child = cmd.spawn().map_err(|e| Skip::Host(format!("cannot start the scan helper {}: {e}", helper.exe.display())))?;
     let err_tail = drain_stderr(&mut child);
     let Some(answers) = read_answers(&mut child) else {
         end(&mut child);
-        return Err("cannot read the scan helper's output".into());
+        return Err(Skip::Host("cannot read the scan helper's output".into()));
     };
     let mut deadline = Instant::now() + helper.timeout.min(MAX_TIMEOUT);
     let mut answer: Option<String> = None;
@@ -206,13 +227,13 @@ fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, S
         Some(l) => format!("{what}; its last output: {l}"),
         None => what,
     };
-    match answer {
-        Some(a) => parse_answer(&a).map(|ds| ds.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()),
-        None if timed_out => Err(why(format!("timed out after {:?}", helper.timeout))),
-        None => Err(why(match status {
-            Some(st) => ended(st),
-            None => "the scan helper stopped without an answer".into(),
-        })),
+    match (answer, status) {
+        (Some(a), _) => {
+            parse_answer(&a).map(|ds| ds.into_iter().map(|d| Vst3Descriptor { path: bundle.to_path_buf(), ..d }).collect()).map_err(Skip::Bundle)
+        }
+        (None, _) if timed_out => Err(Skip::Bundle(why(format!("timed out after {:?}", helper.timeout)))),
+        (None, Some(st)) => Err(Skip::Bundle(why(ended(st)))),
+        (None, None) => Err(Skip::Host(why("the scan helper stopped without an answer".into()))),
     }
 }
 
@@ -359,7 +380,7 @@ mod tests {
         // This test binary as the helper: it rejects the flag and exits without an answer.
         let helper = ScanHelper { timeout: Duration::MAX, ..ScanHelper::new(std::env::current_exe().unwrap()) };
         let r = scan_bundles(&helper, &[PathBuf::from("/x.vst3")]);
-        assert!(matches!(r.as_slice(), [Err(e)] if e.contains("without an answer")), "{r:?}");
+        assert!(matches!(r.as_slice(), [Err(Skip::Bundle(e))] if e.contains("without an answer")), "{r:?}");
     }
 
     #[test]

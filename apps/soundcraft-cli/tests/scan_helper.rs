@@ -64,3 +64,42 @@ fn the_cli_scans_vst3_plugins_in_helpers() {
     assert!(stderr.contains(&skipped), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The CLI keeps its VST3 scan in its settings folder: the next run starts no helper for a bundle
+/// it skipped (it says so once, at info level). Without preferences there is no cache.
+#[test]
+fn the_cli_caches_vst3_scans_in_its_settings_folder() {
+    let dir = tmpdir("cache");
+    let plugins = dir.join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    let bundle = plugins.join("garbage.vst3");
+    std::fs::write(&bundle, b"not a plugin").unwrap();
+    let config = dir.join("config");
+    let cache = config.join("plugin-cache/vst3.json");
+    let run = |no_prefs: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_soundcraft-cli"));
+        cmd.env("HOME", &dir)
+            .env("VST3_PATH", &plugins)
+            .env("SOUNDCRAFT_CONFIG_DIR", &config)
+            .env("RUST_LOG", "info")
+            .env_remove("SOUNDCRAFT_NO_PREFS");
+        if no_prefs {
+            cmd.env("SOUNDCRAFT_NO_PREFS", "1");
+        }
+        let out = cmd.args(["run", "--cmd", "engine.vst3_plugins"]).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let skipped = format!("vst3: skipped {}", bundle.display());
+    let first = run(false);
+    assert!(first.contains(&skipped), "{first}");
+    assert!(std::fs::read_to_string(&cache).unwrap().contains("garbage.vst3"));
+    let second = run(false);
+    assert!(!second.contains(&skipped), "not tried again: {second}");
+    assert!(second.contains("bundles skipped by an earlier scan (") && second.contains("garbage") && second.contains("rescan to retry"), "{second}");
+    std::fs::remove_dir_all(&config).unwrap();
+    let without = run(true);
+    assert!(without.contains(&skipped), "{without}");
+    assert!(!cache.exists(), "no cache without preferences");
+    let _ = std::fs::remove_dir_all(&dir);
+}

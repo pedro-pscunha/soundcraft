@@ -44,9 +44,12 @@ pub fn run_plugin_scan_helper(args: impl IntoIterator<Item = std::ffi::OsString>
 
 /// Scans VST3 plugins in helper processes started from `exe` (the running app, which answers
 /// through [`run_plugin_scan_helper`]): a plugin that hangs or crashes while it is scanned is
-/// skipped instead of hanging or ending the app. CLAP plugins are still scanned in-process.
-pub fn scan_plugins_in_helpers(exe: std::path::PathBuf) {
-    soundcraft_vst3_host::set_scan_helper(Some(soundcraft_vst3_host::ScanHelper::new(exe)));
+/// skipped instead of hanging or ending the app. With a `cache` file (the apps pass
+/// [`settings::vst3_scan_cache`]), later runs scan only new or changed bundles; bundles skipped
+/// once stay skipped until they change or `engine.vst3_plugins {"rescan": true}`. CLAP plugins are
+/// still scanned in-process.
+pub fn scan_plugins_in_helpers(exe: std::path::PathBuf, cache: Option<std::path::PathBuf>) {
+    soundcraft_vst3_host::set_scan_helper(Some(soundcraft_vst3_host::ScanHelper { cache, ..soundcraft_vst3_host::ScanHelper::new(exe) }));
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

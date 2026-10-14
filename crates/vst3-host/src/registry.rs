@@ -1,6 +1,8 @@
 //! The process-wide VST3 registry: scan cache, leaked `PluginInfo`s, instantiation.
 
+use crate::cache::{self, Fingerprint, Outcome, ScanCache};
 use crate::ffi::{Bundle, Instance, PARAM_BYPASS, PARAM_HIDDEN, PARAM_READ_ONLY, RawParam};
+use crate::helper::Skip;
 use crate::plugin::Vst3Plugin;
 use crate::scan as paths;
 use crate::{AUDIO_MODULE_CLASS, ScanHelper, SkippedBundle, Vst3Descriptor, Vst3Error, parse_id};
@@ -68,31 +70,75 @@ fn merge(out: &mut Vec<Vst3Descriptor>, found: Vec<Vst3Descriptor>) {
 
 /// Scans `dirs`, sorted by name. In this process without a helper: unloadable files are logged and
 /// skipped. With one: bundles in `skipped` are left out, and a bundle its helper cannot scan is
-/// logged and added to `skipped`.
-fn scan_dirs(dirs: &[PathBuf], helper: Option<&ScanHelper>, skipped: &mut Vec<SkippedBundle>) -> Vec<Vst3Descriptor> {
+/// logged and added to `skipped`. With a scan cache too, unchanged bundles come from the cache
+/// unless `fresh` (a rescan), and what the helpers find is written back to it.
+fn scan_dirs(dirs: &[PathBuf], helper: Option<&ScanHelper>, skipped: &mut Vec<SkippedBundle>, fresh: bool) -> Vec<Vst3Descriptor> {
     let bundles = paths::find_bundles(dirs);
     let mut out: Vec<Vst3Descriptor> = Vec::new();
-    match helper {
-        None => {
-            for path in bundles {
-                match load_bundle(&path) {
-                    Ok(ds) => merge(&mut out, ds),
-                    Err(e) => log::warn!("{e}"),
-                }
+    let Some(h) = helper else {
+        for path in bundles {
+            match load_bundle(&path) {
+                Ok(ds) => merge(&mut out, ds),
+                Err(e) => log::warn!("{e}"),
             }
         }
-        Some(h) => {
-            let todo: Vec<PathBuf> = bundles.into_iter().filter(|p| !skipped.iter().any(|s| &s.path == p)).collect();
-            for (path, found) in todo.iter().zip(crate::helper::scan_bundles(h, &todo)) {
-                match found {
-                    Ok(ds) => merge(&mut out, ds),
-                    Err(reason) => {
-                        log::warn!("vst3: skipped {}: {reason}", path.display());
-                        skipped.push(SkippedBundle { path: path.clone(), reason });
-                    }
-                }
-            }
+        out.sort_by_key(|d| d.name.to_lowercase());
+        return out;
+    };
+    let bundles: Vec<PathBuf> = bundles.into_iter().filter(|p| !skipped.iter().any(|s| &s.path == p)).collect();
+    let mut cache = h.cache.as_deref().map(ScanCache::load);
+    let prints: Vec<Option<Fingerprint>> = bundles.iter().map(|p| cache.as_ref().and_then(|_| cache::fingerprint(p))).collect();
+    // What the cache already knows (nothing on a rescan), then the rest from helpers.
+    let mut found: Vec<Option<Result<Vec<Vst3Descriptor>, Skip>>> = bundles
+        .iter()
+        .zip(&prints)
+        .map(|(path, print)| match (&cache, print) {
+            (Some(c), Some(print)) if !fresh => c.lookup(path, *print).map(|o| match o {
+                Outcome::Plugins(ds) => Ok(ds.clone()),
+                Outcome::Skipped(why) => Err(Skip::Bundle(why.clone())),
+            }),
+            _ => None,
+        })
+        .collect();
+    let earlier: Vec<String> = bundles
+        .iter()
+        .zip(&found)
+        .filter(|(_, f)| matches!(f, Some(Err(_))))
+        .map(|(p, _)| p.file_stem().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()))
+        .collect();
+    let todo: Vec<PathBuf> = bundles.iter().zip(&found).filter(|(_, f)| f.is_none()).map(|(p, _)| p.clone()).collect();
+    let mut answers = crate::helper::scan_bundles(h, &todo).into_iter();
+    for ((path, print), slot) in bundles.iter().zip(&prints).zip(found.iter_mut()) {
+        if slot.is_some() {
+            continue;
         }
+        let Some(answer) = answers.next() else { break };
+        if let Err(skip) = &answer {
+            log::warn!("vst3: skipped {}: {}", path.display(), skip.reason());
+        }
+        let outcome = match &answer {
+            Ok(ds) => Some(Outcome::Plugins(ds.clone())),
+            Err(Skip::Bundle(why)) => Some(Outcome::Skipped(why.clone())),
+            Err(Skip::Host(_)) => None,
+        };
+        if let (Some(c), Some(print), Some(outcome)) = (&mut cache, print, outcome) {
+            c.record(path, *print, outcome);
+        }
+        *slot = Some(answer);
+    }
+    if !earlier.is_empty() {
+        log::info!("vst3: {} bundles skipped by an earlier scan ({}); rescan to retry", earlier.len(), earlier.join(", "));
+    }
+    for (path, f) in bundles.iter().zip(found) {
+        match f {
+            Some(Ok(ds)) => merge(&mut out, ds),
+            Some(Err(skip)) => skipped.push(SkippedBundle { path: path.clone(), reason: skip.reason().to_string() }),
+            None => {}
+        }
+    }
+    if let Some(c) = &mut cache {
+        c.drop_gone();
+        c.save();
     }
     out.sort_by_key(|d| d.name.to_lowercase());
     out
@@ -105,7 +151,7 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
         (r.helper.clone(), r.skipped.clone())
     };
     let known = skipped.len();
-    let found = scan_dirs(dirs, helper.as_ref(), &mut skipped);
+    let found = scan_dirs(dirs, helper.as_ref(), &mut skipped, false);
     if skipped.len() > known {
         let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
         for s in skipped.drain(known..) {
@@ -120,23 +166,24 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
 /// Scans `dirs` in helpers, leaving the registry alone.
 pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
     let mut skipped = Vec::new();
-    let found = scan_dirs(dirs, Some(helper), &mut skipped);
+    let found = scan_dirs(dirs, Some(helper), &mut skipped, false);
     (found, skipped)
 }
 
-fn ensure_scanned(r: &mut Registry) -> &Vec<Vst3Descriptor> {
+/// Scans once (`fresh`: without the scan cache's answers, for a rescan).
+fn ensure_scanned(r: &mut Registry, fresh: bool) -> &Vec<Vst3Descriptor> {
     if r.scanned.is_none() {
         let mut dirs = paths::default_search_paths();
         dirs.extend(r.extra_dirs.iter().cloned());
         let helper = r.helper.clone();
-        r.scanned = Some(scan_dirs(&dirs, helper.as_ref(), &mut r.skipped));
+        r.scanned = Some(scan_dirs(&dirs, helper.as_ref(), &mut r.skipped, fresh));
     }
     r.scanned.get_or_insert_with(Vec::new)
 }
 
 pub fn scan() -> Vec<Vst3Descriptor> {
     let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
-    ensure_scanned(&mut r).clone()
+    ensure_scanned(&mut r, false).clone()
 }
 
 pub fn cached() -> Option<Vec<Vst3Descriptor>> {
@@ -148,7 +195,7 @@ pub fn rescan() -> Vec<Vst3Descriptor> {
     r.scanned = None;
     r.failed.clear();
     r.skipped.clear();
-    ensure_scanned(&mut r).clone()
+    ensure_scanned(&mut r, true).clone()
 }
 
 pub fn add_search_dir(dir: &Path) -> usize {
@@ -157,7 +204,7 @@ pub fn add_search_dir(dir: &Path) -> usize {
         r.extra_dirs.push(dir.to_path_buf());
     }
     let helper = r.helper.clone();
-    let found = scan_dirs(&[dir.to_path_buf()], helper.as_ref(), &mut r.skipped);
+    let found = scan_dirs(&[dir.to_path_buf()], helper.as_ref(), &mut r.skipped, false);
     let n = found.len();
     merge(r.scanned.get_or_insert_with(Vec::new), found);
     n
@@ -262,7 +309,7 @@ fn instantiate_raw(id: &str) -> Result<(Instance, &'static PluginInfo), Vst3Erro
         if r.failed.contains(id) {
             return Err(Vst3Error::Instantiate(id.to_string(), "failed before".into()));
         }
-        ensure_scanned(&mut r).iter().find(|d| d.id == id).cloned().ok_or_else(|| Vst3Error::NotFound(id.to_string()))?
+        ensure_scanned(&mut r, false).iter().find(|d| d.id == id).cloned().ok_or_else(|| Vst3Error::NotFound(id.to_string()))?
     };
     let made = Bundle::load(&desc.path).and_then(|b| b.instantiate(&cid));
     let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);

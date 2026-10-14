@@ -16,6 +16,10 @@
 //!                                                 in-process server, so they conflict with --connect.
 //! soundcraft-cli parity [--write PATH]            parity report (markdown)
 //! soundcraft-cli plugins                          list built-in plugins
+//! VST3 plugins are scanned once and cached in the settings folder (plugin-cache/vst3.json;
+//! $SOUNDCRAFT_CONFIG_DIR overrides the folder, $SOUNDCRAFT_NO_PREFS turns the cache off). Bundles
+//! that hung, crashed or failed stay skipped until they change; retry them all with
+//! soundcraft-cli run --cmd 'engine.vst3_plugins={"rescan":true}'
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -99,7 +103,7 @@ fn main() -> ExitCode {
     }
     // A plugin that hangs or crashes while it is scanned is skipped instead of hanging the CLI.
     match std::env::current_exe() {
-        Ok(exe) => soundcraft_engine::scan_plugins_in_helpers(exe),
+        Ok(exe) => soundcraft_engine::scan_plugins_in_helpers(exe, soundcraft_engine::settings::vst3_scan_cache()),
         Err(e) => log::warn!("plugins are scanned in this process: cannot find this executable: {e}"),
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -593,7 +597,8 @@ mod tests {
     fn help_text_is_only_the_usage_block() {
         let help = help_text();
         assert!(help.starts_with("soundcraft-cli info FILE"));
-        assert!(help.ends_with("soundcraft-cli plugins                          list built-in plugins"));
+        assert!(help.contains("\nsoundcraft-cli plugins                          list built-in plugins\n"));
+        assert!(help.ends_with("soundcraft-cli run --cmd 'engine.vst3_plugins={\"rescan\":true}'"), "{help}");
         assert!(help.contains("--automation-read-root DIR") && help.contains("--automation-write-root DIR"));
         assert!(!help.contains("```"));
         assert!(!help.contains("#![") && !help.contains("use serde_json"));

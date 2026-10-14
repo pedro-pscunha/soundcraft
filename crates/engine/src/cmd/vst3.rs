@@ -12,7 +12,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "List VST3 Plugins",
         [],
         None,
-        "{rescan?: bool} → [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}]",
+        "{rescan?: bool} → [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}]. The apps scan in helper processes and cache the result per bundle: rescan retries every bundle (the ones skipped as hung, crashed or broken too) and rewrites the cache",
         always,
         |_, p| {
             let list = if p.get("rescan").and_then(Value::as_bool).unwrap_or(false) {

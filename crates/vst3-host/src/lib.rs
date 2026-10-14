@@ -25,6 +25,16 @@
 //! creates. The helper's standard error (plugin chatter) goes to the debug log. Without a helper
 //! (library users, tests) scans load every bundle in this process, as before.
 //!
+//! A helper scan can keep a cache file ([`ScanHelper::cache`]; the apps put it in their settings
+//! folder): per bundle, its plugins or why it was skipped, under the bundle's fingerprint (its
+//! binary's size and modification time, the bundle's modification time) and a format version. A
+//! later scan, in this run or another, starts helpers only for new or changed bundles, drops the
+//! bundles that are gone and writes the file back whole (a temporary file renamed over it). So a
+//! plugin that never answers costs its time limit once, not in every run: it stays skipped (logged
+//! once per process at info level) until it changes or [`rescan`] retries every bundle and rewrites
+//! the cache. An unreadable or corrupt cache is logged and scanned over, never an error. In-process
+//! scans use no cache: they exist to load each bundle here, and cannot skip one that hangs anyway.
+//!
 //! `PluginInfo` must be `&'static`: the registry leaks exactly one `PluginInfo` (with its param
 //! table) per plugin *type* the first time that type is instantiated, and caches it. The leak is
 //! bounded by the number of distinct installed plugins actually used. Loaded binaries likewise
@@ -71,6 +81,8 @@
 
 pub mod scan;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod cache;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unsafe_code)]
 mod ffi;
@@ -168,12 +180,18 @@ pub struct ScanHelper {
     pub timeout: Duration,
     /// How many helpers run at once ([`HELPER_PARALLEL`]).
     pub parallel: usize,
+    /// The scan cache file (none: every scan starts a helper for every bundle). Bundles whose
+    /// fingerprint (binary size and modification time, bundle modification time) is unchanged
+    /// since an earlier scan, in this run or another, are not sent to a helper again: their
+    /// plugins, or why they were skipped, come from the cache until they change or [`rescan`]
+    /// retries everything.
+    pub cache: Option<PathBuf>,
 }
 
 impl ScanHelper {
     /// Helpers started from `exe`, with the default time limit and parallelism.
     pub fn new(exe: PathBuf) -> ScanHelper {
-        ScanHelper { exe, timeout: HELPER_TIMEOUT, parallel: HELPER_PARALLEL }
+        ScanHelper { exe, timeout: HELPER_TIMEOUT, parallel: HELPER_PARALLEL, cache: None }
     }
 }
 
