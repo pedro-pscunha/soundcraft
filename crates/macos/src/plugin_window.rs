@@ -24,6 +24,9 @@
 //!   windows are winit's (class `WinitWindow`): a window a plugin opened itself (a CLAP plugin's
 //!   floating window, a plugin's own panel) never gets the keys, even when it is main or in front.
 //!   With no such window, AppKit's own handling runs (a beep, as before).
+//! - Not while SoundCraft has a text field focused (the app reports it every frame with
+//!   [`set_app_wants_keyboard`]): a key-down handed on would type into that field out of sight, so
+//!   AppKit's own handling runs (a beep).
 //! - What plugins keep: every key their views handle: text fields, their own shortcuts, a
 //!   computer-keyboard piano. `performKeyEquivalent:` is not overridden, so AppKit still offers
 //!   ⌘-keys to the plugin's views first and then to the menu bar (Quit, Hide); a ⌘-key nobody
@@ -43,7 +46,7 @@
 //!    modifier state it would see with its own window key.
 //! 4. Switch to another app and back: the editor hides and comes back, still open.
 
-pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, PluginWindow, content_size, fit_content};
+pub use crate::ffi::plugin_window::{DEFAULT_CONTENT, PluginWindow, content_size, fit_content, set_app_wants_keyboard};
 
 /// Test seams (the `testing` feature, never on in the app).
 #[cfg(feature = "testing")]

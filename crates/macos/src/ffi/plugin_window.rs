@@ -10,6 +10,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Largest window side, in points.
 const MAX_SIDE: f64 = 16_384.0;
@@ -29,7 +30,8 @@ define_class!(
     impl HostWindow {
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            if !forward(self.mtm(), event, Key::Down) {
+            // While SoundCraft has a text field focused, a key handed on would type into it unseen.
+            if APP_WANTS_KEYBOARD.load(Ordering::Relaxed) || !forward(self.mtm(), event, Key::Down) {
                 // SAFETY: NSWindow's own `keyDown:`, with the event AppKit passed in.
                 let () = unsafe { msg_send![super(self), keyDown: event] };
             }
@@ -59,6 +61,16 @@ define_class!(
         }
     }
 );
+
+/// SoundCraft has a text field focused (see [`set_app_wants_keyboard`]).
+static APP_WANTS_KEYBOARD: AtomicBool = AtomicBool::new(false);
+
+/// Tells plugin windows whether SoundCraft has a text field focused. While it has, the key-downs a
+/// plugin does not take are not handed on to SoundCraft's window, where they would type into that
+/// field out of sight; AppKit's own handling runs instead (a beep). The app calls it every frame.
+pub fn set_app_wants_keyboard(wants: bool) {
+    APP_WANTS_KEYBOARD.store(wants, Ordering::Relaxed);
+}
 
 #[derive(Clone, Copy)]
 enum Key {

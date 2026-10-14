@@ -285,6 +285,15 @@ mod macos {
             type_key(win, NSEventType::FlagsChanged, SHIFT, NSEventModifierFlags::Shift);
             assert_eq!(seen(), [("soundcraft", "down", SPACE), ("soundcraft", "up", SPACE), ("soundcraft", "flags", SHIFT)]);
 
+            // While SoundCraft has a text field focused, a key-down is not handed on (it would type
+            // into that field out of sight): AppKit's own handling runs.
+            soundcraft_macos::plugin_window::set_app_wants_keyboard(true);
+            type_key(win, NSEventType::KeyDown, SPACE, none);
+            assert_eq!(seen(), [("unhandled", "down", SPACE)]);
+            soundcraft_macos::plugin_window::set_app_wants_keyboard(false);
+            type_key(win, NSEventType::KeyDown, SPACE, none);
+            assert_eq!(seen(), [("soundcraft", "down", SPACE)]);
+
             // A ⌘-key nobody took arrives as keyDown: and is handed on with its modifiers.
             type_key(win, NSEventType::KeyDown, 1, NSEventModifierFlags::Command);
             assert_eq!(seen(), [("soundcraft", "down", 1)]);

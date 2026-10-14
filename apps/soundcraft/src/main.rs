@@ -50,6 +50,10 @@ impl eframe::App for App {
         if let Some(menu) = &mut self.3 {
             menu.sync(&self.0);
         }
+        // A plugin editor in front hands on the keys its plugin does not take, unless a text
+        // field of SoundCraft's has the focus: they would type into it out of sight.
+        #[cfg(target_os = "macos")]
+        soundcraft_macos::plugin_window::set_app_wants_keyboard(ctx.egui_wants_keyboard_input());
         // Files dropped on the window: audio on an instrument track or a Sampler window loads
         // the sampler; otherwise sessions open and audio/MIDI import (see `open`).
         let dropped: Vec<String> =
