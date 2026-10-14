@@ -282,7 +282,16 @@ impl Bundle {
         inst.render = inst.extension::<clap_plugin_render>(CLAP_EXT_RENDER);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
         inst.gui = Arc::new(GuiLink {
-            inner: Mutex::new(GuiInner { plugin, gui, state: inst.state_ext, alive: true, created: false, visible: false, window: None }),
+            inner: Mutex::new(GuiInner {
+                plugin,
+                gui,
+                state: inst.state_ext,
+                params: inst.params,
+                alive: true,
+                created: false,
+                visible: false,
+                window: None,
+            }),
             host: Arc::clone(&inst.state),
         });
         Ok(inst)
@@ -749,6 +758,7 @@ struct GuiInner {
     plugin: *const clap_plugin,
     gui: *const clap_plugin_gui,
     state: *const clap_plugin_state,
+    params: *const clap_plugin_params,
     /// The plugin instance exists (cleared by `Instance::drop` before it destroys the plugin).
     alive: bool,
     created: bool,
@@ -775,6 +785,7 @@ impl Default for GuiLink {
                 plugin: std::ptr::null(),
                 gui: std::ptr::null(),
                 state: std::ptr::null(),
+                params: std::ptr::null(),
                 alive: false,
                 created: false,
                 visible: false,
@@ -950,6 +961,20 @@ impl GuiLink {
         // SAFETY: live plugin (`alive`, under the lock); the stream and its context live on this
         // frame for the call.
         unsafe { save(g.plugin, &stream) }.then_some(out)
+    }
+
+    /// `clap_plugin_params.get_value` (a main-thread call, like `save_state`). `None` without the
+    /// extension, for an id the plugin refuses or a non-finite value, or once the plugin is gone.
+    pub fn param_value(&self, id: u32) -> Option<f64> {
+        let g = self.lock();
+        if !g.alive {
+            return None;
+        }
+        // SAFETY: `params` is null or the plugin's static extension vtable, valid while `alive`.
+        let get = unsafe { g.params.as_ref() }?.get_value?;
+        let mut v = 0.0f64;
+        // SAFETY: live plugin (`alive`, under the lock); `v` is a local.
+        (unsafe { get(g.plugin, id, &mut v) } && v.is_finite()).then_some(v)
     }
 
     /// Closes (destroys) the editor.

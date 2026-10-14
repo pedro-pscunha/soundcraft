@@ -288,6 +288,34 @@ fn state_reader_reads_while_another_thread_processes() {
     assert_eq!(reader.save_state(), None);
 }
 
+/// A preset loaded in the plugin's own browser changes its values without telling the host per
+/// parameter. The state reader reads them (`clap.params` `get_value`) next to the ones the host
+/// last set, so a save can tell the plugin's own changes from the session's overrides.
+#[test]
+fn state_reader_reads_the_values_the_plugin_set_itself() {
+    use soundcraft_dsp::{ParamReading, Plugin};
+    fixture_dir();
+    let mut p = soundcraft_clap_host::instantiate_plugin(GAIN).unwrap();
+    assert!(p.set_param("7", 1.5));
+    p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
+    let mut reader = p.state_reader().expect("the gain fixture has clap.state");
+    let read = reader.param_values(&["7", "3", "9", "nope"]);
+    assert_eq!(read[0], Some(ParamReading { live: 1.5, host: 1.5 }), "the host's value reached the plugin");
+    assert_eq!(read[1], Some(ParamReading { live: 0.0, host: 0.0 }), "never set: as read when it was made");
+    assert_eq!(read[2..], [None, None], "hidden and unknown ids");
+    // The "preset": gain 0.5, mode C.
+    let mut preset = 0.5f64.to_le_bytes().to_vec();
+    preset.extend_from_slice(&2.0f64.to_le_bytes());
+    assert!(p.load_state_unseen(&preset));
+    let read = reader.param_values(&["7", "3"]);
+    assert_eq!(read, vec![Some(ParamReading { live: 0.5, host: 1.5 }), Some(ParamReading { live: 2.0, host: 0.0 })]);
+    assert!(p.set_param("3", 1.0));
+    p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
+    assert_eq!(reader.param_values(&["3"]), vec![Some(ParamReading { live: 1.0, host: 1.0 })]);
+    drop(p);
+    assert_eq!(reader.param_values(&["7"]), vec![None], "the instance is gone");
+}
+
 #[test]
 fn editors_refuse_to_open_off_the_main_thread() {
     fixture_dir();

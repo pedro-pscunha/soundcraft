@@ -2,9 +2,9 @@
 
 use crate::ffi::{EVENT_CAP, Event, GuiLink, Instance, NotePort, PortBuffers};
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, RenderMode, Transport};
+use soundcraft_dsp::{ParamReading, Plugin, PluginEditor, PluginInfo, PluginStateReader, RenderMode, Transport};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Largest block we activate a plugin for.
 const MAX_BLOCK: usize = 1 << 16;
@@ -25,7 +25,9 @@ pub struct ClapPlugin {
     info: &'static PluginInfo,
     /// CLAP id of each `info.params` entry (same order).
     ids: Vec<u32>,
-    values: Vec<f32>,
+    /// The value the host last set or read of each parameter (same order as `ids`; the bits of an
+    /// `f32`), shared with the state reader.
+    values: Arc<[AtomicU32]>,
     /// Pending events, kept sorted by time (stable for equal times). Never grows past `EVENT_CAP`.
     queue: Vec<Event>,
     inputs: PortBuffers,
@@ -52,7 +54,12 @@ pub struct ClapPlugin {
 impl ClapPlugin {
     pub(crate) fn new(inst: Instance, info: &'static PluginInfo) -> ClapPlugin {
         let ids: Vec<u32> = info.params.iter().map(|p| p.id.parse::<u32>().unwrap_or(u32::MAX)).collect();
-        let values = info.params.iter().zip(&ids).map(|(p, id)| inst.param_value(*id).map_or(p.default, |v| p.clamp(v as f32))).collect();
+        let values = info
+            .params
+            .iter()
+            .zip(&ids)
+            .map(|(p, id)| AtomicU32::new(inst.param_value(*id).map_or(p.default, |v| p.clamp(v as f32)).to_bits()))
+            .collect();
         ClapPlugin {
             inst,
             info,
@@ -79,13 +86,20 @@ impl ClapPlugin {
 
     /// Re-reads every parameter value from the plugin (after a state load).
     fn refresh_values(&mut self) {
-        for ((v, p), id) in self.values.iter_mut().zip(self.info.params).zip(&self.ids) {
+        for ((v, p), id) in self.values.iter().zip(self.info.params).zip(&self.ids) {
             if let Some(x) = self.inst.param_value(*id) {
-                *v = p.clamp(x as f32);
+                v.store(p.clamp(x as f32).to_bits(), Ordering::Relaxed);
             }
         }
         // Pending changes from before the load would undo it.
         self.queue.retain(|e| !matches!(e, Event::Param { .. }));
+    }
+
+    /// Loads `data` the way a plugin loads a preset in its own browser: its values change without
+    /// the host being told per parameter. For tests (the `testing` feature).
+    #[cfg(feature = "testing")]
+    pub fn load_state_unseen(&self, data: &[u8]) -> bool {
+        self.inst.load_state(data)
     }
 
     /// Inserts keeping the queue time-sorted; drops the event when the queue is full (never
@@ -183,8 +197,8 @@ impl Plugin for ClapPlugin {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return false };
         let (Some(pi), Some(&cid)) = (self.info.params.get(i), self.ids.get(i)) else { return false };
         let v = pi.clamp(value);
-        if let Some(slot) = self.values.get_mut(i) {
-            *slot = v;
+        if let Some(slot) = self.values.get(i) {
+            slot.store(v.to_bits(), Ordering::Relaxed);
         }
         // Coalesce with a pending change of the same parameter.
         if let Some(Event::Param { value, .. }) = self.queue.iter_mut().find(|e| matches!(e, Event::Param { id, .. } if *id == cid)) {
@@ -197,7 +211,7 @@ impl Plugin for ClapPlugin {
 
     fn param(&self, id: &str) -> Option<f32> {
         let i = self.info.params.iter().position(|p| p.id == id)?;
-        self.values.get(i).copied()
+        self.values.get(i).map(|v| f32::from_bits(v.load(Ordering::Relaxed)))
     }
 
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
@@ -334,9 +348,34 @@ impl Plugin for ClapPlugin {
         Some(Box::new(ClapEditor { link, info: self.info, ids: self.ids.clone() }))
     }
 
-    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+    fn state_reader(&mut self) -> Option<Box<dyn PluginStateReader>> {
         let link = self.inst.state_link()?;
-        Some(Box::new(move || link.save_state()))
+        Some(Box::new(ClapStateReader { link, info: self.info, ids: self.ids.clone(), values: Arc::clone(&self.values) }))
+    }
+}
+
+/// Reads a CLAP instance's state and parameters on the main thread (`clap.state`, `clap.params`).
+struct ClapStateReader {
+    link: Arc<GuiLink>,
+    info: &'static PluginInfo,
+    ids: Vec<u32>,
+    values: Arc<[AtomicU32]>,
+}
+
+impl PluginStateReader for ClapStateReader {
+    fn save_state(&mut self) -> Option<Vec<u8>> {
+        self.link.save_state()
+    }
+
+    fn param_values(&mut self, ids: &[&str]) -> Vec<Option<ParamReading>> {
+        ids.iter()
+            .map(|id| {
+                let i = self.info.params.iter().position(|p| p.id == *id)?;
+                let host = f32::from_bits(self.values.get(i)?.load(Ordering::Relaxed));
+                let live = self.info.params.get(i)?.clamp(self.link.param_value(*self.ids.get(i)?)? as f32);
+                Some(ParamReading { live, host })
+            })
+            .collect()
     }
 }
 

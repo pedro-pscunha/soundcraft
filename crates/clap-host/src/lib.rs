@@ -190,6 +190,13 @@ pub fn instantiate(id: &str) -> Result<Box<dyn Plugin>, ClapError> {
     api::instantiate(id)
 }
 
+/// Like [`instantiate`], but returns the concrete [`ClapPlugin`]. For tests (the `testing`
+/// feature).
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+pub fn instantiate_plugin(id: &str) -> Result<ClapPlugin, ClapError> {
+    registry::instantiate_plugin(id)
+}
+
 /// Creates a plugin by `clap:<id>`; `None` if unknown or it fails to load.
 pub fn create(id: &str) -> Option<Box<dyn Plugin>> {
     parse_id(id)?;

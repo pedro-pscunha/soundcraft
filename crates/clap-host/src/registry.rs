@@ -191,10 +191,14 @@ fn instantiate_raw(id: &str) -> Result<(Instance, &'static PluginInfo), ClapErro
 }
 
 pub fn instantiate(id: &str) -> Result<Box<dyn Plugin>, ClapError> {
+    Ok(Box::new(instantiate_plugin(id)?))
+}
+
+pub fn instantiate_plugin(id: &str) -> Result<ClapPlugin, ClapError> {
     let (inst, info) = instantiate_raw(id)?;
     let mut p = ClapPlugin::new(inst, info);
     p.prepare(48_000.0, 1024, 2);
-    Ok(Box::new(p))
+    Ok(p)
 }
 
 pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
