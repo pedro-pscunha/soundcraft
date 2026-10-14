@@ -74,14 +74,16 @@ own, eight at a time, and reads back the plugins as one JSON line. A bundle whos
 or failed is logged, skipped and not tried again until it changes, SoundCraft is updated, or a
 rescan. A helper still running 30 s after its greeting is killed and its bundle skipped too, but
 tried once more on the next run (a busy machine can cause a timeout) before it is cached as a
-skip. Starting up and greeting is SoundCraft's own time, with a 30 s limit of its own: a helper
-that never greets fails on SoundCraft's side, and its bundle is not skipped. SoundCraft's own process loads only the bundles of the plugins it creates. Each bundle's
+skip. Starting up and greeting is SoundCraft's own time, with a 15 s limit of its own (a healthy
+start takes well under a second): a slow start is not charged to the bundle. SoundCraft's own
+process loads only the bundles of the plugins it creates. Each bundle's
 outcome is cached across runs in the settings folder (`soundcraft_engine::settings`, shared by
 both apps: `plugin-cache/vst3.v1.json`, named after the cache format) under a fingerprint of the
 bundle, so later runs start helpers only for new or changed bundles. The file also records the
 scanning code that wrote it, and other code ignores and replaces it, so an update starts cold. A
-helper that fails on SoundCraft's side (cannot start, or speaks another scan protocol) gives no
-verdict on any bundle: those the cache knows to load are listed from their cached plugins, the
+helper that fails on SoundCraft's side (cannot start, speaks another scan protocol, or does not
+greet within its startup limit) gives no verdict on any bundle and stops the scan: it is never
+cached as a skip; the bundles the cache knows to load are listed from their cached plugins, the
 others listed with the skipped ones, as not scanned, until the next rescan or the next start.
 CLAP scans still load every plugin binary in-process;
 the Audio Unit scan loads none (it only lists the system's component registry).

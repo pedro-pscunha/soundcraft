@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (a VST3 timeout is retried once before it is cached, and the plugin search lists and rescans skipped plugins too; previously minor: skipped VST3 plugins are listed and can be rescanned from the plugin menus) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** trivial (a VST3 scan helper's 30 s count from its greeting; previously minor: a VST3 timeout is retried once before it is cached, and the plugin search lists and rescans skipped plugins too) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -39,7 +39,7 @@ User report #152: a saved instrument level does not reach the bounce.
 |---|---|---|---|
 | Plugin format | AAX only (Native and DSP) | CLAP, VST3, Audio Units (macOS) | Users' libraries mostly ship VST3/AU too. AAX (#109) needs Avid's SDK licence and PACE signing: owner decision, likely never |
 | VST2, LV2, LADSPA | — | ❌ (#30) | Beyond Pro Tools; VST2 SDK is no longer licensable |
-| Scan, vendor menus, instrument picker | ✅ | ✅ | #23. VST3 bundles are scanned in helper processes (eight at a time, 30 s each): one that hangs (a PACE/iLok-protected plugin without its licence service) or crashes is logged and skipped. The outcome is cached per bundle across runs, so later runs scan only new or changed bundles; a timeout is retried once on the next run, then a skipped bundle costs nothing until it changes, SoundCraft is updated, or a rescan. The VST3 submenu and the plugin search list how many were skipped (the tooltip says which and why) and have "Rescan VST3"; `engine.vst3_plugins` returns them. CLAP scans are in-process; the AU scan loads no plugin |
+| Scan, vendor menus, instrument picker | ✅ | ✅ | #23. VST3 bundles are scanned in helper processes (eight at a time, 30 s each from the helper's greeting): one that hangs (a PACE/iLok-protected plugin without its licence service) or crashes is logged and skipped. The outcome is cached per bundle across runs, so later runs scan only new or changed bundles; a timeout is retried once on the next run, then a skipped bundle costs nothing until it changes, SoundCraft is updated, or a rescan. The VST3 submenu and the plugin search list how many were skipped (the tooltip says which and why) and have "Rescan VST3"; `engine.vst3_plugins` returns them. CLAP scans are in-process; the AU scan loads no plugin |
 | Audio, parameters, automation, latency (PDC) | ✅ | ✅ | |
 | Notes / MIDI to instruments | ✅ | ✅ | But no live MIDI input (G-02) |
 | State saved in sessions, presets | ✅ | ✅ | A preset loaded in a plugin's own editor is saved whole: before each save or bounce, session overrides the plugin changed by itself take its values (VST3, CLAP, AU), except automated ones |
@@ -59,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | trivial | Hosting: a VST3 scan helper's 30 s count from its greeting (it has 15 s to start and greet) |
 | 2026-10-14 | minor | Hosting: a VST3 timeout is retried once on the next run before it is cached as a skip; the cache starts cold after a SoundCraft update; the plugin search lists skipped plugins and rescans too |
 | 2026-10-14 | minor | Hosting: skipped VST3 plugins are listed in the VST3 submenu and by `engine.vst3_plugins`, and "Rescan VST3" retries them |
 | 2026-10-14 | minor | Hosting: the VST3 scan is cached per bundle across runs in the settings folder, and eight helpers run at once: later runs scan only new or changed bundles (dev Mac: 30.5 s cold, 0.03 s warm) |

@@ -83,16 +83,16 @@ pub(crate) enum Skip {
     /// The bundle's doing: its helper crashed, or the bundle did not load. Kept in the scan cache
     /// across runs.
     Bundle(String),
-    /// The bundle's doing too, but only provisionally: its helper ran past its time limit (which
-    /// a slow start, or a busy machine, can also cause). Cached as a skip only when it happens
-    /// again on the next scan.
+    /// The bundle's doing too, but only provisionally: its helper ran past the bundle's time limit,
+    /// counted from its greeting (a busy machine can also cause that). Cached as a skip only when
+    /// it happens again on the next scan.
     TimedOut(String),
     /// SoundCraft's side: the helper could not be started or read, or is no scan helper of this
     /// protocol, and never ran the bundle's code. Not a verdict on the bundle: never remembered or
     /// cached.
     Host(String),
     /// SoundCraft's side too, but the helper may have been running the bundle's code: it was lost
-    /// track of, or ran past its time limit before greeting. The bundle may hang: never loaded in
+    /// track of, or did not greet within its startup limit. The bundle may hang: never loaded in
     /// this process instead.
     HostStuck(String),
 }
@@ -261,8 +261,9 @@ enum Ended {
     Answered(Answer),
     /// It exited without an answer.
     Exited(ExitStatus),
-    /// It ran past its time limit without an answer, and was killed.
-    TimedOut,
+    /// It ran past a time limit without an answer, and was killed: the bundle's if it had greeted
+    /// by then, else its startup's.
+    TimedOut { greeted: bool },
     /// Its state could not be read; it was killed.
     Lost,
 }
@@ -335,12 +336,15 @@ impl Running {
         loop {
             while let Ok(line) = self.lines.try_recv() {
                 match line {
-                    // The bundle's time starts now (its code runs only after the greeting).
+                    // The bundle's time starts with the first greeting (its code runs only after
+                    // it); a later "greeting" is plugin output and changes nothing.
                     Line::Hello(v) => {
-                        if hello.is_none() && answer.is_none() {
-                            deadline = Instant::now() + limits.bundle;
+                        if hello.is_none() {
+                            if answer.is_none() {
+                                deadline = Instant::now() + limits.bundle;
+                            }
+                            hello = Some(v);
                         }
-                        hello = Some(v);
                     }
                     Line::Answer(a) => {
                         if answer.is_none() {
@@ -364,10 +368,12 @@ impl Running {
                 }
             }
             if Instant::now() >= deadline {
+                // Which limit ran out, as of now: a greeting read only below came too late.
+                let greeted = hello.is_some();
                 self.end();
                 // An answer that came in since the look above still counts.
                 let answer = self.rest(&mut hello).or(answer);
-                return (answer.map_or(Ended::TimedOut, Ended::Answered), hello);
+                return (answer.map_or(Ended::TimedOut { greeted }, Ended::Answered), hello);
             }
             std::thread::sleep(POLL);
         }
@@ -407,7 +413,9 @@ impl Running {
         let mut answer = None;
         loop {
             match self.lines.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                Ok(Line::Hello(v)) => *hello = Some(v),
+                Ok(Line::Hello(v)) => {
+                    hello.get_or_insert(v);
+                }
                 Ok(Line::Answer(a)) => answer = Some(a),
                 Err(_) => return answer,
             }
@@ -459,24 +467,25 @@ fn judge(
     limits: Limits,
     exe: &Path,
 ) -> Result<Vec<Vst3Descriptor>, Skip> {
-    let limit = limits.bundle;
-    if hello != Some(PROTOCOL) {
+    // A startup that ran out is SoundCraft's failure, even if the greeting turns up afterwards.
+    let late = matches!(ended, Ended::TimedOut { greeted: false });
+    if hello != Some(PROTOCOL) || late {
         let how = match &ended {
             Ended::Answered(_) => "answered".to_string(),
             // A greeting of another protocol started the bundle's time; none, the startup's.
-            Ended::TimedOut => format!("timed out after {:?}", if hello.is_some() { limits.bundle } else { limits.startup }),
+            Ended::TimedOut { greeted } => format!("timed out after {:?}", if *greeted { limits.bundle } else { limits.startup }),
             Ended::Exited(st) => format!("exited ({st})"),
             Ended::Lost => "stopped".to_string(),
         };
-        let greeting = hello.map_or_else(|| "no greeting".to_string(), |v| format!("protocol {v}"));
+        let greeting = if late { "no greeting".to_string() } else { hello.map_or_else(|| "no greeting".to_string(), |v| format!("protocol {v}")) };
         let why = why(format!("{} is not a scan helper of protocol {PROTOCOL} ({greeting}; it {how})", exe.display()));
         // Still running at its limit, or lost: it may be running the bundle's code.
-        return Err(if matches!(ended, Ended::TimedOut | Ended::Lost) { Skip::HostStuck(why) } else { Skip::Host(why) });
+        return Err(if matches!(ended, Ended::TimedOut { .. } | Ended::Lost) { Skip::HostStuck(why) } else { Skip::Host(why) });
     }
     match ended {
         Ended::Answered(Answer::Ok(ds)) => Ok(well_formed(ds, bundle)),
         Ended::Answered(Answer::Error(e)) => Err(Skip::Bundle(e)),
-        Ended::TimedOut => Err(Skip::TimedOut(why(format!("timed out after {limit:?}")))),
+        Ended::TimedOut { .. } => Err(Skip::TimedOut(why(format!("timed out after {:?}", limits.bundle)))),
         Ended::Exited(st) => Err(Skip::Bundle(why(ended_reason(st)))),
         Ended::Lost => Err(Skip::HostStuck(why("the scan helper stopped without an answer".into()))),
     }
@@ -711,7 +720,7 @@ mod tests {
     #[test]
     fn a_huge_time_limit_does_not_overflow() {
         // This test binary as the helper: it rejects the flag and exits without a greeting.
-        let helper = ScanHelper { timeout: Duration::MAX, ..ScanHelper::new(std::env::current_exe().unwrap()) };
+        let helper = ScanHelper { timeout: Duration::MAX, startup: Duration::MAX, ..ScanHelper::new(std::env::current_exe().unwrap()) };
         let r = scan_bundles(&helper, &[PathBuf::from("/x.vst3")]);
         assert!(matches!(r.as_slice(), [Err(Skip::Host(e))] if e.contains("no greeting")), "{r:?}");
     }
@@ -730,12 +739,18 @@ mod tests {
         let Err(Skip::Bundle(why)) = classify(Ended::Answered(Answer::Error(hostile)), Some(PROTOCOL), "", bundle, none, bundle) else { panic!() };
         assert!(why.chars().count() <= MAX_REASON && why.starts_with("bad  [31mred"), "{why:?}");
         let limits = Limits { startup: Duration::from_secs(2), bundle: Duration::from_secs(1) };
-        let Err(Skip::TimedOut(why)) = classify(Ended::TimedOut, Some(PROTOCOL), "line one\nlast \u{7}line", bundle, limits, bundle) else {
+        let Err(Skip::TimedOut(why)) =
+            classify(Ended::TimedOut { greeted: true }, Some(PROTOCOL), "line one\nlast \u{7}line", bundle, limits, bundle)
+        else {
             panic!()
         };
         assert_eq!(why, "timed out after 1s; its last output: last  line");
         // No greeting: the helper's startup ran out, which is SoundCraft's failure, not the bundle's.
-        let Err(Skip::HostStuck(why)) = classify(Ended::TimedOut, None, "", bundle, limits, bundle) else { panic!() };
+        let Err(Skip::HostStuck(why)) = classify(Ended::TimedOut { greeted: false }, None, "", bundle, limits, bundle) else { panic!() };
+        assert!(why.contains("no greeting; it timed out after 2s"), "{why}");
+        // A greeting read only after the startup ran out (still in the pipe at the deadline) does
+        // not make it the bundle's timeout.
+        let Err(Skip::HostStuck(why)) = classify(Ended::TimedOut { greeted: false }, Some(PROTOCOL), "", bundle, limits, bundle) else { panic!() };
         assert!(why.contains("no greeting; it timed out after 2s"), "{why}");
     }
 
@@ -744,19 +759,36 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_bundles_time_starts_with_the_greeting() {
-        // A "helper" that starts slowly (1 s before its greeting), then takes 1 s over the bundle.
-        let dir = std::env::temp_dir().join(format!("sc-scan-startup-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("slow-start");
-        let answer = serde_json::to_string(&Answer::Ok(Vec::new())).unwrap();
-        let script = format!("#!/bin/sh\nsleep 1\necho '{HELLO}{PROTOCOL}'\nsleep 1\necho '{MARKER}{answer}'\n");
-        std::fs::write(&exe, script).unwrap();
-        std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let roomy = ScanHelper { timeout: Duration::from_millis(1500), startup: Duration::from_secs(10), ..ScanHelper::new(exe.clone()) };
-        assert_eq!(scan_one(&roomy, &dir.join("A.vst3")), Ok(Vec::new()), "1.5 s for the bundle, counted from the greeting");
-        let tight = ScanHelper { startup: Duration::from_millis(300), ..roomy };
-        assert!(matches!(scan_one(&tight, &dir.join("A.vst3")), Err(Skip::HostStuck(_))), "no greeting within its startup");
-        let _ = std::fs::remove_dir_all(&dir);
+        // One "helper" script; the bundle's name says how it behaves. It sits next to this test
+        // binary (an executable place, unlike a noexec /tmp) and goes when the test ends.
+        struct Gone(PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let exe = Gone(std::env::current_exe().unwrap().with_file_name(format!("slow-start-helper-{}", std::process::id())));
+        let answer = format!("echo '{MARKER}{}'", serde_json::to_string(&Answer::Ok(Vec::new())).unwrap());
+        let hello = format!("echo '{HELLO}{PROTOCOL}'");
+        let script =
+            format!("#!/bin/sh\ncase \"$2\" in\n*Slow*) sleep 2; {hello}; {answer} ;;\n*Hang*) {hello}; sleep 5 ;;\n*) {hello}; {answer} ;;\nesac\n");
+        std::fs::write(&exe.0, script).unwrap();
+        std::fs::set_permissions(&exe.0, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let helper = |startup: Duration, timeout: Duration| ScanHelper { startup, timeout, ..ScanHelper::new(exe.0.clone()) };
+        // 2 s to greet, then nothing to do: a 1 s limit for the bundle is plenty, counted from the
+        // greeting (from the start, it would have run out before the greeting).
+        let slow = Path::new("/p/Slow.vst3");
+        assert_eq!(scan_one(&helper(Duration::from_secs(10), Duration::from_secs(1)), slow), Ok(Vec::new()));
+        // With 0.3 s to greet, the same helper fails on SoundCraft's side.
+        assert!(matches!(scan_one(&helper(Duration::from_millis(300), Duration::from_secs(1)), slow), Err(Skip::HostStuck(_))));
+        // The startup's unused time is not added to the bundle's: a quick greeting, then a hang,
+        // times out after the bundle's 0.5 s, not after the startup's 10 s.
+        let started = Instant::now();
+        let hang = scan_one(&helper(Duration::from_secs(10), Duration::from_millis(500)), Path::new("/p/Hang.vst3"));
+        assert!(matches!(hang, Err(Skip::TimedOut(_))), "{hang:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        // Huge limits are clamped, not overflowed, once the helper has greeted.
+        assert_eq!(scan_one(&helper(Duration::MAX, Duration::MAX), Path::new("/p/Quick.vst3")), Ok(Vec::new()));
     }
 
     #[test]

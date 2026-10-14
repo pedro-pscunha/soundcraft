@@ -205,10 +205,11 @@ pub const SCAN_HELPER_FLAG: &str = "--soundcraft-scan-vst3";
 /// bundle skipped (the slowest plugins seen, Omnisphere and Keyscape, take a few seconds).
 pub const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a scan helper may take to start and greet. That is SoundCraft's own time, not the
-/// bundle's, which starts with the greeting: a machine busy enough to slow a process start never
-/// makes a bundle look slow. A helper that never greets fails on SoundCraft's side.
-pub const HELPER_STARTUP: Duration = Duration::from_secs(30);
+/// How long a scan helper may take to start and greet (a healthy start takes well under a second).
+/// That is SoundCraft's own time, not the bundle's, which starts with the greeting: a slow process
+/// start is not charged to the bundle. A helper that does not greet in time fails on SoundCraft's
+/// side: the bundle is listed as not scanned, never cached as a skip, and the scan stops.
+pub const HELPER_STARTUP: Duration = Duration::from_secs(15);
 
 /// How many scan helpers run at once. A helper stuck in a plugin is idle, so several stuck ones
 /// cost one time limit rather than one each.

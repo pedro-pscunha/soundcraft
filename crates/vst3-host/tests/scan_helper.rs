@@ -133,8 +133,11 @@ fn main() {
     if let [mode, exe, cache, dir] = args.as_slice()
         && mode == "--rescan-with"
     {
-        // These helpers fail on SoundCraft's side; one never greets, so its startup ends quickly.
-        let failing = ScanHelper { exe: exe.into(), cache: Some(cache.into()), parallel: 1, startup: TIMEOUT, ..helper() };
+        // These helpers fail on SoundCraft's side. The one that never greets gets a short startup,
+        // so it ends quickly; the others end by themselves.
+        let stalls = Path::new(exe).file_stem().is_some_and(|n| n == "stalling-scan-helper");
+        let failing = ScanHelper { exe: exe.into(), cache: Some(cache.into()), parallel: 1, ..helper() };
+        let failing = ScanHelper { startup: if stalls { TIMEOUT } else { failing.startup }, ..failing };
         soundcraft_vst3_host::set_scan_helper(Some(failing));
         soundcraft_vst3_host::add_search_dir(Path::new(dir));
         let started = Instant::now();
@@ -176,9 +179,10 @@ fn main() {
             .unwrap();
         std::process::exit(status.code().unwrap_or(1));
     }
-    // A scan that hangs fails the test instead of hanging it.
+    // A scan that hangs fails the test instead of hanging it (the suite takes ~80 s; a loaded
+    // machine adds a helper's start to each of its ~20 hanging scans).
     std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(120));
+        std::thread::sleep(Duration::from_secs(300));
         eprintln!("scan_helper: a scan hung");
         std::process::exit(1);
     });
@@ -300,6 +304,18 @@ fn launches(bundle: &Path) -> usize {
     std::fs::read_to_string(bundle.with_extension("launches")).map_or(0, |s| s.lines().count())
 }
 
+/// What scanning one plain fixture bundle in a helper takes here, now: mostly starting a debug
+/// helper, which a loaded machine slows. Wall-clock bounds add it, so a slow process start fails
+/// none of them (the bundle's own limit starts only with the helper's greeting). The bundle goes
+/// in a folder next to `dir`, out of the scans of `dir`.
+fn startup_cost(dir: &Path) -> Duration {
+    let (plain, _) = install(&dir.with_extension("baseline"), "Baseline", None);
+    let started = Instant::now();
+    let (found, _) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&plain), &helper());
+    assert_eq!(found.len(), 2, "the plain fixture did not load");
+    started.elapsed()
+}
+
 fn reason<'a>(skipped: &'a [SkippedBundle], bundle: &Path) -> &'a str {
     &skipped.iter().find(|s| s.path == bundle).unwrap_or_else(|| panic!("{} not skipped: {skipped:?}", bundle.display())).reason
 }
@@ -310,6 +326,7 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     let hangs = [hang.clone(), install(dir, "Hang2", Some("hang-entry")).0, install(dir, "Hang3", Some("hang-entry")).0];
     let (crash, _) = install(dir, "Crash", Some("crash-entry"));
     let (fail, _) = install(dir, "Fail", Some("fail-entry"));
+    let base = startup_cost(dir);
     let started = Instant::now();
     let (found, skipped) = soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &helper());
     let took = started.elapsed();
@@ -343,25 +360,27 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     let failed = reason(&skipped, &fail);
     assert!(failed.contains("Fail.vst3") && failed.contains("failed"), "{failed}");
     // The helpers ran side by side: the three hanging ones cost one time limit, not three.
-    assert!(took >= TIMEOUT && took < TIMEOUT * 2, "{took:?}");
+    assert!(took >= TIMEOUT && took < base + TIMEOUT * 2, "{took:?} (a helper's start: {base:?})");
     assert!(soundcraft_vst3_host::skipped().is_empty(), "scan_paths_with leaves the registry alone");
 }
 
-/// Helpers stuck in a plugin are idle: eight of them, the default parallelism, cost one time limit.
+/// Helpers stuck in a plugin are idle: eight of them, the default parallelism, cost one time limit
+/// (after their start), not eight.
 fn eight_stuck_helpers_cost_one_time_limit(dir: &Path) {
     for i in 0..8 {
         install(dir, &format!("Stuck{i}"), Some("hang-entry"));
     }
+    let base = startup_cost(dir);
     let started = Instant::now();
     let (found, skipped) = soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &helper());
     let took = started.elapsed();
     assert!(found.is_empty() && skipped.len() == 8, "{skipped:?}");
-    assert!(took >= TIMEOUT && took < TIMEOUT * 2, "{took:?}: not all eight ran at once");
+    assert!(took >= TIMEOUT && took < base + TIMEOUT * 2, "{took:?} (a helper's start: {base:?}): not all eight ran at once");
     // The pool runs as many helpers as it is given, and no more: one at a time, three stuck
-    // bundles cost three time limits.
+    // bundles cost three time limits (and three starts); three at a time, one of each.
     let three: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("Stuck{i}.vst3"))).collect();
     let short = Duration::from_secs(1);
-    for (parallel, at_least, below) in [(1, short * 3, short * 5), (3, short, short * 2)] {
+    for (parallel, at_least, below) in [(1, short * 3, short * 5 + base * 3), (3, short, short * 2 + base)] {
         let started = Instant::now();
         let (_, skipped) = soundcraft_vst3_host::scan_paths_with(&three, &ScanHelper { timeout: short, parallel, ..helper() });
         let took = started.elapsed();
@@ -375,12 +394,13 @@ fn eight_stuck_helpers_cost_one_time_limit(dir: &Path) {
 fn an_answer_counts_when_the_module_exit_hangs(dir: &Path) {
     let (bundle, _) = install(dir, "HangExit", Some("hang-exit"));
     let generous = ScanHelper { timeout: Duration::from_secs(10), ..helper() };
+    let base = startup_cost(dir);
     let started = Instant::now();
     let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &generous);
     let took = started.elapsed();
     assert!(skipped.is_empty(), "{skipped:?}");
     assert_eq!(found.len(), 2);
-    assert!(took < Duration::from_secs(6), "{took:?}: the helper was waited for to the end of its time limit");
+    assert!(took < base + Duration::from_secs(6), "{took:?} (a helper's start: {base:?}): the helper was waited for to the end of its time limit");
 }
 
 /// A plugin printing on standard output, even lines that look like answers or more than the host
@@ -390,13 +410,14 @@ fn plugin_output_cannot_spoil_or_hide_the_answer(dir: &Path) {
     if cfg!(unix) {
         bundles.push(install(dir, "Chatty", Some("chatty-entry")).0);
     }
+    let base = startup_cost(dir);
     for bundle in bundles {
         let started = Instant::now();
         let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &helper());
         assert!(skipped.is_empty(), "{skipped:?}");
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found.iter().all(|d| d.path == bundle));
-        assert!(started.elapsed() < TIMEOUT, "{:?}", started.elapsed());
+        assert!(started.elapsed() < base + TIMEOUT, "{:?} (a helper's start: {base:?})", started.elapsed());
     }
 }
 
@@ -459,6 +480,7 @@ fn failures_on_soundcrafts_side_load_no_bundle_in_process(dir: &Path, lone: &Pat
     for _ in 0..2 {
         soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &working);
     }
+    let base = startup_cost(dir);
     let copy = |name: &str| {
         let exe = helpers.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
         std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
@@ -476,7 +498,7 @@ fn failures_on_soundcrafts_side_load_no_bundle_in_process(dir: &Path, lone: &Pat
             assert_eq!(s["helper_failed"], true, "{report}");
             assert!(s["reason"].as_str().unwrap().starts_with("not scanned: the scan helper failed"), "{report}");
         }
-        assert!(report["secs"].as_f64().unwrap() < 2.0, "{report}");
+        assert!(report["secs"].as_f64().unwrap() < (base + Duration::from_secs(2)).as_secs_f64(), "{report} (a helper's start: {base:?})");
     }
     // Known to load means known for this very build of the bundle: once its binary changes, the
     // cached plugins say nothing about it, and it is not scanned either.
@@ -576,7 +598,7 @@ fn the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(dir: &Path, cac
     assert_eq!((launches(&sized), launches(&touched), launches(&good)), (2, 2, 3), "only the two changed bundles");
 }
 
-/// A timeout is provisional (a slow start or a busy machine can cause one): the next scan tries the
+/// A timeout is provisional (a busy machine can cause one): the next scan tries the
 /// bundle once more, and only a second timeout in a row is cached as a skip. A crash is cached at
 /// once.
 fn a_timeout_is_cached_only_when_it_happens_twice(dir: &Path, cache: &Path) {
@@ -782,6 +804,7 @@ fn adding_a_folder_first_keeps_the_standard_ones(dir: &Path) {
 #[cfg(unix)]
 fn a_timeout_kills_what_the_helper_started(dir: &Path) {
     let (bundle, mode) = install(dir, "WithChild", Some("hang-with-child"));
+    let base = startup_cost(dir);
     let started = Instant::now();
     let (_, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &helper());
     let took = started.elapsed();
@@ -789,7 +812,7 @@ fn a_timeout_kills_what_the_helper_started(dir: &Path) {
     let pid = pid_in(&mode.unwrap().with_file_name("child-pid"));
     let survived = processes::outlives(pid, Duration::from_secs(2));
     assert!(!survived, "the plugin's child {pid} outlived the timeout");
-    assert!(took < TIMEOUT + Duration::from_millis(1500), "{took:?}: its open output held the scan");
+    assert!(took < base + TIMEOUT + Duration::from_millis(1500), "{took:?} (a helper's start: {base:?}): its open output held the scan");
 }
 
 /// A process the plugin starts and leaves running does not hold up the answer: the helper's

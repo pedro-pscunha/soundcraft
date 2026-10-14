@@ -157,8 +157,7 @@ SDKs are licensed, so we'd write our own ADM and object renderer.
 No sidechain (key input) buses for any host; no ARA (Melodyne-style editing is a menu in Pro
 Tools); plugins run in-process, so a crashing plugin can take the session down. VST3 scans run in
 helper processes (the app's own executable, one per bundle, eight at a time, 30 s each from its
-greeting; the
-outcome cached per bundle across runs): a VST3
+greeting, which it has 15 s to give; the outcome cached per bundle across runs): a VST3
 that hangs (a PACE/iLok-protected plugin without its licence service) or crashes while it is
 scanned is logged and skipped, not the end of SoundCraft. CLAP and Audio Unit scans, and every
 plugin once it is created, still run in SoundCraft's process. ≈ 30–50 h. AAX
@@ -266,7 +265,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-14 | trivial | G-13: a VST3 scan helper's 30 s start with its greeting; starting up has a 30 s limit of its own (a busy machine slowing a process start no longer makes a bundle time out) |
+| 2026-10-14 | trivial | G-13: a VST3 scan helper's 30 s start with its greeting; starting up has a 15 s limit of its own (a busy machine slowing a process start no longer makes a bundle time out) |
 | 2026-10-14 | minor | G-13: when the scan helper fails on SoundCraft's side, bundles known to load are listed from their cached plugins and none is loaded in-process; a timeout costs 30 s on two scans; known limit: two SoundCraft builds sharing the settings folder discard each other's scan cache |
 | 2026-10-14 | trivial | G-13 wording: bundles a failing scan helper did not scan are tried again by the next rescan or the next start (that scan's result stands for the run), not by the next scan |
 | 2026-10-14 | minor | G-13: a VST3 timeout is retried once on the next run before it is cached as a skip, and the scan cache starts cold after a SoundCraft update; risks updated |
