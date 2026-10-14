@@ -1584,7 +1584,7 @@ mod tests {
     fn ordinary_play_after_stop_is_full_speed() {
         use serde_json::json;
         let engine = soundcraft_engine::Engine::default();
-        let player = soundcraft_playback::Player::new(engine.session_arc());
+        let player = soundcraft_playback::Player::without_device(engine.session_arc());
         let mut app = super::SoundApp::new(engine, Some(player), super::Services::default());
         app.engine.execute("edit.select", &json!({"start": 0, "end": 48000})).unwrap();
         app.engine.execute("options.loop_playback", &json!({"value": true})).unwrap();

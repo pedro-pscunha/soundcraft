@@ -1,4 +1,6 @@
 use serde_json::json;
+use soundcraft_model::Insert;
+use soundcraft_playback::{Player, StandInEditor};
 use soundcraft_ui_egui::{Services, SoundApp};
 
 #[test]
@@ -18,19 +20,24 @@ fn hide_floating_closes_automation() {
     assert!(app.ui.show_automation);
 }
 
-/// With audio on, hiding the floating windows also asks the player to close the plugins' own
-/// editors. None is open here (that takes a real hosted plugin): this runs the path with a player.
+/// With audio on, hiding the floating windows also closes the plugins' own editors (here a
+/// stand-in for one, on a player that opens no audio device).
 #[test]
-fn hide_floating_closes_plugin_windows_with_audio_on() {
-    let engine = soundcraft_engine::Engine::default();
-    let player = soundcraft_playback::Player::new(engine.session_arc());
-    let mut app = SoundApp::new(engine, Some(player), Services::default());
+fn hide_floating_closes_plugin_windows_and_editors() {
+    let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
     app.run("track.new", json!({"name": "Vox"})).unwrap();
     let vox = app.engine.session().track_by_name("Vox").unwrap().id;
+    app.engine.session_mut().track_mut(vox).unwrap().mixer.inserts[2] = Some(Insert::new("vst3:not-a-class-id"));
+    app.player = Some(Player::without_device(app.engine.session_arc()));
+    let editor = StandInEditor::default();
+    assert!(app.player.as_ref().is_some_and(|p| p.adopt_editor(app.engine.session(), vox, 2, Box::new(editor.clone()))));
     for command in ["window.hide_floating", "window.close"] {
         app.ui.plugin_windows.push((vox, 0));
+        app.run("window.plugin", json!({"track": "Vox", "slot": "c", "value": true})).unwrap();
+        assert!(editor.shown(), "{command}");
         app.run(command, json!({})).unwrap();
         assert!(app.ui.plugin_windows.is_empty(), "{command}");
-        assert!(app.player.as_ref().is_some_and(|p| !p.any_editor_open()), "{command}");
+        assert!(!editor.shown(), "{command} closes the editor");
     }
+    assert_eq!(editor.calls(), ["open", "close", "open", "close"]);
 }
