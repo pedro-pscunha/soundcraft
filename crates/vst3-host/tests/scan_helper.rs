@@ -52,7 +52,7 @@ fn main() {
     {
         let (bundle, slow) = (PathBuf::from(bundle), ScanHelper { timeout: Duration::from_secs(60), ..helper() });
         let dir = bundle.parent().unwrap().to_path_buf();
-        let stuck = entered(&bundle, "hang-entry");
+        let stuck = entered(&bundle, "hang-with-child");
         std::thread::spawn(move || soundcraft_vst3_host::scan_paths_with(&[dir], &slow));
         std::process::exit(if wait_for(&stuck, Duration::from_secs(10)) { 0 } else { 1 });
     }
@@ -682,13 +682,17 @@ fn a_process_the_plugin_leaves_running_does_not_hold_the_answer(dir: &Path) {
     assert!(took < Duration::from_millis(1500), "{took:?}: the answer was held open by the plugin's process");
 }
 
-/// A host killed mid-scan must not leave its helper stuck in a plugin's module entry for good.
+/// A host killed mid-scan must not leave its helper stuck in a plugin's module entry for good, nor
+/// what the plugin started.
 #[cfg(unix)]
 fn a_helper_ends_when_its_host_is_gone(dir: &Path) {
-    let (stuck, _) = install(dir, "Stuck", Some("hang-entry"));
+    let (stuck, mode) = install(dir, "Stuck", Some("hang-with-child"));
     let host = Command::new(std::env::current_exe().unwrap()).arg("--scan-and-exit").arg(&stuck).output().unwrap();
     assert!(host.status.success(), "the plugin never got stuck: {host:?}");
-    // The host waited until the plugin was stuck in its helper, so this is a live helper.
+    // The host waited until the plugin was stuck in its helper, so this is a live helper, and the
+    // plugin has started its child.
     let pid = pid_in(&stuck.with_extension("launches"));
+    let child = pid_in(&mode.unwrap().with_file_name("child-pid"));
     assert!(!processes::outlives(pid, Duration::from_secs(10)), "helper {pid} outlived its host");
+    assert!(!processes::outlives(child, Duration::from_secs(2)), "the plugin's child {child} outlived the host");
 }

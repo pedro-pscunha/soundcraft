@@ -11,7 +11,7 @@
 //!
 //! The helper exits with:
 //! - 0 when the bundle loaded, 2 when it did not;
-//! - 3 when its host is gone (see below);
+//! - 3 when its host is gone and its group could not be killed (see below; normally SIGKILL);
 //! - 4 when plugin code crashed it (Unix: its crash signals end it at once, so no crash report is
 //!   written).
 //!
@@ -172,14 +172,16 @@ fn end_with_host() {
     {
         let Some(host) = std::env::var(HOST_ENV).ok().and_then(|v| v.parse::<u32>().ok()) else { return };
         let gone = move || std::os::unix::process::parent_id() != host;
+        // The whole group: the helper and whatever its plugin started (no terminal signal reaches
+        // them now that they have a group of their own).
         if gone() {
-            crate::ffi::exit_now(3);
+            crate::ffi::end_own_process_group();
         }
         let _ = std::thread::Builder::new().name("vst3-scan-host".into()).spawn(move || {
             loop {
                 std::thread::sleep(HOST_POLL);
                 if gone() {
-                    crate::ffi::exit_now(3);
+                    crate::ffi::end_own_process_group();
                 }
             }
         });

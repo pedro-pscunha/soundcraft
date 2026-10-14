@@ -375,6 +375,16 @@ pub(crate) fn exit_now(code: c_int) -> ! {
     unsafe { _exit(code) }
 }
 
+/// Ends this process's whole process group at once: a scan helper (the leader of a group of its
+/// own) and whatever its plugin started. Falls back to ending this process alone.
+#[cfg(unix)]
+pub(crate) fn end_own_process_group() -> ! {
+    // SAFETY: kill(2) with pid 0 sends SIGKILL to every process of the caller's group, this one
+    // included; a scan helper leads a group of its own, so nothing else is in it.
+    unsafe { libc::kill(0, libc::SIGKILL) };
+    exit_now(3)
+}
+
 /// The status a scan helper ends with when plugin code crashes in it (see [`exit_on_crash_signals`]).
 #[cfg(unix)]
 pub(crate) const CRASHED_STATUS: c_int = 4;
