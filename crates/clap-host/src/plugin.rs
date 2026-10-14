@@ -25,9 +25,12 @@ pub struct ClapPlugin {
     info: &'static PluginInfo,
     /// CLAP id of each `info.params` entry (same order).
     ids: Vec<u32>,
-    /// The value the host last set or read of each parameter (same order as `ids`; the bits of an
-    /// `f32`), shared with the state reader.
-    values: Arc<[AtomicU32]>,
+    /// The value the host last set or read of each parameter (same order as `ids`).
+    values: Vec<f32>,
+    /// The value the plugin is known to have of each parameter: the last one it was handed in a
+    /// processed block, or read from it (same order as `ids`; the bits of an `f32`), shared with
+    /// the state reader.
+    known: Arc<[AtomicU32]>,
     /// Pending events, kept sorted by time (stable for equal times). Never grows past `EVENT_CAP`.
     queue: Vec<Event>,
     inputs: PortBuffers,
@@ -54,13 +57,9 @@ pub struct ClapPlugin {
 impl ClapPlugin {
     pub(crate) fn new(inst: Instance, info: &'static PluginInfo) -> ClapPlugin {
         let ids: Vec<u32> = info.params.iter().map(|p| p.id.parse::<u32>().unwrap_or(u32::MAX)).collect();
-        let values = info
-            .params
-            .iter()
-            .zip(&ids)
-            .map(|(p, id)| AtomicU32::new(inst.param_value(*id).map_or(p.default, |v| p.clamp(v as f32)).to_bits()))
-            .collect();
+        let values: Vec<f32> = info.params.iter().zip(&ids).map(|(p, id)| inst.param_value(*id).map_or(p.default, |v| p.clamp(v as f32))).collect();
         ClapPlugin {
+            known: values.iter().map(|v| AtomicU32::new(v.to_bits())).collect(),
             inst,
             info,
             ids,
@@ -86,9 +85,10 @@ impl ClapPlugin {
 
     /// Re-reads every parameter value from the plugin (after a state load).
     fn refresh_values(&mut self) {
-        for ((v, p), id) in self.values.iter().zip(self.info.params).zip(&self.ids) {
+        for (((v, k), p), id) in self.values.iter_mut().zip(self.known.iter()).zip(self.info.params).zip(&self.ids) {
             if let Some(x) = self.inst.param_value(*id) {
-                v.store(p.clamp(x as f32).to_bits(), Ordering::Relaxed);
+                *v = p.clamp(x as f32);
+                k.store(v.to_bits(), Ordering::Release);
             }
         }
         // Pending changes from before the load would undo it.
@@ -197,10 +197,11 @@ impl Plugin for ClapPlugin {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return false };
         let (Some(pi), Some(&cid)) = (self.info.params.get(i), self.ids.get(i)) else { return false };
         let v = pi.clamp(value);
-        if let Some(slot) = self.values.get(i) {
-            slot.store(v.to_bits(), Ordering::Relaxed);
+        if let Some(slot) = self.values.get_mut(i) {
+            *slot = v;
         }
-        // Coalesce with a pending change of the same parameter.
+        // Coalesce with a pending change of the same parameter. The plugin gets it with the next
+        // block, and only then is it known to have it (see `process`).
         if let Some(Event::Param { value, .. }) = self.queue.iter_mut().find(|e| matches!(e, Event::Param { id, .. } if *id == cid)) {
             *value = f64::from(v);
         } else {
@@ -211,7 +212,7 @@ impl Plugin for ClapPlugin {
 
     fn param(&self, id: &str) -> Option<f32> {
         let i = self.info.params.iter().position(|p| p.id == id)?;
-        self.values.get(i).map(|v| f32::from_bits(v.load(Ordering::Relaxed)))
+        self.values.get(i).copied()
     }
 
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
@@ -246,6 +247,16 @@ impl Plugin for ClapPlugin {
             let offset = u32::try_from(start).unwrap_or(u32::MAX);
             let events = self.queue.get(..k).unwrap_or(&[]);
             let r = self.inst.process(n, self.steady, &mut self.inputs, &mut self.outputs, events, offset, self.transport.as_ref());
+            if r.is_ok() {
+                // The plugin has these values now: a state reader may take them as known.
+                for e in events {
+                    if let Event::Param { id, value, .. } = e
+                        && let Some(k) = self.ids.iter().position(|x| x == id).and_then(|i| self.known.get(i))
+                    {
+                        k.store((*value as f32).to_bits(), Ordering::Release);
+                    }
+                }
+            }
             self.queue.drain(..k);
             self.steady = self.steady.saturating_add(i64::try_from(n).unwrap_or(0));
             match (r, self.out_main) {
@@ -350,7 +361,7 @@ impl Plugin for ClapPlugin {
 
     fn state_reader(&mut self) -> Option<Box<dyn PluginStateReader>> {
         let link = self.inst.state_link()?;
-        Some(Box::new(ClapStateReader { link, info: self.info, ids: self.ids.clone(), values: Arc::clone(&self.values) }))
+        Some(Box::new(ClapStateReader { link, info: self.info, ids: self.ids.clone(), known: Arc::clone(&self.known) }))
     }
 }
 
@@ -359,7 +370,7 @@ struct ClapStateReader {
     link: Arc<GuiLink>,
     info: &'static PluginInfo,
     ids: Vec<u32>,
-    values: Arc<[AtomicU32]>,
+    known: Arc<[AtomicU32]>,
 }
 
 impl PluginStateReader for ClapStateReader {
@@ -367,11 +378,24 @@ impl PluginStateReader for ClapStateReader {
         self.link.save_state()
     }
 
+    /// The plugin's values (`get_value`) next to the ones it is known to have been handed, which
+    /// are read first: a block that hands it a value meanwhile then can't make the plugin's old
+    /// value look like one it set by itself. A plugin that brings its main-thread values up to
+    /// date in `on_main_thread` (asked for from the audio thread) gets that call before they are
+    /// read.
     fn param_values(&mut self, ids: &[&str]) -> Vec<Option<ParamReading>> {
-        ids.iter()
+        let known: Vec<Option<(usize, f32)>> = ids
+            .iter()
             .map(|id| {
                 let i = self.info.params.iter().position(|p| p.id == *id)?;
-                let host = f32::from_bits(self.values.get(i)?.load(Ordering::Relaxed));
+                Some((i, f32::from_bits(self.known.get(i)?.load(Ordering::Acquire))))
+            })
+            .collect();
+        self.link.service_callback();
+        known
+            .into_iter()
+            .map(|k| {
+                let (i, host) = k?;
                 let live = self.info.params.get(i)?.clamp(self.link.param_value(*self.ids.get(i)?)? as f32);
                 Some(ParamReading { live, host })
             })

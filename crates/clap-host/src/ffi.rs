@@ -997,6 +997,27 @@ impl GuiLink {
         (unsafe { get(g.plugin, id, &mut v) } && v.is_finite()).then_some(v)
     }
 
+    /// Runs `on_main_thread` if the plugin asked for it, as `idle` does: a plugin may bring the
+    /// values `get_value` reads up to date there. Main thread only (no-op elsewhere).
+    pub fn service_callback(&self) {
+        if on_main_thread() {
+            self.run_callback(&self.lock());
+        }
+    }
+
+    /// Runs `on_main_thread` if the plugin asked for it (`request_callback`). On the main thread,
+    /// under the lock.
+    fn run_callback(&self, g: &GuiInner) {
+        if g.alive && self.host.callback.swap(false, Ordering::Relaxed) {
+            // SAFETY: `plugin` is valid while `alive`; we copy its vtable struct.
+            if let Some(f) = unsafe { (*g.plugin).on_main_thread } {
+                // SAFETY: live plugin, main thread (both callers check), requested via
+                // `request_callback`.
+                unsafe { f(g.plugin) };
+            }
+        }
+    }
+
     /// Closes (destroys) the editor.
     pub fn close(&self) {
         if !on_main_thread() {
@@ -1020,13 +1041,7 @@ impl GuiLink {
         if !g.alive {
             return Vec::new();
         }
-        if self.host.callback.swap(false, Ordering::Relaxed) {
-            // SAFETY: `plugin` is valid while `alive`; we copy its vtable struct.
-            if let Some(f) = unsafe { (*g.plugin).on_main_thread } {
-                // SAFETY: live plugin, main thread, requested via `request_callback`.
-                unsafe { f(g.plugin) };
-            }
-        }
+        self.run_callback(&g);
         if g.created {
             let resize = self.host.gui_resize.swap(0, Ordering::Relaxed);
             if resize != 0

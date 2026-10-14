@@ -9,7 +9,10 @@
 //! The gain plugin also implements `clap.state` (gain and mode as two little-endian f64s) and a
 //! floating-only `clap.gui` without a real window (its calls must come on the main thread, checked
 //! on macOS): showing it "edits" the gain to 0.25 in the GUI,
-//! reported as an output parameter event by the next `process`. It implements `clap.render`
+//! reported as an output parameter event by the next `process`. While its GUI exists, `get_value`
+//! reads Gain from a main-thread copy that `on_main_thread` brings up to date, asked for by the
+//! `process` that changed the gain (as GUIs that show audio-thread values do). It implements
+//! `clap.render`
 //! (only while deactivated) and reports 5 samples of latency instead of 3 while rendering offline,
 //! so tests can see the mode (as an offline "quality" with more lookahead). Its Mode stands in for
 //! other plugins there: in mode B it has a hard real-time requirement, in mode C it refuses
@@ -73,6 +76,8 @@ struct Fx {
     host: *const clap_host,
     synth: bool,
     gain: f64,
+    /// The gain as the main thread knows it while the GUI exists (see the crate docs).
+    gain_main: f64,
     mode: f64,
     level: f64,
     /// `clap.render` mode is `CLAP_RENDER_OFFLINE`.
@@ -243,6 +248,10 @@ unsafe extern "C" fn process(p: *const clap_plugin, pr: *const clap_process) -> 
             apply(f, h);
             next += 1;
         }
+        if f.gui_created && f.gain_main != f.gain {
+            let host = unsafe { &*f.host };
+            unsafe { (host.request_callback.unwrap())(f.host) };
+        }
         for c in 0..out.channel_count as usize {
             let o = unsafe { *out.data32.add(c) };
             let v = match input {
@@ -292,6 +301,7 @@ unsafe extern "C" fn params_get_info(_p: *const clap_plugin, index: u32, info: *
 unsafe extern "C" fn params_get_value(p: *const clap_plugin, id: clap_id, out: *mut f64) -> bool {
     let f = unsafe { fx(p) };
     let v = match id {
+        7 if f.gui_created => f.gain_main,
         7 => f.gain,
         3 => f.mode,
         9 => 0.0,
@@ -459,6 +469,7 @@ unsafe extern "C" fn gui_create(p: *const clap_plugin, _api: *const c_char, floa
     assert_main_thread("gui.create");
     assert!(floating && !f.gui_created, "create");
     f.gui_created = true;
+    f.gain_main = f.gain;
     true
 }
 
@@ -538,7 +549,10 @@ unsafe extern "C" fn get_extension(p: *const clap_plugin, id: *const c_char) -> 
     }
 }
 
-unsafe extern "C" fn on_main_thread(_p: *const clap_plugin) {}
+unsafe extern "C" fn on_main_thread(p: *const clap_plugin) {
+    let f = unsafe { fx(p) };
+    f.gain_main = f.gain;
+}
 
 // ---- factory + entry ----
 
@@ -581,6 +595,7 @@ unsafe extern "C" fn factory_create(_f: *const clap_plugin_factory, host: *const
         host,
         synth,
         gain: 1.0,
+        gain_main: 1.0,
         mode: 0.0,
         level: 0.0,
         offline: false,

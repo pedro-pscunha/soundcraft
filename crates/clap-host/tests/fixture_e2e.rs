@@ -316,6 +316,25 @@ fn state_reader_reads_the_values_the_plugin_set_itself() {
     assert_eq!(reader.param_values(&["7"]), vec![None], "the instance is gone");
 }
 
+/// A value the host sets reaches a CLAP plugin as an event of the next block. Until then the
+/// plugin still has its old value, which a save in between (a command, then a save on the next
+/// frame) must not take for one the plugin set by itself: that would store the old value over the
+/// new one. The host's value is the one the plugin was handed.
+#[test]
+fn the_host_value_is_the_one_the_plugin_was_handed() {
+    use soundcraft_dsp::{ParamReading, Plugin};
+    fixture_dir();
+    let mut p = soundcraft_clap_host::instantiate_plugin(GAIN).unwrap();
+    let mut reader = p.state_reader().expect("the gain fixture has clap.state");
+    assert!(p.set_param("7", 1.5));
+    p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
+    assert!(p.set_param("7", 0.5));
+    assert_eq!(p.param("7"), Some(0.5), "the value the host set");
+    assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 1.5, host: 1.5 })], "not handed over yet");
+    p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
+    assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 0.5, host: 0.5 })]);
+}
+
 #[test]
 fn editors_refuse_to_open_off_the_main_thread() {
     fixture_dir();

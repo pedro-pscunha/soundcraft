@@ -4,7 +4,7 @@
 
 mod common;
 
-use soundcraft_dsp::Plugin;
+use soundcraft_dsp::{ParamReading, Plugin};
 
 const GAIN: &str = "clap:org.soundcraft.test.gain";
 
@@ -29,6 +29,14 @@ fn main() {
     assert!((io[0][10] - 0.25).abs() < 1e-6, "{}", io[0][10]);
     assert_eq!(ed.idle(), vec![("7".to_string(), 0.25)]);
     assert!(ed.idle().is_empty(), "drained");
+    // While its GUI exists the fixture reads Gain from a main-thread copy that `on_main_thread`
+    // brings up to date, asked for by the block that changed it. The state reader has that call
+    // made before it reads, so the value the block handed over is not taken for the plugin's old
+    // one, which a save would store as set by the plugin itself.
+    let mut reader = p.state_reader().expect("the gain fixture has clap.state");
+    assert!(p.set_param("7", 1.5));
+    let _ = block(&mut p);
+    assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 1.5, host: 1.5 })]);
     ed.close();
     assert!(!ed.is_open());
     // Through the Plugin trait as well.
