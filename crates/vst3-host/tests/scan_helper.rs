@@ -146,6 +146,13 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     } else {
         assert!(crashed.contains("without an answer"), "{crashed}");
     }
+    #[cfg(unix)]
+    {
+        // A real crash (SIGSEGV) ends the helper at once, with no crash report under its name.
+        let segv = install(dir, "Segv", Some("segv-entry")).0;
+        let (_, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&segv), &helper());
+        assert!(reason(&skipped, &segv).starts_with("the scan helper crashed (a fatal signal in plugin code)"), "{skipped:?}");
+    }
     let failed = reason(&skipped, &fail);
     assert!(failed.contains("Fail.vst3") && failed.contains("failed"), "{failed}");
     // The helpers ran side by side: the three hanging ones cost one time limit, not three.

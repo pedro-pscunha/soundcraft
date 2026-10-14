@@ -104,6 +104,8 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
         return None;
     }
     end_with_host();
+    #[cfg(unix)]
+    crate::ffi::exit_on_crash_signals();
     let mut out = answer_channel();
     // Before any plugin code runs: proof that this is a scan helper speaking this protocol.
     if writeln!(out, "{HELLO}{PROTOCOL}").and_then(|()| out.flush()).is_err() {
@@ -396,6 +398,8 @@ fn ended_reason(st: ExitStatus) -> String {
         }
     }
     match st.code() {
+        #[cfg(unix)]
+        Some(crate::ffi::CRASHED_STATUS) => "the scan helper crashed (a fatal signal in plugin code)".into(),
         Some(c) => format!("the scan helper exited with status {c} without an answer"),
         None => format!("the scan helper ended without an answer ({st})"),
     }

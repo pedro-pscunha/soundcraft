@@ -375,6 +375,36 @@ pub(crate) fn exit_now(code: c_int) -> ! {
     unsafe { _exit(code) }
 }
 
+/// The status a scan helper ends with when plugin code crashes in it (see [`exit_on_crash_signals`]).
+#[cfg(unix)]
+pub(crate) const CRASHED_STATUS: c_int = 4;
+
+/// Makes a crash in this process (a scan helper running plugin code) end it at once with
+/// [`CRASHED_STATUS`] instead of the system's crash handling: no crash report under SoundCraft's
+/// name for a plugin's fault, and no wait while one is written.
+#[cfg(unix)]
+pub(crate) fn exit_on_crash_signals() {
+    unsafe extern "C" {
+        fn signal(signal: c_int, handler: extern "C" fn(c_int)) -> usize;
+    }
+    extern "C" fn crashed(_signal: c_int) {
+        exit_now(CRASHED_STATUS);
+    }
+    const SIGILL: c_int = 4;
+    const SIGABRT: c_int = 6;
+    const SIGFPE: c_int = 8;
+    const SIGSEGV: c_int = 11;
+    #[cfg(target_os = "linux")]
+    const SIGBUS: c_int = 7;
+    #[cfg(not(target_os = "linux"))]
+    const SIGBUS: c_int = 10;
+    for sig in [SIGILL, SIGABRT, SIGFPE, SIGSEGV, SIGBUS] {
+        // SAFETY: `signal` is the C library function with this signature (its handler is a plain C
+        // function of one int); `crashed` only calls `_exit`, which is async-signal-safe.
+        unsafe { signal(sig, crashed) };
+    }
+}
+
 /// Keeps standard output for a scan helper's own lines: returns a private copy of it, and points
 /// standard output (descriptor 1) at standard error, so whatever plugin code prints there goes to
 /// the error stream the host drains. `None` (standard output unchanged) if that fails.

@@ -30,7 +30,8 @@
 //! a broken answer line and one an answer in mid-line; `chatty-entry` prints 9 MiB on standard
 //! output and 1 MiB on standard error. `hang-exit` makes the module exit never return.
 //! `hang-with-child` starts a child process that keeps the module's standard output and error
-//! open (its id goes to a `child-pid` file next to the binary), then hangs (Unix).
+//! open (its id goes to a `child-pid` file next to the binary), then hangs (Unix). `segv-entry`
+//! writes through a null pointer, a real crash (Unix).
 //!
 //! Test code: panics are fine here, the host must survive anything anyway.
 
@@ -899,6 +900,11 @@ fn misbehave_on_entry() -> bool {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         }
+    }
+    #[cfg(unix)]
+    if dir.join("segv-entry").exists() {
+        // A real fault: a write through a null pointer.
+        unsafe { std::ptr::write_volatile(std::ptr::null_mut::<u8>(), 1) };
     }
     if dir.join("crash-entry").exists() {
         #[cfg(unix)]
