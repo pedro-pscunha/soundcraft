@@ -34,6 +34,9 @@ struct Registry {
     default_paths: Option<Vec<PathBuf>>,
     /// Bumped by every rescan: a scan that began before one does not store its result.
     generation: u64,
+    /// A rescan was asked for and no scan has begun since: whichever caller begins the next scan
+    /// makes it a rescan (the one who asked may not be the one who gets the lock first).
+    rescan_pending: bool,
     /// A scan of the search folders is running (without the lock); others wait for it on
     /// [`scan_done`].
     scanning: bool,
@@ -297,6 +300,7 @@ fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
         r.failed.clear();
         r.skipped.clear();
         r.not_scanned.clear();
+        r.rescan_pending = true;
     }
     loop {
         if let Some(list) = &r.scanned {
@@ -307,6 +311,7 @@ fn ensure_scanned(fresh: bool) -> Vec<Vst3Descriptor> {
         }
         r = scan_done().wait(r).unwrap_or_else(PoisonError::into_inner);
     }
+    let fresh = std::mem::take(&mut r.rescan_pending) || fresh;
     r.scanning = true;
     let generation = r.generation;
     let mut dirs = r.default_paths.clone().unwrap_or_else(paths::default_search_paths);

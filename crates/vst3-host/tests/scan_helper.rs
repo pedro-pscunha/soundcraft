@@ -61,6 +61,33 @@ fn main() {
     }
     // A fresh process for `adding_a_folder_first_keeps_the_standard_ones`: its standard folders hold
     // `standard`; `extra` is added before anything has scanned.
+    // A fresh process for `a_rescan_asked_for_during_a_scan_rescans`: a scan is stuck on `slow`,
+    // a rescan is asked for, and the stuck scan's caller scans again as soon as it is done. Exits
+    // 0 when `crashy`, cached as skipped, was scanned again (the rescan's scan was fresh).
+    if let [mode, cache, crashy, slow] = args.as_slice()
+        && mode == "--rescan-during-scan"
+    {
+        let (crashy, slow) = (PathBuf::from(crashy), PathBuf::from(slow));
+        soundcraft_vst3_host::set_scan_helper(Some(ScanHelper { cache: Some(cache.into()), ..helper() }));
+        let (crashed, slowed) = (launches(&crashy), launches(&slow));
+        let first = std::thread::spawn(|| {
+            soundcraft_vst3_host::scan();
+            // Back at once, as another caller would be (automation, a project load).
+            soundcraft_vst3_host::scan();
+        });
+        let started = Instant::now();
+        while launches(&slow) == slowed && started.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let rescan = std::thread::spawn(soundcraft_vst3_host::rescan);
+        rescan.join().unwrap();
+        first.join().unwrap();
+        let ok = launches(&crashy) > crashed && soundcraft_vst3_host::skipped().iter().any(|s| s.path == crashy && !s.from_cache);
+        if !ok {
+            eprintln!("the rescan was answered by a scan from the cache: {:?}", soundcraft_vst3_host::skipped());
+        }
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     // A fresh process for `failures_on_soundcrafts_side_load_only_bundles_known_to_load`: rescans
     // `dir` through `exe` with the scan cache `cache`, and prints what it found as JSON.
     if let [mode, exe, cache, dir] = args.as_slice()
@@ -123,6 +150,7 @@ fn main() {
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     the_registry_answers_while_helpers_scan(&root.join("busy"));
     a_rescan_during_a_scan_wins(&root.join("raced"));
+    a_rescan_asked_for_during_a_scan_rescans(&root.join("pending"));
     adding_a_folder_first_keeps_the_standard_ones(&root.join("add-first"));
     #[cfg(unix)]
     a_helper_ends_when_its_host_is_gone(&root.join("orphan"));
@@ -498,6 +526,25 @@ fn a_rescan_during_a_scan_wins(dir: &Path) {
     assert!(skipped.is_empty(), "the first scan's result won: {skipped:?}");
     assert_eq!(launches(&raced), before + 2, "scanned again after the first scan");
     soundcraft_vst3_host::set_scan_helper(None);
+}
+
+/// A rescan asked for while a scan runs is a rescan, whichever caller begins the next scan: with
+/// another caller waiting too (in a fresh process, see `--rescan-during-scan`).
+fn a_rescan_asked_for_during_a_scan_rescans(dir: &Path) {
+    let (crashy, _) = install(dir, "Crashy", Some("crash-entry"));
+    let (slow, _) = install(dir, "Slow", Some("hang-entry"));
+    let cache = dir.join("cache/vst3.json");
+    // Crashy is cached as skipped; Slow timed out once, so the next scan tries it again.
+    soundcraft_vst3_host::scan_paths_with(&[dir.to_path_buf()], &ScanHelper { cache: Some(cache.clone()), ..helper() });
+    let child = Command::new(std::env::current_exe().unwrap())
+        .arg("--rescan-during-scan")
+        .arg(&cache)
+        .arg(&crashy)
+        .arg(&slow)
+        .env("SOUNDCRAFT_VST3_DEFAULT_PATHS", dir)
+        .output()
+        .unwrap();
+    assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stderr));
 }
 
 /// A folder added before anything has scanned does not stand in for the standard folders: the
