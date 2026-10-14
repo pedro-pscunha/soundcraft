@@ -168,8 +168,10 @@ fn synth_plays_notes_at_their_offsets() {
     let id = id_of("Fixture Synth");
     let info = soundcraft_vst3_host::plugin_info(&id).unwrap();
     assert!(info.is_instrument);
-    assert!(info.params.is_empty());
+    assert_eq!(info.params.iter().map(|p| p.id).collect::<Vec<_>>(), ["2"], "Level only (1 is hidden)");
     let mut p = soundcraft_vst3_host::create(&id).unwrap();
+    // `prepare` sends the processor nothing it did not ask for: the synth's controller reports
+    // Level 0 while its processor plays at 1, and replaying the controller's values would mute it.
     p.prepare(48_000.0, 64, 2);
     let mut io = vec![vec![9.0f32; 64], vec![9.0f32; 64]];
     p.note_on(10, 60, 127);

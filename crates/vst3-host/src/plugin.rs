@@ -218,13 +218,11 @@ impl Plugin for Vst3Plugin {
                 self.latency = 0;
             }
         }
-        // Re-send every value so a re-activated plugin matches the session.
-        self.pending.clear();
-        for i in 0..self.ids.len().min(PARAM_QUEUE_CAP) {
-            if let (Some(&id), Some(n)) = (self.ids.get(i), self.values.get(i).and_then(|&v| self.normalized_from_plain(i, v))) {
-                self.pending.push((id, n));
-            }
-        }
+        // Values set since stay queued for the first block. Nothing else is re-sent: the plugin
+        // keeps its parameters across (re)activation and holds the rest in its own state, and
+        // re-sending everything would also replay the parameters it maps MIDI controllers to
+        // (`IMidiMapping`), so a stale sustain pedal or mod wheel would land in the same block
+        // as the clip's own controller events and could win.
     }
 
     fn set_render_mode(&mut self, mode: RenderMode) {

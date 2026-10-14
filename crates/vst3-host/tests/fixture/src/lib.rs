@@ -14,7 +14,10 @@
 //! - "Fixture Synth" (`Instrument|Synth`): a single-component instrument (the component is also
 //!   its edit controller). No audio input, one stereo output, one event input; every output
 //!   sample is the velocity of the held note (sample-accurate), 0 when none. Poly pressure, and
-//!   MIDI CC 7 through `IMidiMapping` (hidden parameter 1), set it to their value too.
+//!   MIDI CC 7 through `IMidiMapping` (hidden parameter 1), set it to their value too. Parameter 2
+//!   "Level" (0..1) scales the output; the processor starts at 1 while its controller reports 0
+//!   (a controller out of step with the processor's state), so a host that pushes the
+//!   controller's values into the processor silences it.
 //!
 //! The module checks the host's module lifecycle the way real plugins depend on it (see "module
 //! lifecycle" below) and aborts the process when it is broken.
@@ -433,6 +436,8 @@ impl IEditControllerTrait for GainController {
 
 struct Synth {
     level: AtomicU32,
+    /// Parameter 2, as the processor has it.
+    gain: AtomicU32,
     _live: Live,
 }
 
@@ -442,6 +447,8 @@ impl Class for Synth {
 
 /// The synth's hidden parameter that MIDI CC 7 drives.
 const VOLUME_PARAM: ParamID = 1;
+/// The synth's "Level" parameter.
+const LEVEL_PARAM: ParamID = 2;
 
 impl IMidiMappingTrait for Synth {
     unsafe fn getMidiControllerAssignment(&self, bus: i32, channel: i16, ctrl: CtrlNumber, id: *mut ParamID) -> tresult {
@@ -560,12 +567,19 @@ impl IAudioProcessorTrait for Synth {
             for i in 0..unsafe { changes.getParameterCount() } {
                 let Some(q) = (unsafe { ComRef::from_raw(changes.getParameterData(i)) }) else { continue };
                 let (mut at, mut v) = (0i32, 0f64);
-                if unsafe { q.getParameterId() } == VOLUME_PARAM && unsafe { q.getPoint(0, &mut at, &mut v) } == kResultOk {
+                let id = unsafe { q.getParameterId() };
+                if unsafe { q.getPoint(0, &mut at, &mut v) } != kResultOk {
+                    continue;
+                }
+                if id == VOLUME_PARAM {
                     volume = Some((at.max(0) as usize, v as f32));
+                } else if id == LEVEL_PARAM {
+                    self.gain.store((v as f32).to_bits(), Ordering::Relaxed);
                 }
             }
         }
         let outs = unsafe { channels(&*d.outputs, frames) };
+        let gain = f32::from_bits(self.gain.load(Ordering::Relaxed));
         let mut level = f32::from_bits(self.level.load(Ordering::Relaxed));
         let mut out = vec![0.0f32; frames];
         for (i, o) in out.iter_mut().enumerate() {
@@ -583,7 +597,7 @@ impl IAudioProcessorTrait for Synth {
             {
                 level = v;
             }
-            *o = level;
+            *o = level * gain;
         }
         self.level.store(level.to_bits(), Ordering::Relaxed);
         for ch in outs {
@@ -607,10 +621,22 @@ impl IEditControllerTrait for Synth {
         kResultOk
     }
     unsafe fn getParameterCount(&self) -> i32 {
-        0
+        1
     }
-    unsafe fn getParameterInfo(&self, _index: i32, _info: *mut ParameterInfo) -> tresult {
-        kInvalidArgument
+    unsafe fn getParameterInfo(&self, index: i32, info: *mut ParameterInfo) -> tresult {
+        if index != 0 {
+            return kInvalidArgument;
+        }
+        let i = unsafe { &mut *info };
+        i.id = LEVEL_PARAM;
+        copy_c16("Level", &mut i.title);
+        copy_c16("Level", &mut i.shortTitle);
+        copy_c16("", &mut i.units);
+        i.stepCount = 0;
+        i.defaultNormalizedValue = 1.0;
+        i.unitId = 0;
+        i.flags = ParameterInfo_::ParameterFlags_::kCanAutomate as i32;
+        kResultOk
     }
     unsafe fn getParamStringByValue(&self, _id: u32, _n: f64, _s: *mut String128) -> tresult {
         kInvalidArgument
@@ -695,7 +721,8 @@ impl IPluginFactoryTrait for Factory {
             })
             .to_com_ptr::<FUnknown>()
         } else if cid == SYNTH_CID {
-            ComWrapper::new(Synth { level: AtomicU32::new(0), _live: Live::new(&OBJECTS) }).to_com_ptr::<FUnknown>()
+            ComWrapper::new(Synth { level: AtomicU32::new(0), gain: AtomicU32::new(1f32.to_bits()), _live: Live::new(&OBJECTS) })
+                .to_com_ptr::<FUnknown>()
         } else {
             None
         };
