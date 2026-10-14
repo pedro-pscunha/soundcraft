@@ -87,6 +87,7 @@ impl AuPlugin {
 
     /// Re-reads every parameter value from the unit (after a state load).
     fn refresh_values(&mut self) {
+        self.edits.forget_reported();
         for (i, ((slot, p), &id)) in self.values.iter_mut().zip(self.info.params).zip(&self.ids).enumerate() {
             if let Some(v) = self.inst.get_param(id) {
                 *slot = p.clamp(v);
@@ -156,8 +157,13 @@ impl Plugin for AuPlugin {
         if let Some(slot) = self.values.get_mut(i) {
             *slot = v;
         }
+        // The session sending back the view's own edit: by now a drag may have moved the unit on,
+        // and setting it would step the unit back until the next echo.
+        let echo = self.edits.take_echo(i, v);
         self.edits.know(i, v);
-        self.inst.set_param(aid, v);
+        if !echo {
+            self.inst.set_param(aid, v);
+        }
         true
     }
 
@@ -352,6 +358,7 @@ impl PluginEditor for AuEditor {
             let v = p.clamp(v);
             if self.edits.known(i) != Some(v) {
                 self.edits.know(i, v);
+                self.edits.reported(i, v);
                 out.push((p.id.to_string(), v));
             }
         }
@@ -466,6 +473,31 @@ mod tests {
         p.inst.notify_any();
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(ed.idle().is_empty());
+    }
+
+    /// A view's edit comes back as the host's `set_param` once the session holds it (the mixer
+    /// applies new values on the audio thread). A drag may have moved the view on by then: the
+    /// echo must not set the unit back. Only the first set after a report can be its echo.
+    /// AUDelay ships with macOS; skipped where missing.
+    #[test]
+    fn a_views_edit_echoed_back_does_not_step_the_unit_back() {
+        let Ok(mut p) = crate::instantiate_plugin("au:aufx:dely:appl") else { return };
+        let mut ed = p.editor().expect("every unit has an editor");
+        let Some(time) = p.info.params.get(1) else { panic!("AUDelay has parameters") };
+        let Some(&time_id) = p.ids.get(1) else { panic!("ids") };
+        p.inst.link().listen(&p.ids, &p.edits);
+        assert!(p.inst.set_as_view(time_id, 0.75));
+        assert_eq!(ed.idle(), vec![(time.id.to_string(), 0.75)]);
+        assert!(p.inst.set_as_view(time_id, 1.25), "the drag goes on");
+        assert!(p.set_param(time.id, 0.75), "the echo of the first edit");
+        assert_eq!(p.inst.get_param(time_id), Some(1.25), "the unit keeps the view's newer value");
+        assert_eq!(ed.idle(), vec![(time.id.to_string(), 1.25)]);
+        assert!(p.set_param(time.id, 1.25));
+        assert_eq!(p.inst.get_param(time_id), Some(1.25));
+        // Taken once: the same value set again later reaches the unit.
+        assert!(p.inst.set_param(time_id, 0.5));
+        assert!(p.set_param(time.id, 1.25));
+        assert_eq!(p.inst.get_param(time_id), Some(1.25));
     }
 
     /// The mode reaches a unit that has one (AURoundTripAAC reports its `OfflineRender`

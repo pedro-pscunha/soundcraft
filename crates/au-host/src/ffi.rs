@@ -497,6 +497,9 @@ pub struct Edits {
     /// By index: the bits of the last value the host knows the unit has (one it set, showed in
     /// the view, read after a state load, or reported as an edit).
     known: Vec<AtomicU32>,
+    /// By index: `PENDING` plus the bits of the last value reported as an edit, until the host's
+    /// next `set_param` of that parameter takes it (0 then).
+    reported: Vec<AtomicU64>,
 }
 
 const PENDING: u64 = 1 << 32;
@@ -512,6 +515,28 @@ impl Edits {
             slots: ids.iter().map(|_| AtomicU64::new(0)).collect(),
             any: AtomicBool::new(false),
             known: (0..ids.len()).map(|i| AtomicU32::new(values.get(i).copied().unwrap_or(f32::NAN).to_bits())).collect(),
+            reported: ids.iter().map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    /// Notes that `value` was reported as an edit of parameter `i`: the session will send it back.
+    pub fn reported(&self, i: usize, value: f32) {
+        if let Some(r) = self.reported.get(i) {
+            r.store(PENDING | u64::from(value.to_bits()), Ordering::Release);
+        }
+    }
+
+    /// True when `value` is the last value reported for parameter `i`, i.e. the session sending
+    /// the view's own edit back. Forgets that value either way, so only the first set after a
+    /// report can be its echo (lock-free: the audio thread calls it).
+    pub fn take_echo(&self, i: usize, value: f32) -> bool {
+        self.reported.get(i).is_some_and(|r| r.swap(0, Ordering::AcqRel) == PENDING | u64::from(value.to_bits()))
+    }
+
+    /// Forgets every reported value (after a state load: nothing pending is an echo any more).
+    pub fn forget_reported(&self) {
+        for r in &self.reported {
+            r.store(0, Ordering::Release);
         }
     }
 
