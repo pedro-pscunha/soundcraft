@@ -36,6 +36,8 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(10);
 /// Most helpers at once, whatever the setting.
 const MAX_PARALLEL: usize = 16;
+/// The longest time limit honoured (a longer one would overflow the deadline).
+const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// The host's process id, handed to each helper.
 const HOST_ENV: &str = "SOUNDCRAFT_SCAN_HOST_PID";
 /// How often a helper checks that its host is still there.
@@ -166,7 +168,7 @@ fn scan_one(helper: &ScanHelper, bundle: &Path) -> Result<Vec<Vst3Descriptor>, S
         end(&mut child);
         return Err("cannot read the scan helper's output".into());
     };
-    let mut deadline = Instant::now() + helper.timeout;
+    let mut deadline = Instant::now() + helper.timeout.min(MAX_TIMEOUT);
     let mut answer: Option<String> = None;
     let mut timed_out = false;
     let status = loop {
@@ -350,6 +352,14 @@ mod tests {
         assert_eq!(run(Vec::<OsString>::new()), None);
         assert_eq!(run(["--demo".into()]), None);
         assert_eq!(run(["--soundcraft-scan-clap".into(), "x".into()]), None);
+    }
+
+    #[test]
+    fn a_huge_time_limit_does_not_overflow() {
+        // This test binary as the helper: it rejects the flag and exits without an answer.
+        let helper = ScanHelper { timeout: Duration::MAX, ..ScanHelper::new(std::env::current_exe().unwrap()) };
+        let r = scan_bundles(&helper, &[PathBuf::from("/x.vst3")]);
+        assert!(matches!(r.as_slice(), [Err(e)] if e.contains("without an answer")), "{r:?}");
     }
 
     #[test]
