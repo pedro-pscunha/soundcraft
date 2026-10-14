@@ -16,6 +16,7 @@ use crate::scan as paths;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The cache format; another version is ignored and replaced.
@@ -164,20 +165,34 @@ impl ScanCache {
         if let Some(dir) = self.file.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
-        let name = self.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "vst3.json".into());
-        let temporary = self.file.with_file_name(format!("{name}.{}.{nonce}.tmp", std::process::id()));
-        let written = (|| -> std::io::Result<()> {
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-            std::fs::rename(&temporary, &self.file)
-        })();
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        written.map_err(|e| e.to_string())
+        replace(&self.file, &temporary_for(&self.file), &bytes).map_err(|e| e.to_string())
     }
+}
+
+/// Numbers this process's writes of cache files, for their temporary files' names.
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// A name for the temporary file of a write of `file` that no other write uses: this process's id
+/// and the write's number (two threads writing at once, within the clock's resolution, still get
+/// two), and the time (against an earlier process that had the same id).
+fn temporary_for(file: &Path) -> PathBuf {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "vst3.json".into());
+    file.with_file_name(format!("{name}.{}.{nonce}.{n}.tmp", std::process::id()))
+}
+
+/// Writes `bytes` to `temporary`, a file it makes, then renames that over `file`. When that fails
+/// the temporary file goes too, if this call made it: one that was there is another write's.
+fn replace(file: &Path, temporary: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(temporary)?;
+    let written = f.write_all(bytes).and_then(|()| f.sync_all());
+    drop(f);
+    let written = written.and_then(|()| std::fs::rename(temporary, file));
+    if written.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    written
 }
 
 /// Deletes temporary files of `file` left by a write that never finished (a crash between writing
@@ -237,6 +252,26 @@ fn read(file: &Path) -> Result<Option<BTreeMap<PathBuf, (Fingerprint, Outcome)>>
 mod tests {
     use super::*;
     use soundcraft_dsp::Category;
+
+    #[test]
+    fn writes_in_one_process_never_share_a_temporary_file() {
+        // Many at once, as fast as they come: within the clock's resolution (a microsecond on
+        // macOS) only the write number tells them apart.
+        let names: std::collections::BTreeSet<PathBuf> = (0..1000).map(|_| temporary_for(Path::new("/cache/vst3.v1.json"))).collect();
+        assert_eq!(names.len(), 1000);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_another_writes_temporary_file() {
+        let d = dir("theirs");
+        let file = d.join("vst3.json");
+        let theirs = d.join("vst3.json.1.2.3.tmp");
+        std::fs::write(&theirs, b"theirs").unwrap();
+        assert!(replace(&file, &theirs, b"ours").is_err());
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"theirs");
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(d);
+    }
 
     fn dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("soundcraft-vst3-cache-{tag}-{}", std::process::id()));
