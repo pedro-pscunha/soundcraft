@@ -1012,6 +1012,19 @@ impl SoundApp {
     fn handle_transport(&mut self, dt: f32) {
         let reqs: Vec<TransportRequest> = std::mem::take(&mut self.engine.transport_requests);
         for r in reqs {
+            // Takes are placed from where recording started: a jump or a restart would misplace them.
+            let moves = matches!(
+                r,
+                TransportRequest::PlayFrom(_)
+                    | TransportRequest::PlayRange(_)
+                    | TransportRequest::Locate(_)
+                    | TransportRequest::PlaySelection
+                    | TransportRequest::HalfSpeed
+            );
+            if moves && self.engine.transport.recording {
+                self.ui.status = "Stop recording first.".into();
+                continue;
+            }
             match r {
                 TransportRequest::ResetSession => {
                     if let Some(p) = &self.player {
@@ -1386,6 +1399,31 @@ mod tests {
         app.engine.session_mut().edit.pre_roll = Samples::MAX;
         app.engine.session_mut().edit.post_roll = Samples::MAX;
         assert_eq!(play(&mut app), Some((0, Some(Samples::MAX), None)), "rolls far past the session's ends");
+    }
+
+    /// While recording, nothing jumps or restarts the transport: takes are placed from where
+    /// recording started.
+    #[test]
+    fn transport_jumps_wait_until_recording_stops() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.engine.transport.playing = true;
+        app.engine.transport.recording = true;
+        app.engine.transport.position = 48_000;
+        app.sim = Some((48_000, None, None));
+        for (command, params) in [
+            ("transport.play", json!({"from": 480_000})),
+            ("edit.play_timeline", json!({})),
+            ("transport.locate", json!({"at": 480_000})),
+            ("transport.play_selection", json!({})),
+            ("transport.half_speed", json!({})),
+        ] {
+            app.ui.status.clear();
+            app.run(command, params).unwrap();
+            app.handle_transport(0.0);
+            assert_eq!((app.sim, app.engine.transport.position), (Some((48_000, None, None)), 48_000), "{command}");
+            assert!(app.engine.transport.recording, "{command}");
+            assert_eq!(app.ui.status, "Stop recording first.", "{command}");
+        }
     }
 
     #[test]
