@@ -3812,6 +3812,7 @@ dependencies = [
 name = "soundcraft-vst3-host"
 version = "0.7.0"
 dependencies = [
+ "libc",
  "libloading",
  "log",
  "objc2 0.6.5",

@@ -411,22 +411,20 @@ pub(crate) fn exit_on_crash_signals() {
 #[cfg(unix)]
 pub(crate) fn private_stdout() -> Option<std::fs::File> {
     use std::os::fd::FromRawFd;
-    unsafe extern "C" {
-        fn dup(fd: c_int) -> c_int;
-        fn dup2(from: c_int, to: c_int) -> c_int;
-    }
-    // SAFETY: `dup` is the C library function with this signature; it takes any descriptor number
-    // and returns a new descriptor or -1.
-    let fd = unsafe { dup(1) };
+    // Close-on-exec: a process plugin code starts must not inherit it, or the host would see no end
+    // of the answers until that process ends.
+    // SAFETY: `fcntl` with F_DUPFD_CLOEXEC takes a descriptor and the lowest number to use, and
+    // returns a new descriptor or -1; descriptor 1 is this process's standard output.
+    let fd = unsafe { libc::fcntl(1, libc::F_DUPFD_CLOEXEC, 3) };
     if fd < 0 {
         return None;
     }
     // SAFETY: `fd` is a fresh descriptor nothing else owns; the `File` takes it over (and closes it
     // when dropped).
     let private = unsafe { std::fs::File::from_raw_fd(fd) };
-    // SAFETY: `dup2` is the C library function with this signature; it atomically makes
-    // descriptor 1 a copy of descriptor 2 (standard error) and returns -1 on failure.
-    if unsafe { dup2(2, 1) } < 0 {
+    // SAFETY: `dup2` atomically makes descriptor 1 a copy of descriptor 2 (standard error) and
+    // returns -1 on failure.
+    if unsafe { libc::dup2(2, 1) } < 0 {
         return None;
     }
     Some(private)

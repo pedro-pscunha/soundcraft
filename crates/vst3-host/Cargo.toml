@@ -23,6 +23,10 @@ libloading = "0.8"
 # The scan helper's answer and the scan cache (JSON).
 serde_json.workspace = true
 
+# The scan helper's process plumbing (descriptors, signals, process groups) on Unix.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The macOS editor host window: SoundCraft's plugin window (soundcraft-macos), whose content view
 # the plugin's IPlugView attaches to.
 [target.'cfg(target_os = "macos")'.dependencies]

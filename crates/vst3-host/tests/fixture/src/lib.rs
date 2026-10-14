@@ -30,7 +30,9 @@
 //! a broken answer line and one an answer in mid-line; `chatty-entry` prints 9 MiB on standard
 //! output and 1 MiB on standard error. `hang-exit` makes the module exit never return.
 //! `hang-with-child` starts a child process that keeps the module's standard output and error
-//! open (its id goes to a `child-pid` file next to the binary), then hangs (Unix). `segv-entry`
+//! open (its id goes to a `child-pid` file next to the binary), then hangs (Unix). `child-entry`
+//! starts a long-lived child process with no standard streams (its id goes to `child-pid` too),
+//! then loads normally (Unix). `segv-entry`
 //! writes through a null pointer, a real crash (Unix).
 //!
 //! Test code: panics are fine here, the host must survive anything anyway.
@@ -887,6 +889,13 @@ fn own_path() -> Option<std::path::PathBuf> {
 /// Misbehaves in the module entry when a scan test asked for it (see the crate docs).
 fn misbehave_on_entry() -> bool {
     let Some(dir) = own_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return true };
+    #[cfg(unix)]
+    if dir.join("child-entry").exists() {
+        use std::process::{Command, Stdio};
+        if let Ok(child) = Command::new("sleep").arg("600").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            let _ = std::fs::write(dir.join("child-pid"), child.id().to_string());
+        }
+    }
     #[cfg(unix)]
     if dir.join("hang-with-child").exists() {
         if let Ok(child) = std::process::Command::new("sleep").arg("600").spawn() {

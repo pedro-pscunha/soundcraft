@@ -167,6 +167,8 @@ fn main() {
     an_answer_counts_when_the_module_exit_hangs(&root.join("hang-exit"));
     #[cfg(unix)]
     a_timeout_kills_what_the_helper_started(&root.join("with-child"));
+    #[cfg(unix)]
+    a_process_the_plugin_leaves_running_does_not_hold_the_answer(&root.join("leaves-child"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     a_timeout_is_cached_only_when_it_happens_twice(&root.join("twice"), &root.join("twice-cache/vst3.json"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
@@ -624,6 +626,21 @@ fn a_timeout_kills_what_the_helper_started(dir: &Path) {
     }
     assert!(!survived, "the plugin's child {} outlived the timeout", pid.trim());
     assert!(took < TIMEOUT + Duration::from_millis(1500), "{took:?}: its open output held the scan");
+}
+
+/// A process the plugin starts and leaves running does not hold up the answer: the helper's
+/// private answer channel is not passed on to it.
+#[cfg(unix)]
+fn a_process_the_plugin_leaves_running_does_not_hold_the_answer(dir: &Path) {
+    let (bundle, mode) = install(dir, "LeavesChild", Some("child-entry"));
+    let generous = ScanHelper { timeout: Duration::from_secs(10), ..helper() };
+    let started = Instant::now();
+    let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &generous);
+    let took = started.elapsed();
+    let pid = std::fs::read_to_string(mode.unwrap().with_file_name("child-pid")).unwrap();
+    let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+    assert!(skipped.is_empty() && found.len() == 2, "{skipped:?}");
+    assert!(took < Duration::from_millis(1500), "{took:?}: the answer was held open by the plugin's process");
 }
 
 /// A host killed mid-scan must not leave its helper stuck in a plugin's module entry for good.
