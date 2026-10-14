@@ -314,6 +314,10 @@ pub trait PluginStateReader: Send {
     fn param_values(&mut self, ids: &[&str]) -> Vec<Option<ParamReading>> {
         ids.iter().map(|_| None).collect()
     }
+    /// Main-thread housekeeping, called every UI frame on the thread of `save_state`: hands the
+    /// instance what that thread owes it (VST3: the values the host set, for its edit
+    /// controller). Default: nothing.
+    fn idle(&mut self) {}
 }
 
 /// A hosted plugin's parameter as a [`PluginStateReader`] reads it.

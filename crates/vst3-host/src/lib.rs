@@ -38,7 +38,11 @@
 //! main thread while the instance processes on the audio thread (VST3's own threading model:
 //! the controller and its views live on the UI thread). Parameter edits made in the editor
 //! (`IComponentHandler::performEdit`) are reported by the handle's `idle` so the host can write
-//! them into the session. An instance dropped off the main thread with its editor open (the audio
+//! them into the session. Values the host sets reach the processor with the next block and the
+//! controller from the UI thread: the state reader's `idle`, every frame, hands it the values set
+//! since (`setParamNormalized`, so the editor shows them and a preset the plugin loads afterwards
+//! is not set back at the next save), except the editor's own edits coming back from the session,
+//! which would set a knob being dragged back. An instance dropped off the main thread with its editor open (the audio
 //! thread drops a torn-down mixer's instances) is not touched there: its view is removed, its
 //! window closed and the plugin terminated on the main thread (macOS: the main dispatch queue;
 //! Windows: a message to the editor window). Linux (X11) editor windows are not hosted yet:

@@ -377,6 +377,63 @@ fn state_reader_reads_the_values_the_plugin_set_itself() {
     assert_eq!(reader.param_values(&["7"]), vec![None], "the instance is gone");
 }
 
+/// A Fixture Gain state ("preset"): Gain `gain` normalized in the component, Freq `freq`
+/// normalized in the controller.
+fn gain_preset(gain: f64, freq: f64) -> Vec<u8> {
+    let mut preset = b"SCV3".to_vec();
+    preset.extend_from_slice(&8u32.to_le_bytes());
+    preset.extend_from_slice(&gain.to_le_bytes());
+    preset.extend_from_slice(&8u32.to_le_bytes());
+    preset.extend_from_slice(&freq.to_le_bytes());
+    preset
+}
+
+/// The session's overrides reach the controller on the next UI frame (the state reader's
+/// `idle`), as VST3 hosts hand the values they set to the controller on the UI thread. A preset
+/// the plugin loads in its own editor afterwards, which it announces only as "values changed", is
+/// then read whole at the next save: before, the overrides waited for the save and were handed
+/// over on top of the preset, setting the editor's knobs back and hiding the preset from the save.
+#[test]
+fn a_preset_loaded_after_the_overrides_reached_the_controller_is_read_whole() {
+    use soundcraft_dsp::{ParamReading, Plugin};
+    let mut p = soundcraft_vst3_host::instantiate_plugin(&id_of("Fixture Gain")).unwrap();
+    let mut reader = p.state_reader().expect("every VST3 component has a state");
+    // The mixer sends the session's overrides to a new instance and renders.
+    assert!(p.set_param("7", 1.5));
+    assert!(p.set_param("12", 200.0));
+    p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
+    // One UI frame.
+    reader.idle();
+    assert!(p.load_state_unseen(&gain_preset(0.25, 1.0)));
+    let read = reader.param_values(&["7", "12"]);
+    assert_eq!(read[0], Some(ParamReading { live: 0.5, host: 1.5 }), "the preset's gain");
+    let freq = read[1].unwrap();
+    assert!((freq.live - 20_000.0).abs() < 1.0 && freq.host == 200.0, "the preset's frequency: {freq:?}");
+}
+
+/// An edit made in the plugin's editor comes back from the session as a host set a frame or an
+/// audio block later. That echo is not handed to the controller: by then a drag may have moved
+/// the knob on (it would jump back), or a preset been loaded (it would be set back to the edit).
+/// A value of the host's own is handed over.
+#[test]
+fn the_editors_own_edits_coming_back_are_not_handed_to_its_controller() {
+    use soundcraft_dsp::{ParamReading, Plugin};
+    let mut p = soundcraft_vst3_host::instantiate_plugin(&id_of("Fixture Gain")).unwrap();
+    let mut ed = Plugin::editor(&mut p).expect("editor handle");
+    let mut reader = p.state_reader().expect("every VST3 component has a state");
+    // The fixture "edits" Gain to 0.9 (normalized) when it gets the component handler.
+    assert_eq!(ed.idle(), vec![("7".to_string(), 1.8)]);
+    // Then loads a preset (Gain 0.25 normalized, 0.5 plain).
+    assert!(p.load_state_unseen(&gain_preset(0.25, 1.0)));
+    // The session sends the edit back.
+    assert!(p.set_param("7", 1.8));
+    reader.idle();
+    assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 0.5, host: 1.8 })], "the preset stays");
+    assert!(p.set_param("7", 1.0));
+    reader.idle();
+    assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 1.0, host: 1.0 })], "the host's own value");
+}
+
 #[test]
 fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     let id = id_of("Fixture Gain");

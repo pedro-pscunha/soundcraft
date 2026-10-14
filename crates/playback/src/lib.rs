@@ -17,9 +17,10 @@
 //! travel to the audio thread together with the session snapshot that needs them; the mix
 //! engine adopts them (see `soundcraft_mix`'s crate docs). Instances the engine retires, and the
 //! session snapshots the callback replaces, come back on return channels and are dropped on the UI
-//! thread ([`Player::idle`]). Plugin editors are driven, and plugin states for saving read
-//! ([`Player::capture_states`]), on the UI thread
-//! through handles taken from each instance before it leaves ([`Player::open_editor`]).
+//! thread ([`Player::idle`]). Plugin editors are driven, plugin states for saving read
+//! ([`Player::capture_states`]), and the work a plugin format leaves to the UI thread done every
+//! frame (a VST3 edit controller learns the values the host set; [`Player::idle`]), on the UI
+//! thread through handles taken from each instance before it leaves ([`Player::open_editor`]).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod devices;
@@ -759,11 +760,15 @@ impl Player {
         self.side().capture_states(s)
     }
 
-    /// Per-UI-frame housekeeping: drops retired instances and services plugin editors. Returns
-    /// the parameter edits made in open editors since the last call.
+    /// Per-UI-frame housekeeping: drops retired instances, lets state readers hand their
+    /// instances what the UI thread owes them, and services plugin editors. Returns the
+    /// parameter edits made in open editors since the last call.
     pub fn idle(&self) -> Vec<EditorEdit> {
         let mut side = self.side();
         side.collect_garbage();
+        for r in side.states.values_mut() {
+            r.idle();
+        }
         let mut out = side.take_orphaned();
         for (&(t, slot), e) in side.editors.iter_mut() {
             for (id, v) in e.idle() {
@@ -1528,6 +1533,35 @@ mod tests {
         assert!(p.adopt_editor(&s, t, 2, Box::new(refusing.clone())));
         assert_eq!(p.open_editor(t, 2), Err(EditorError::Failed("no window today".into())));
         assert_eq!((refusing.shown(), p.editor_state(t, 2)), (false, EditorState::Closed));
+    }
+
+    /// A VST3 instance's edit controller learns the values the host set only from the UI thread,
+    /// so each UI frame lets every live instance's state reader do that work.
+    #[test]
+    fn idle_lets_every_state_reader_do_its_main_thread_work() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        use std::sync::atomic::AtomicUsize;
+        struct Counting(Arc<AtomicUsize>);
+        impl PluginStateReader for Counting {
+            fn save_state(&mut self) -> Option<Vec<u8>> {
+                None
+            }
+            fn idle(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("clap:does.not.exist"));
+        s.track_mut(t).unwrap().mixer.inserts[2] = Some(Insert::new("vst3:does.not.exist"));
+        let s = Arc::new(s);
+        let p = Player::without_device(Arc::clone(&s));
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        assert!(p.adopt_state_reader(&s, t, 1, Box::new(Counting(Arc::clone(&a)))));
+        assert!(p.adopt_state_reader(&s, t, 2, Box::new(Counting(Arc::clone(&b)))));
+        p.idle();
+        p.idle();
+        assert_eq!((a.load(Ordering::Relaxed), b.load(Ordering::Relaxed)), (2, 2));
     }
 
     #[test]

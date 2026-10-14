@@ -2,8 +2,9 @@
 
 use crate::ffi::{AFTERTOUCH, BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP, PITCH_BEND};
 use soundcraft_dsp::{ParamReading, Plugin, PluginEditor, PluginInfo, PluginStateReader, RenderMode, Transport, Unit};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use vst3::ComWrapper;
 
 /// Largest block we set a plugin up for.
@@ -12,6 +13,11 @@ const MAX_BLOCK: usize = 1 << 16;
 const MAX_CHANNELS: usize = 64;
 /// An `unsynced` slot with no value waiting (a NaN pattern, which `set_param` never stores).
 const SYNCED: u64 = u64::MAX;
+/// How long a value the editor reported waits to come back from the session (see [`Echoes`]):
+/// it takes a UI frame and an audio block, far less even at the largest buffer size.
+const ECHO_WINDOW: Duration = Duration::from_secs(1);
+/// Most reports [`Echoes`] remembers (the oldest goes first).
+const ECHO_CAP: usize = 64;
 
 /// How a SoundCraft parameter value maps to the VST3 normalized value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,8 +45,15 @@ pub struct Vst3Plugin {
     pending: Vec<(u32, f64)>,
     /// Host-set normalized values the controller has not seen yet (same order as `ids`; the bits
     /// of an `f64`, or [`SYNCED`]). `set_param` may run on the audio thread, so it never calls the
-    /// controller; the state reader, which already does, hands them over first.
+    /// controller; the state reader hands them over on the UI thread, every frame (its `idle`)
+    /// and before it reads.
     unsynced: Arc<[AtomicU64]>,
+    /// Raised by `set_param` once it stored an `unsynced` value: the state reader's `idle` has
+    /// work to do.
+    dirty: Arc<AtomicBool>,
+    /// The editor's edits on their way back from the session, shared by the editor and the state
+    /// reader.
+    echoes: Arc<Mutex<Echoes>>,
     /// Pending notes, kept sorted by time. Never grows past `EVENT_CAP`.
     notes: Vec<NoteEvent>,
     /// The parameter each MIDI controller drives (see `Instance::midi_mapping`).
@@ -94,6 +107,8 @@ impl Vst3Plugin {
             values: Arc::from(Vec::new()),
             pending: Vec::with_capacity(ids.len().min(PARAM_QUEUE_CAP)),
             unsynced: ids.iter().map(|_| AtomicU64::new(SYNCED)).collect(),
+            dirty: Arc::new(AtomicBool::new(false)),
+            echoes: Arc::new(Mutex::new(Echoes::default())),
             notes: Vec::with_capacity(EVENT_CAP),
             midi_map: Vec::new(),
             controls: Vec::with_capacity(EVENT_CAP),
@@ -193,6 +208,8 @@ impl Vst3Plugin {
         for u in self.unsynced.iter() {
             u.store(SYNCED, Ordering::Relaxed);
         }
+        // Nothing the session sends from now on is an echo of an edit made before the load.
+        self.echoes.lock().unwrap_or_else(PoisonError::into_inner).0.clear();
     }
 
     /// Inserts keeping the queue time-sorted; drops the event when the queue is full (never
@@ -268,6 +285,8 @@ impl Plugin for Vst3Plugin {
         // entry then also hands the controller this value before reading it back.
         if let (Some(n), Some(u)) = (n, self.unsynced.get(i)) {
             u.store(n.to_bits(), Ordering::Relaxed);
+            // After the value: a reader's `idle` that sees the flag also sees the value.
+            self.dirty.store(true, Ordering::Release);
         }
         if let Some(slot) = self.values.get(i) {
             slot.store(v.to_bits(), Ordering::Release);
@@ -443,7 +462,14 @@ impl Plugin for Vst3Plugin {
 
     fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
         let link = self.inst.editor()?;
-        Some(Box::new(Vst3Editor { link, host: self.inst.host_ref(), info: self.info, ids: self.ids.clone(), maps: self.maps.clone() }))
+        Some(Box::new(Vst3Editor {
+            link,
+            host: self.inst.host_ref(),
+            info: self.info,
+            ids: self.ids.clone(),
+            maps: self.maps.clone(),
+            echoes: Arc::clone(&self.echoes),
+        }))
     }
 
     fn state_reader(&mut self) -> Option<Box<dyn PluginStateReader>> {
@@ -453,8 +479,46 @@ impl Plugin for Vst3Plugin {
             ids: self.ids.clone(),
             maps: self.maps.clone(),
             unsynced: Arc::clone(&self.unsynced),
+            dirty: Arc::clone(&self.dirty),
+            echoes: Arc::clone(&self.echoes),
             values: Arc::clone(&self.values),
         }))
+    }
+}
+
+/// The values the editor reported as edits, on their way back from the session as host sets.
+/// Handing such an echo to the controller would set a knob the user is dragging back to where it
+/// was a frame or an audio block ago, and a preset loaded in the editor meanwhile back to the
+/// edit. Each report is `(VST3 id, normalized bits, when)`, the normalized value as `set_param`
+/// makes it from the plain value the session sends. Main thread only.
+#[derive(Default)]
+struct Echoes(Vec<(u32, u64, Instant)>);
+
+impl Echoes {
+    /// Notes that the editor reported `n` for `id` at `now`.
+    fn reported(&mut self, id: u32, n: f64, now: Instant) {
+        if self.0.len() >= ECHO_CAP {
+            self.0.remove(0);
+        }
+        self.0.push((id, n.to_bits(), now));
+    }
+
+    /// True when the host's value `n` for `id`, handed over at `now`, is the session sending a
+    /// report back. The session sends the latest value it has, so the newest report of `n` and
+    /// every older report of `id` are answered and forgotten. A value that matches none is the
+    /// host's own, and every report of `id` is forgotten. Reports older than [`ECHO_WINDOW`] are
+    /// forgotten first: their echo would have come by then, so the session went back to the value
+    /// it had sent and sent nothing.
+    fn take(&mut self, id: u32, n: f64, now: Instant) -> bool {
+        self.0.retain(|r| now.saturating_duration_since(r.2) <= ECHO_WINDOW);
+        let echo = self.0.iter().rposition(|r| r.0 == id && r.1 == n.to_bits());
+        let mut k = 0usize;
+        self.0.retain(|r| {
+            let keep = r.0 != id || echo.is_some_and(|e| k > e);
+            k += 1;
+            keep
+        });
+        echo.is_some()
     }
 }
 
@@ -465,16 +529,22 @@ struct Vst3StateReader {
     ids: Vec<u32>,
     maps: Vec<Mapping>,
     unsynced: Arc<[AtomicU64]>,
+    dirty: Arc<AtomicBool>,
+    echoes: Arc<Mutex<Echoes>>,
     values: Arc<[AtomicU32]>,
 }
 
 impl Vst3StateReader {
-    /// Hands the controller the host-set values it has not seen yet: a parameter only the
-    /// controller stores (no processor state) would otherwise be read with its stale value.
+    /// Hands the controller the host-set values it has not seen yet (`setParamNormalized`, as
+    /// VST3 hosts do on the UI thread), except the editor's own edits coming back (see
+    /// [`Echoes`]). Its editor then shows them, and a parameter only the controller stores (no
+    /// processor state) is not saved with a stale value.
     fn sync(&self) {
+        let now = Instant::now();
+        let mut echoes = self.echoes.lock().unwrap_or_else(PoisonError::into_inner);
         for (&id, u) in self.ids.iter().zip(self.unsynced.iter()) {
             let bits = u.swap(SYNCED, Ordering::Relaxed);
-            if bits != SYNCED {
+            if bits != SYNCED && !echoes.take(id, f64::from_bits(bits), now) {
                 self.link.sync_param(id, f64::from_bits(bits));
             }
         }
@@ -485,6 +555,16 @@ impl PluginStateReader for Vst3StateReader {
     fn save_state(&mut self) -> Option<Vec<u8>> {
         self.sync();
         self.link.save_state()
+    }
+
+    /// Hands the controller the values the host set since the last frame. Done promptly, and not
+    /// only before a save: a preset the plugin loads in its own editor (announced only as
+    /// `restartComponent(kParamValuesChanged)`) would otherwise have older host values handed
+    /// over on top of it at the next save, hiding it from the save.
+    fn idle(&mut self) {
+        if self.dirty.swap(false, Ordering::Acquire) {
+            self.sync();
+        }
     }
 
     /// The controller's values (`getParamNormalized`, converted as the editor's edits are). What
@@ -518,6 +598,7 @@ struct Vst3Editor {
     info: &'static PluginInfo,
     ids: Vec<u32>,
     maps: Vec<Mapping>,
+    echoes: Arc<Mutex<Echoes>>,
 }
 
 /// Parameter `i`'s normalized value `n` as a plain value, through the controller (main thread).
@@ -572,10 +653,19 @@ impl PluginEditor for Vst3Editor {
 
     fn idle(&mut self) -> Vec<(String, f32)> {
         self.link.idle();
-        let mut out = Vec::new();
-        for (vid, n) in self.host.take_edits() {
+        let edits = self.host.take_edits();
+        if edits.is_empty() {
+            return Vec::new();
+        }
+        let (mut out, now) = (Vec::new(), Instant::now());
+        let mut echoes = self.echoes.lock().unwrap_or_else(PoisonError::into_inner);
+        for (vid, n) in edits {
             let Some(i) = self.ids.iter().position(|&x| x == vid) else { continue };
             if let (Some(p), Some(v)) = (self.info.params.get(i), self.plain(i, n)) {
+                // The session sends `v` back (see `Echoes`).
+                if let Some(echo) = self.normalized(i, v) {
+                    echoes.reported(vid, echo, now);
+                }
                 out.push((p.id.to_string(), v));
             }
         }
@@ -587,5 +677,56 @@ impl PluginEditor for Vst3Editor {
         if let (Some(&vid), Some(n)) = (self.ids.get(i), self.normalized(i, value)) {
             self.link.set_normalized(vid, n);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The session sends the editor's edits back in order, or only the latest of those made
+    /// within an audio block; a value of the host's own matches none of them.
+    #[test]
+    fn echoes_answer_the_newest_matching_report_and_every_older_one() {
+        let t = Instant::now();
+        let mut e = Echoes::default();
+        // A toggle clicked on, off and on in the editor within one block: only the last comes
+        // back, matching the first report too.
+        for n in [1.0, 0.0, 1.0] {
+            e.reported(3, n, t);
+        }
+        e.reported(7, 0.5, t);
+        assert!(e.take(3, 1.0, t));
+        assert!(!e.take(3, 0.0, t), "answered with the newest: an Undo setting 0 is the host's own");
+        assert!(e.take(7, 0.5, t), "other parameters keep theirs");
+        // Echoes coming back one by one.
+        for n in [0.25, 0.5] {
+            e.reported(7, n, t);
+        }
+        assert!(e.take(7, 0.25, t) && e.take(7, 0.5, t));
+        // A value of the host's own forgets the parameter's reports.
+        e.reported(7, 0.75, t);
+        assert!(!e.take(7, 0.1, t));
+        assert!(!e.take(7, 0.75, t));
+    }
+
+    /// A report whose echo never comes (the session went back to the value it had sent, so it
+    /// sends nothing) must not take a later host set of that value for an echo.
+    #[test]
+    fn echoes_expire() {
+        let t = Instant::now();
+        let mut e = Echoes::default();
+        e.reported(3, 1.0, t);
+        e.reported(3, 0.0, t);
+        let later = t.checked_add(ECHO_WINDOW + Duration::from_millis(1)).unwrap();
+        assert!(!e.take(3, 1.0, later));
+        assert!(e.0.is_empty());
+        e.reported(3, 1.0, t);
+        assert!(e.take(3, 1.0, t.checked_add(ECHO_WINDOW).unwrap()), "within the window");
+        for k in 0..=ECHO_CAP {
+            e.reported(9, k as f64, t);
+        }
+        assert_eq!(e.0.len(), ECHO_CAP, "bounded, oldest first out");
+        assert!(!e.take(9, 0.0, t));
     }
 }
