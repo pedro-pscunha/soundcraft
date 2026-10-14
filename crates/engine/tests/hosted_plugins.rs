@@ -122,3 +122,24 @@ fn factory_settings_drop_a_hosted_plugins_overrides_and_state() {
     e.run("edit.undo").unwrap();
     assert_eq!(insert_of(&e, t), before);
 }
+
+/// Sample players load their samples on threads of their own after their state arrives, so an
+/// offline render that made hosted instances waits before its first block, and one without them
+/// does not.
+#[test]
+fn offline_renders_wait_for_hosted_plugins_to_load() {
+    install_fixture();
+    let mut e = Engine::default();
+    let t = dc_track(&mut e, 82);
+    let range = Range::new(0, 4800);
+    assert_eq!(soundcraft_mix::RangeRender::new(e.session(), None, range, 512).loading(), None);
+
+    e.execute("mix.insert", &json!({"track": t.0, "slot": 0, "plugin": GAIN})).unwrap();
+    let mut r = soundcraft_mix::RangeRender::new(e.session(), None, range, 512);
+    let left = r.loading().expect("waits for the hosted insert");
+    assert!(left <= soundcraft_mix::HOSTED_LOAD_WAIT && left > soundcraft_mix::HOSTED_LOAD_WAIT / 2, "{left:?}");
+    let started = std::time::Instant::now();
+    assert!(r.next_block(e.session()).is_some());
+    assert!(started.elapsed() >= left.saturating_sub(std::time::Duration::from_millis(5)));
+    assert_eq!(r.loading(), None);
+}

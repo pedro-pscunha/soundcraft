@@ -40,6 +40,12 @@
 //!   engine made with [`MixEngine::offline`], so every instance it creates is told before
 //!   `prepare` that it renders offline ([`Plugin::set_render_mode`]). [`MixEngine::new`] and
 //!   instances made for playback render in real time.
+//! - a [`RangeRender`] whose engine created third-party plugins waits [`HOSTED_LOAD_WAIT`] before
+//!   its first block. Sample players (Keyscape, Omnisphere) return from `setState` at once and
+//!   load their samples on threads of their own, playing silence until they are done, and no
+//!   plugin format reports when that is (Keyscape calls neither VST3 `IProgress` nor
+//!   `restartComponent`). Without the wait an offline render, which runs far faster than real
+//!   time, loses its first notes.
 //!
 //! An instance starts from its stored state; the insert's parameter values are then applied on
 //! top before the first block. A built-in insert stores every parameter. A hosted insert stores
@@ -374,6 +380,8 @@ pub struct MixEngine {
     external: bool,
     /// How the instances `sync` creates render (see [`MixEngine::offline`]).
     mode: RenderMode,
+    /// `sync` created a third-party instance since [`MixEngine::take_created_hosted`] last asked.
+    created_hosted: bool,
     /// Instances handed over by the host, waiting for `sync` to place them.
     adopt: HashMap<(TrackId, usize), PreparedInstance>,
     /// Instances `sync` took out of service, for the host to drop (see [`MixEngine::take_retired`]).
@@ -390,6 +398,7 @@ struct SlotCtx<'a> {
     mode: RenderMode,
     adopt: &'a mut HashMap<(TrackId, usize), PreparedInstance>,
     retired: &'a mut Vec<Box<dyn Plugin>>,
+    created_hosted: &'a mut bool,
 }
 
 impl SlotCtx<'_> {
@@ -420,7 +429,9 @@ impl SlotCtx<'_> {
             }
         } else {
             let state = if third { ins.state_bytes() } else { None };
-            create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch, self.mode).map(|n| n.plugin)
+            let made = create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch, self.mode).map(|n| n.plugin);
+            *self.created_hosted |= third && made.is_some();
+            made
         }?;
         Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false })
     }
@@ -452,6 +463,7 @@ impl MixEngine {
             metronome: false,
             external: false,
             mode: RenderMode::Realtime,
+            created_hosted: false,
             adopt: HashMap::new(),
             retired: Vec::new(),
             work: Vec::new(),
@@ -548,8 +560,15 @@ impl MixEngine {
         if self.main.len() != main_ch {
             self.main = vec![vec![0.0; mb]; main_ch];
         }
-        let mut cx =
-            SlotCtx { sr: self.sample_rate, mb, external: self.external, mode: self.mode, adopt: &mut self.adopt, retired: &mut self.retired };
+        let mut cx = SlotCtx {
+            sr: self.sample_rate,
+            mb,
+            external: self.external,
+            mode: self.mode,
+            adopt: &mut self.adopt,
+            retired: &mut self.retired,
+            created_hosted: &mut self.created_hosted,
+        };
         let gone: Vec<TrackId> = self.strips.keys().filter(|id| s.track(**id).is_none()).copied().collect();
         for id in gone {
             if let Some(mut st) = self.strips.remove(&id) {
@@ -615,6 +634,12 @@ impl MixEngine {
             }
         }
         self.busses.retain(|id, _| s.bus(*id).is_some());
+    }
+
+    /// True when `sync` created a third-party plugin instance since the last call (never with
+    /// external instances, which the host creates).
+    pub fn take_created_hosted(&mut self) -> bool {
+        std::mem::take(&mut self.created_hosted)
     }
 
     /// Re-syncs plugin instances and the routing order when the session's structure changed
@@ -2081,6 +2106,10 @@ pub fn source_channels(s: &Session, bus: Option<BusId>) -> usize {
     }
 }
 
+/// How long an offline render waits, once, after creating third-party plugins and before its
+/// first block (see the crate docs). Keyscape needed 0.1–0.2 s with its samples in the disk cache.
+pub const HOSTED_LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// [`render_range`] or [`render_bus`] of any length, a block at a time. Its plugins render offline
 /// (see [`MixEngine::offline`]).
 pub struct RangeRender {
@@ -2091,16 +2120,43 @@ pub struct RangeRender {
     done: usize,
     total: usize,
     latency: usize,
+    /// When the first block may render (see [`RangeRender::loading`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    load_until: Option<std::time::Instant>,
 }
 
 impl RangeRender {
     /// Renders the main mix over `range`, or `bus` when one is named.
     pub fn new(s: &Session, bus: Option<BusId>, range: Range, block: usize) -> Self {
         let nch = source_channels(s, bus);
-        let eng = MixEngine::offline(s.sample_rate.as_f64() as f32, block);
+        let mut eng = MixEngine::offline(s.sample_rate.as_f64() as f32, block);
+        eng.ensure_synced(s);
+        // Sample players load what their state asks for on threads of their own (see the crate docs).
+        #[cfg(not(target_arch = "wasm32"))]
+        let load_until = eng.take_created_hosted().then(|| std::time::Instant::now() + HOSTED_LOAD_WAIT);
         let tmp = vec![vec![0.0f32; eng.max_block()]; nch];
         let len = if nch == 0 { 0 } else { usize::try_from(range.len().max(0)).unwrap_or(0) };
-        RangeRender { eng, bus, tmp, start: range.start, done: 0, total: len, latency: 0 }
+        RangeRender {
+            eng,
+            bus,
+            tmp,
+            start: range.start,
+            done: 0,
+            total: len,
+            latency: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            load_until,
+        }
+    }
+
+    /// How much longer the first block waits for hosted plugins to load ([`HOSTED_LOAD_WAIT`]);
+    /// `None` once it may render. [`RangeRender::next_block`] sleeps through what is left, so a
+    /// caller that renders a slice at a time can wait here in short pieces instead.
+    pub fn loading(&self) -> Option<std::time::Duration> {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.load_until.and_then(|t| t.checked_duration_since(std::time::Instant::now()));
+        #[cfg(target_arch = "wasm32")]
+        None
     }
 
     fn render(&mut self, s: &Session, pos: Samples, n: usize) {
@@ -2119,6 +2175,9 @@ impl RangeRender {
     pub fn next_block(&mut self, s: &Session) -> Option<(&[Vec<f32>], usize)> {
         if self.done >= self.total {
             return None;
+        }
+        if let Some(left) = self.loading() {
+            std::thread::sleep(left);
         }
         let n = (self.total - self.done).min(self.eng.max_block());
         self.render(s, self.start + self.done as i64, n);

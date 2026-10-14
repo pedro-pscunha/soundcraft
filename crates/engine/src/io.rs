@@ -443,6 +443,13 @@ impl Bounce {
     /// bounce once its file is complete.
     pub fn step(&mut self, mut more: impl FnMut() -> bool) -> Result<Option<Bounced>> {
         loop {
+            // Hosted plugins still loading: wait in short pieces so a sliced caller keeps drawing.
+            while let Some(left) = self.render.loading() {
+                std::thread::sleep(left.min(std::time::Duration::from_millis(10)));
+                if !more() {
+                    return Ok(None);
+                }
+            }
             match self.render.next_block(&self.session) {
                 Some((chunk, n)) => {
                     fill(&mut self.block, chunk, n, self.fold, self.gain);
