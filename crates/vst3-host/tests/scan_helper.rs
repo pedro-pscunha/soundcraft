@@ -446,6 +446,15 @@ fn failures_on_soundcrafts_side_load_only_bundles_known_to_load(dir: &Path, lone
         }
         assert!(report["secs"].as_f64().unwrap() < 2.0, "{report}");
     }
+    // Known to load means known for this very build of the bundle: once its binary changes, the
+    // cached plugins say nothing about it, and it is not scanned either.
+    let binary = soundcraft_vst3_host::scan::bundle_binary(&good).unwrap();
+    let modified = std::fs::metadata(&binary).unwrap().modified().unwrap() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&binary).unwrap().set_modified(modified).unwrap();
+    let report = rescan_in_child(&helpers.join("no-such-helper"), &cache, dir);
+    assert_eq!(report["plugins"], serde_json::json!([]), "{report}");
+    let changed = report["skipped"].as_array().unwrap().iter().find(|s| s["path"] == good.to_str().unwrap()).cloned();
+    assert_eq!(changed.map(|s| s["helper_failed"].clone()), Some(serde_json::json!(true)), "{report}");
     // A helper stuck before it greets may be running the bundle's code: even a bundle known to load
     // is then not loaded here.
     let (lone_bundle, _) = install(lone, "Lone", None);
