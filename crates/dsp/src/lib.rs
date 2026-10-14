@@ -308,6 +308,24 @@ pub trait PluginEditor: Send {
 pub trait PluginStateReader: Send {
     /// What [`Plugin::save_state`] would return; `None` once the instance is gone.
     fn save_state(&mut self) -> Option<Vec<u8>>;
+    /// Reads parameters `ids` from the instance, on the same thread as `save_state`: one entry
+    /// per id, `None` for an id the plugin does not have, or once the instance is gone. Values are
+    /// in the units of [`Plugin::param`]. Default: nothing is read (all `None`).
+    fn param_values(&mut self, ids: &[&str]) -> Vec<Option<ParamReading>> {
+        ids.iter().map(|_| None).collect()
+    }
+}
+
+/// A hosted plugin's parameter as a [`PluginStateReader`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParamReading {
+    /// The value the instance has now.
+    pub live: f32,
+    /// The value the host last knew it had: the last one it set (the session's override, once
+    /// the mixer has sent it), or the one read from the instance when it was made or its state
+    /// loaded. A `live` value that differs is one the plugin set by itself, without telling the
+    /// host per parameter (a preset loaded in its own editor).
+    pub host: f32,
 }
 
 impl<F: FnMut() -> Option<Vec<u8>> + Send> PluginStateReader for F {
