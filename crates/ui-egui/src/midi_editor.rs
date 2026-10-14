@@ -391,13 +391,19 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         let _ = app.engine.execute_merged("midi.note_edit", &json!({"clip": cid.0, "index": i, "velocity": v}), &format!("vel:{}", cid.0));
     }
     // Over the notes and the velocity lane, as in the Edit window: the playhead (1.5, red) at the
-    // play position while playing, else the insertion line (1.0, light) where playback starts —
-    // steady here, the Edit window's blink would keep this panel repainting while idle.
-    if let Some(x) = playhead_x(&s.tempo, sr, app.position(), clip.range(), base_tick, roll.x_range(), px_per_tick) {
+    // play position while playing; when stopped, the insertion line (1.0, light) where playback
+    // starts, for an insertion point only (a selected range has none), blinking with the Edit
+    // window's.
+    let (playing, sel) = (app.is_playing(), s.edit.selection);
+    if (playing || sel.is_empty())
+        && let Some(x) = playhead_x(&s.tempo, sr, app.position(), clip.range(), base_tick, roll.x_range(), px_per_tick)
+    {
         let lanes = Rect::from_min_max(roll.min, pos2(roll.max.x, vel.max.y));
-        let stroke = if app.is_playing() { Stroke::new(1.5, t.playhead) } else { Stroke::new(1.0, t.insertion) };
-        ui.painter().with_clip_rect(lanes).line_segment([pos2(x, lanes.min.y), pos2(x, lanes.max.y)], stroke);
-        if app.is_playing() {
+        let stroke = if playing { Stroke::new(1.5, t.playhead) } else { Stroke::new(1.0, t.insertion) };
+        if playing || crate::edit_window::insertion_shown(ui.ctx(), sel.start, &s.edit.selected_tracks) {
+            ui.painter().with_clip_rect(lanes).line_segment([pos2(x, lanes.min.y), pos2(x, lanes.max.y)], stroke);
+        }
+        if playing {
             // The roll stretches one clip across its width, so the line can move much faster than
             // the Edit window's (repainted at 30 Hz): keep it smooth at 60 Hz while it is shown.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000 / 60));
@@ -520,8 +526,8 @@ mod tests {
         (h, clip)
     }
 
-    /// The playhead lines painted inside the MIDI editor's body, and that body.
-    /// The vertical lines in the editor drawn in `color` (each must have the Edit window's `width`).
+    /// The vertical lines drawn in `color` inside the MIDI editor's body (each must have the Edit
+    /// window's `width`), and that body.
     fn editor_lines(h: &Harness<SoundApp>, color: egui::Color32, width: f32) -> (Vec<[egui::Pos2; 2]>, Rect) {
         let body = h.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new("soundcraft-midi-body"))).unwrap();
         let lines = h
@@ -580,5 +586,41 @@ mod tests {
         h.state_mut().engine.transport.position = clip.end + 1;
         h.run_steps(2);
         assert_eq!(editor_playheads(&h).0, Vec::<[egui::Pos2; 2]>::new());
+    }
+
+    /// The Edit window's insertion lines: the insertion colour, outside the editor's own.
+    fn edit_window_insertions(h: &Harness<SoundApp>) -> usize {
+        let all =
+            h.output().shapes.iter().filter(|c| matches!(&c.shape, Shape::LineSegment { stroke, .. } if stroke.color == Tokens::current().insertion));
+        all.count() - editor_insertions(h).0.len()
+    }
+
+    #[test]
+    fn the_insertion_line_blinks_with_the_edit_windows() {
+        let (mut h, _) = lead_in_editor();
+        let (mut on, mut off) = (0, 0);
+        for _ in 0..90 {
+            let editor = editor_insertions(&h).0.len();
+            let edit = edit_window_insertions(&h);
+            assert_eq!(editor == 1, edit > 0, "the editor's line ({editor}) and the Edit window's ({edit}) show together");
+            if editor == 1 {
+                on += 1
+            } else {
+                off += 1
+            }
+            h.step();
+        }
+        assert!(on > 0 && off > 0, "it blinks: on {on}, off {off} frames");
+    }
+
+    #[test]
+    fn a_selected_range_has_no_insertion_line() {
+        let (mut h, clip) = lead_in_editor();
+        let (start, end) = (clip.start + (clip.end - clip.start) / 4, clip.start + (clip.end - clip.start) / 2);
+        h.state_mut().run("edit.select", json!({"tracks": ["Lead"], "start": start, "end": end, "exact": true})).unwrap();
+        for _ in 0..40 {
+            h.step();
+            assert_eq!(editor_insertions(&h).0, Vec::<[egui::Pos2; 2]>::new(), "Play starts at the range, but no line marks it");
+        }
     }
 }

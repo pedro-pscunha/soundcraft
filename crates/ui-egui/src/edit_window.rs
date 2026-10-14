@@ -2591,6 +2591,24 @@ fn follow_update(
 /// timeline can be inspected anywhere during playback. Scrolling back to the
 /// playhead, stopping/starting, or re-selecting a scrolling mode resumes the
 /// follow. `none` and `after_playback` never scroll during playback.
+/// Whether the insertion line shows this frame. It blinks twice a second from the moment the
+/// insertion point `at` or the selected `tracks` last changed, so a moved insertion shows at once,
+/// and every view that draws it (the Edit window, the MIDI editor) blinks in step.
+pub(crate) fn insertion_shown(ctx: &egui::Context, at: Samples, tracks: &[TrackId]) -> bool {
+    let now = ctx.input(|i| i.time);
+    let since = ctx.data_mut(|d| {
+        let (last, since) = d.get_temp_mut_or_insert_with(egui::Id::new("insertion_blink"), || ((at, tracks.to_vec()), now));
+        if last.0 != at || last.1 != tracks {
+            *last = (at, tracks.to_vec());
+            *since = now;
+        }
+        *since
+    });
+    let phase = (now - since) * 2.0;
+    ctx.request_repaint_after_secs(((1.0 - phase.fract()) / 2.0) as f32);
+    (phase as i64) % 2 == 0
+}
+
 fn overlay(app: &mut SoundApp, ui: &mut Ui, tl: Rect, area: Rect) {
     let t = Tokens::current();
     let mut scroll_to: Option<Samples> = None;
@@ -2619,25 +2637,13 @@ fn overlay(app: &mut SoundApp, ui: &mut Ui, tl: Rect, area: Rect) {
         }
     } else if !app.is_playing() {
         let x = x_of(s, tl, sel.start);
-        let now = ui.input(|i| i.time);
-        let (id, key) = (ui.id().with("insertion_blink"), (sel.start, s.edit.selected_tracks.clone()));
-        let since = ui.ctx().data_mut(|d| {
-            let (last, since) = d.get_temp_mut_or_insert_with(id, || (key.clone(), now));
-            if *last != key {
-                *last = key;
-                *since = now;
-            }
-            *since
-        });
-        let phase = (now - since) * 2.0;
-        if (phase as i64) % 2 == 0 {
+        if insertion_shown(ui.ctx(), sel.start, &s.edit.selected_tracks) {
             for (id, r) in &app.edit_layout.rows {
                 if s.edit.selected_tracks.contains(&TrackId(*id)) {
                     painter.line_segment([pos2(x, r[1].max(tl.min.y)), pos2(x, r[3])], Stroke::new(1.0, t.insertion));
                 }
             }
         }
-        ui.ctx().request_repaint_after_secs(((1.0 - phase.fract()) / 2.0) as f32);
     }
     if app.is_playing() {
         let x = x_of(s, tl, app.position());
