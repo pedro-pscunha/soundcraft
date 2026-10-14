@@ -94,7 +94,7 @@ fn the_cli_caches_vst3_scans_in_its_settings_folder() {
     let bundle = plugins.join("garbage.vst3");
     std::fs::write(&bundle, b"not a plugin").unwrap();
     let config = dir.join("config");
-    let cache = config.join("plugin-cache/vst3.json");
+    let cache = config.join("plugin-cache/vst3.v1.json");
     let run = |no_prefs: bool| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_soundcraft-cli"));
         cmd.env("HOME", &dir)

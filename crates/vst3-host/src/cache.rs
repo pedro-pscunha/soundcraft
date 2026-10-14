@@ -78,10 +78,18 @@ pub(crate) fn fingerprint(bundle: &Path) -> Option<Fingerprint> {
     })
 }
 
+/// How old a leftover temporary file of the cache must be before it is deleted (a younger one
+/// may be another process's write in progress).
+const STALE_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// The cache file's contents, in memory while one scan runs.
 pub(crate) struct ScanCache {
     file: PathBuf,
     entries: BTreeMap<PathBuf, (Fingerprint, Outcome)>,
+    /// What this scan found, and the bundles it found gone: all that [`ScanCache::save`] writes over
+    /// the file as it is then (another process may have written it meanwhile).
+    recorded: BTreeMap<PathBuf, (Fingerprint, Outcome)>,
+    gone: Vec<PathBuf>,
     /// Differs from the file (or the file was unusable): written back by [`ScanCache::save`].
     changed: bool,
 }
@@ -89,7 +97,8 @@ pub(crate) struct ScanCache {
 impl ScanCache {
     /// Reads the cache file; anything wrong with it is logged and the cache starts empty.
     pub(crate) fn load(file: &Path) -> ScanCache {
-        let mut cache = ScanCache { file: file.to_path_buf(), entries: BTreeMap::new(), changed: false };
+        remove_stale_temporaries(file);
+        let mut cache = ScanCache { file: file.to_path_buf(), entries: BTreeMap::new(), recorded: BTreeMap::new(), gone: Vec::new(), changed: false };
         match read(file) {
             Ok(Some(entries)) => cache.entries = entries,
             Ok(None) => {}
@@ -107,15 +116,19 @@ impl ScanCache {
     }
 
     pub(crate) fn record(&mut self, bundle: &Path, fingerprint: Fingerprint, outcome: Outcome) {
-        self.entries.insert(bundle.to_path_buf(), (fingerprint, outcome));
+        self.entries.insert(bundle.to_path_buf(), (fingerprint, outcome.clone()));
+        self.recorded.insert(bundle.to_path_buf(), (fingerprint, outcome));
         self.changed = true;
     }
 
     /// Forgets bundles that are no longer on disk.
     pub(crate) fn drop_gone(&mut self) {
-        let before = self.entries.len();
-        self.entries.retain(|path, _| path.exists());
-        self.changed |= self.entries.len() != before;
+        let gone: Vec<PathBuf> = self.entries.keys().filter(|path| !path.exists()).cloned().collect();
+        for path in &gone {
+            self.entries.remove(path);
+        }
+        self.changed |= !gone.is_empty();
+        self.gone.extend(gone);
     }
 
     /// Writes the cache back when it changed: whole, to a temporary file renamed over the old one.
@@ -130,12 +143,19 @@ impl ScanCache {
     }
 
     fn write(&self) -> Result<(), String> {
-        let bundles = self
-            .entries
-            .iter()
-            // JSON strings are UTF-8: a bundle with another path is scanned every time instead.
+        // The file as it is now, with this scan's findings over it: what another process wrote
+        // meanwhile (the app and the CLI share the file) stays.
+        let mut entries = read(&self.file).ok().flatten().unwrap_or_default();
+        for path in &self.gone {
+            entries.remove(path);
+        }
+        entries.extend(self.recorded.iter().map(|(path, entry)| (path.clone(), entry.clone())));
+        let bundles = entries
+            .into_iter()
+            // JSON strings are UTF-8: a bundle with another path (Linux only) is not cached, and so
+            // scanned every time.
             .filter(|(path, _)| path.to_str().is_some())
-            .map(|(path, (fingerprint, outcome))| Entry { path: path.clone(), fingerprint: *fingerprint, outcome: outcome.clone() })
+            .map(|(path, (fingerprint, outcome))| Entry { path, fingerprint, outcome })
             .collect();
         let bytes = serde_json::to_vec(&CacheFile { version: VERSION, scanner: scanner(), bundles }).map_err(|e| e.to_string())?;
         if let Some(dir) = self.file.parent() {
@@ -154,6 +174,21 @@ impl ScanCache {
             let _ = std::fs::remove_file(&temporary);
         }
         written.map_err(|e| e.to_string())
+    }
+}
+
+/// Deletes temporary files of `file` left by a write that never finished (a crash between writing
+/// and renaming), once they are [`STALE_TEMPORARY`] old.
+fn remove_stale_temporaries(file: &Path) {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else { return };
+    let Ok(listing) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("{name}.");
+    for entry in listing.flatten() {
+        let stale = entry.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= STALE_TEMPORARY);
+        let ours = entry.file_name().to_str().is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".tmp"));
+        if ours && stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -267,6 +302,53 @@ mod tests {
         assert_eq!(c.lookup(&a, PRINT), Some(&Outcome::Plugins(vec![plugin(&a)])));
         let Some(Outcome::Skipped(why)) = c.lookup(&b, PRINT) else { panic!() };
         assert!(why.starts_with("x y") && why.chars().count() <= 300, "{why:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_usual_file_name_names_the_format() {
+        assert_eq!(crate::SCAN_CACHE_FILE, format!("vst3.v{VERSION}.json"));
+    }
+
+    #[test]
+    fn two_scans_writing_one_file_keep_each_others_findings() {
+        let d = dir("two-writers");
+        let (file, a, b, gone) = (d.join("vst3.json"), d.join("A.vst3"), d.join("B.vst3"), d.join("Gone.vst3"));
+        std::fs::create_dir_all(&gone).unwrap();
+        let mut seed = ScanCache::load(&file);
+        seed.record(&gone, PRINT, Outcome::Skipped("x".into()));
+        seed.save();
+        // The app and the CLI, each with the file as it was when it began.
+        let (mut app, mut cli) = (ScanCache::load(&file), ScanCache::load(&file));
+        app.record(&a, PRINT, Outcome::Plugins(vec![plugin(&a)]));
+        cli.record(&b, PRINT, Outcome::Skipped("timed out".into()));
+        std::fs::remove_dir_all(&gone).unwrap();
+        cli.drop_gone();
+        app.save();
+        cli.save();
+        let both = ScanCache::load(&file);
+        assert!(both.lookup(&a, PRINT).is_some(), "the first writer's finding stays");
+        assert!(both.lookup(&b, PRINT).is_some());
+        assert!(both.lookup(&gone, PRINT).is_none(), "a bundle found gone is dropped");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn leftover_temporary_files_are_deleted_once_stale() {
+        let d = dir("leftovers");
+        let file = d.join("vst3.json");
+        let (old, young, other) = (d.join("vst3.json.1.2.tmp"), d.join("vst3.json.3.4.tmp"), d.join("other.json.5.6.tmp"));
+        for f in [&old, &young, &other] {
+            std::fs::write(f, b"{").unwrap();
+        }
+        let long_ago = SystemTime::now() - std::time::Duration::from_secs(3600);
+        for f in [&old, &other] {
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(long_ago).unwrap();
+        }
+        ScanCache::load(&file);
+        assert!(!old.exists(), "a stale leftover of this cache is deleted");
+        assert!(young.exists(), "a write in progress is left alone");
+        assert!(other.exists(), "another file's leftovers are not this cache's");
         let _ = std::fs::remove_dir_all(&d);
     }
 

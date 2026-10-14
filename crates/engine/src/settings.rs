@@ -44,10 +44,11 @@ pub fn prefs_enabled() -> bool {
     std::env::var_os("SOUNDCRAFT_NO_PREFS").is_none()
 }
 
-/// The VST3 scan cache, `<settings folder>/plugin-cache/vst3.json`: `None` without a settings
-/// folder or when running without preferences.
+/// The VST3 scan cache, `<settings folder>/plugin-cache/vst3.v1.json` (named after its format,
+/// [`soundcraft_vst3_host::SCAN_CACHE_FILE`]): `None` without a settings folder or when running
+/// without preferences.
 pub fn vst3_scan_cache() -> Option<PathBuf> {
-    prefs_enabled().then(config_dir).flatten().map(|d| d.join("plugin-cache").join("vst3.json"))
+    prefs_enabled().then(config_dir).flatten().map(|d| d.join("plugin-cache").join(soundcraft_vst3_host::SCAN_CACHE_FILE))
 }
 
 #[cfg(test)]

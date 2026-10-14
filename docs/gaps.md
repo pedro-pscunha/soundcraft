@@ -166,7 +166,7 @@ cannot be hosted (#109): Avid's AAX SDK licence and PACE signing; owner decision
 Known risks, unmeasured:
 - A VST3 that never answers its scan helper costs the 30 s time limit on the first scan only:
   each bundle's plugins, or why it was skipped, are cached in the settings folder
-  (`plugin-cache/vst3.json`) under its fingerprint (binary size and modification time, bundle
+  (`plugin-cache/vst3.v1.json`) under its fingerprint (binary size and modification time, bundle
   modification time), and later runs start helpers only for new or changed bundles. Measured on
   the dev Mac (59 bundles, five PACE plugins without the licence service among the 9 skipped):
   30.5 s cold, 0.03 s warm; the sun-v54 bounce went from 66 s to 6 s. A bundle that timed out

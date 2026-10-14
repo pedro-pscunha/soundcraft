@@ -213,6 +213,10 @@ impl ScanHelper {
     }
 }
 
+/// The usual name of a scan cache file ([`ScanHelper::cache`]): it names the cache format, so
+/// builds that write another format keep a file of their own instead of overwriting each other's.
+pub const SCAN_CACHE_FILE: &str = "vst3.v1.json";
+
 /// A bundle a scan helper could not scan.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SkippedBundle {

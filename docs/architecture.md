@@ -74,7 +74,7 @@ own, eight at a time, and reads back the plugins as one JSON line. A helper stil
 30 s is killed, and its bundle, like one whose helper crashed or failed, is logged, skipped and
 not tried again until a rescan. SoundCraft's own process loads only the bundles of the plugins it
 creates. Each bundle's outcome is cached across runs in the settings folder
-(`soundcraft_engine::settings`, shared by both apps: `plugin-cache/vst3.json`) under a
+(`soundcraft_engine::settings`, shared by both apps: `plugin-cache/vst3.v1.json`) under a
 fingerprint of the bundle, so later runs start helpers only for new or changed bundles. A helper
 that fails on SoundCraft's side (cannot start, or speaks another scan protocol) skips nothing:
 its bundles are loaded in-process instead. CLAP scans still load every plugin binary in-process;
