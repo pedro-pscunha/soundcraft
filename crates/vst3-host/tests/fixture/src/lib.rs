@@ -24,6 +24,8 @@
 //! lifecycle" below) and aborts the process when it is broken.
 //!
 //! Misbehaving on purpose, for the scan tests: a file next to the binary changes its module entry.
+//! A mode that gets stuck first writes `<mode>.entered` next to the binary, so a test knows the
+//! plugin itself is stuck (not merely that its helper started).
 //! `hang-entry` never returns (like a PACE/iLok-protected plugin whose licence service is
 //! missing), `crash-entry` kills the process (SIGKILL, so no crash report is written) and
 //! `fail-entry` returns false. `noisy-stdout` prints lines on standard output first, one of them
@@ -902,11 +904,13 @@ fn misbehave_on_entry() -> bool {
         if let Ok(child) = std::process::Command::new("sleep").arg("600").spawn() {
             let _ = std::fs::write(dir.join("child-pid"), child.id().to_string());
         }
+        let _ = std::fs::write(dir.join("hang-with-child.entered"), b"");
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     }
     if dir.join("hang-entry").exists() {
+        let _ = std::fs::write(dir.join("hang-entry.entered"), b"");
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         }

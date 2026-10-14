@@ -52,12 +52,9 @@ fn main() {
     {
         let (bundle, slow) = (PathBuf::from(bundle), ScanHelper { timeout: Duration::from_secs(60), ..helper() });
         let dir = bundle.parent().unwrap().to_path_buf();
+        let stuck = entered(&bundle, "hang-entry");
         std::thread::spawn(move || soundcraft_vst3_host::scan_paths_with(&[dir], &slow));
-        let started = Instant::now();
-        while launches(&bundle) == 0 && started.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        std::process::exit(if launches(&bundle) == 0 { 1 } else { 0 });
+        std::process::exit(if wait_for(&stuck, Duration::from_secs(10)) { 0 } else { 1 });
     }
     // A fresh process for `adding_a_folder_first_keeps_the_standard_ones`: its standard folders hold
     // `standard`; `extra` is added before anything has scanned.
@@ -69,10 +66,7 @@ fn main() {
         let (slow, late) = (PathBuf::from(slow), PathBuf::from(late));
         soundcraft_vst3_host::set_scan_helper(Some(helper()));
         let first = std::thread::spawn(soundcraft_vst3_host::scan);
-        let started = Instant::now();
-        while launches(&slow) == 0 && started.elapsed() < TIMEOUT {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(wait_for(&entered(&slow, "hang-entry"), TIMEOUT), "the scan never got stuck");
         let held = soundcraft_vst3_host::add_search_dir(&late);
         first.join().unwrap();
         let found: Vec<PathBuf> = soundcraft_vst3_host::scan().into_iter().map(|d| d.path).collect();
@@ -91,16 +85,15 @@ fn main() {
     {
         let (crashy, slow) = (PathBuf::from(crashy), PathBuf::from(slow));
         soundcraft_vst3_host::set_scan_helper(Some(ScanHelper { cache: Some(cache.into()), ..helper() }));
-        let (crashed, slowed) = (launches(&crashy), launches(&slow));
+        let crashed = launches(&crashy);
+        let stuck = entered(&slow, "hang-entry");
+        let _ = std::fs::remove_file(&stuck);
         let first = std::thread::spawn(|| {
             soundcraft_vst3_host::scan();
             // Back at once, as another caller would be (automation, a project load).
             soundcraft_vst3_host::scan();
         });
-        let started = Instant::now();
-        while launches(&slow) == slowed && started.elapsed() < TIMEOUT {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(wait_for(&stuck, TIMEOUT), "the scan never got stuck");
         let rescan = std::thread::spawn(soundcraft_vst3_host::rescan);
         rescan.join().unwrap();
         first.join().unwrap();
@@ -203,6 +196,64 @@ fn cached_outcome(cache: &Path, bundle: &Path) -> serde_json::Value {
     let file: serde_json::Value = serde_json::from_slice(&std::fs::read(cache).unwrap()).unwrap();
     let entry = file["bundles"].as_array().unwrap().iter().find(|e| e["path"].as_str() == bundle.to_str()).cloned();
     entry.unwrap_or_else(|| panic!("{} not in the cache", bundle.display()))["outcome"].clone()
+}
+
+/// The file a stuck fixture writes once it is in `mode` (see the fixture's docs): the plugin itself
+/// is stuck, not merely its helper started.
+fn entered(bundle: &Path, mode: &str) -> PathBuf {
+    soundcraft_vst3_host::scan::bundle_binary(bundle).unwrap().with_file_name(format!("{mode}.entered"))
+}
+
+/// Waits at most `limit` for `file` to appear; whether it did.
+fn wait_for(file: &Path, limit: Duration) -> bool {
+    let started = Instant::now();
+    while !file.exists() && started.elapsed() < limit {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    file.exists()
+}
+
+/// The process id in `file` (the first line: a launch log or a fixture's `child-pid`).
+#[cfg(unix)]
+fn pid_in(file: &Path) -> i32 {
+    std::fs::read_to_string(file).unwrap().lines().next().unwrap().trim().parse().unwrap()
+}
+
+/// Processes, through kill(2) itself: no `kill` program needed (minimal Linux images have none, and
+/// a missing one would make a check pass without checking).
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod processes {
+    use std::time::{Duration, Instant};
+
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+
+    /// Whether process `pid` exists (signal 0 is not sent, only checked).
+    pub fn alive(pid: i32) -> bool {
+        // SAFETY: kill(2) with signal 0 only checks that `pid` exists and may be signalled.
+        unsafe { kill(pid, 0) == 0 }
+    }
+
+    /// Ends process `pid` at once (SIGKILL).
+    pub fn end(pid: i32) {
+        // SAFETY: kill(2) sends SIGKILL to `pid`, a process this test started.
+        unsafe { kill(pid, 9) };
+    }
+
+    /// Whether `pid` is still alive after `limit`; one that is is ended, so it does not linger.
+    pub fn outlives(pid: i32, limit: Duration) -> bool {
+        let started = Instant::now();
+        while alive(pid) && started.elapsed() < limit {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let outlived = alive(pid);
+        if outlived {
+            end(pid);
+        }
+        outlived
+    }
 }
 
 /// How many helpers were started for `bundle`.
@@ -518,10 +569,7 @@ fn the_registry_answers_while_helpers_scan(dir: &Path) {
     soundcraft_vst3_host::set_scan_helper(Some(helper()));
     let folder = dir.to_path_buf();
     let scanning = std::thread::spawn(move || soundcraft_vst3_host::add_search_dir(&folder));
-    let started = Instant::now();
-    while launches(&busy) == 0 && started.elapsed() < TIMEOUT {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(wait_for(&entered(&busy, "hang-entry"), TIMEOUT), "the scan never got stuck");
     let asked = Instant::now();
     let _ = (soundcraft_vst3_host::cached(), soundcraft_vst3_host::skipped());
     let waited = asked.elapsed();
@@ -538,14 +586,11 @@ fn a_rescan_during_a_scan_wins(dir: &Path) {
     let (raced, _) = install(dir, "Raced", None);
     soundcraft_vst3_host::set_scan_helper(Some(helper()));
     assert_eq!(soundcraft_vst3_host::add_search_dir(dir), 2);
-    let hang = common::install_fixture(dir, "Raced").join("hang-entry");
+    let hang = entered(&raced, "hang-entry").with_file_name("hang-entry");
     std::fs::write(&hang, b"").unwrap();
     let before = launches(&raced);
     let first = std::thread::spawn(soundcraft_vst3_host::rescan);
-    let started = Instant::now();
-    while launches(&raced) == before && started.elapsed() < TIMEOUT {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(wait_for(&entered(&raced, "hang-entry"), TIMEOUT), "the first rescan never got stuck");
     // The first rescan is stuck on the bundle; it is fixed, and a second rescan is asked for.
     std::fs::remove_file(&hang).unwrap();
     soundcraft_vst3_host::rescan();
@@ -617,17 +662,9 @@ fn a_timeout_kills_what_the_helper_started(dir: &Path) {
     let (_, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &helper());
     let took = started.elapsed();
     assert_eq!(skipped.len(), 1, "{skipped:?}");
-    let pid = std::fs::read_to_string(mode.unwrap().with_file_name("child-pid")).unwrap();
-    let alive = || Command::new("kill").args(["-0", pid.trim()]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
-    let gone = Instant::now();
-    while alive() && gone.elapsed() < Duration::from_secs(2) {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let survived = alive();
-    if survived {
-        let _ = Command::new("kill").args(["-9", pid.trim()]).status();
-    }
-    assert!(!survived, "the plugin's child {} outlived the timeout", pid.trim());
+    let pid = pid_in(&mode.unwrap().with_file_name("child-pid"));
+    let survived = processes::outlives(pid, Duration::from_secs(2));
+    assert!(!survived, "the plugin's child {pid} outlived the timeout");
     assert!(took < TIMEOUT + Duration::from_millis(1500), "{took:?}: its open output held the scan");
 }
 
@@ -640,8 +677,7 @@ fn a_process_the_plugin_leaves_running_does_not_hold_the_answer(dir: &Path) {
     let started = Instant::now();
     let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &generous);
     let took = started.elapsed();
-    let pid = std::fs::read_to_string(mode.unwrap().with_file_name("child-pid")).unwrap();
-    let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+    processes::end(pid_in(&mode.unwrap().with_file_name("child-pid")));
     assert!(skipped.is_empty() && found.len() == 2, "{skipped:?}");
     assert!(took < Duration::from_millis(1500), "{took:?}: the answer was held open by the plugin's process");
 }
@@ -651,17 +687,8 @@ fn a_process_the_plugin_leaves_running_does_not_hold_the_answer(dir: &Path) {
 fn a_helper_ends_when_its_host_is_gone(dir: &Path) {
     let (stuck, _) = install(dir, "Stuck", Some("hang-entry"));
     let host = Command::new(std::env::current_exe().unwrap()).arg("--scan-and-exit").arg(&stuck).output().unwrap();
-    assert!(host.status.success(), "the helper never started: {host:?}");
-    // The host waited for its helper to start, so this is a live helper, not one that never ran.
-    let pid = std::fs::read_to_string(stuck.with_extension("launches")).unwrap().trim().to_string();
-    let alive = || Command::new("kill").args(["-0", &pid]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
-    let started = Instant::now();
-    while alive() && started.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let outlived = alive();
-    if outlived {
-        let _ = Command::new("kill").args(["-9", &pid]).status();
-    }
-    assert!(!outlived, "helper {pid} outlived its host by {:?}", started.elapsed());
+    assert!(host.status.success(), "the plugin never got stuck: {host:?}");
+    // The host waited until the plugin was stuck in its helper, so this is a live helper.
+    let pid = pid_in(&stuck.with_extension("launches"));
+    assert!(!processes::outlives(pid, Duration::from_secs(10)), "helper {pid} outlived its host");
 }
