@@ -88,6 +88,12 @@ impl AuPlugin {
         self.inst.link().open_editor(self.info.name, &self.ids, &self.edits, false)
     }
 
+    /// The open editor's view (main thread only). For tests (the `testing` feature).
+    #[cfg(feature = "testing")]
+    pub fn editor_view(&self) -> Option<objc2::rc::Retained<objc2_app_kit::NSView>> {
+        self.inst.link().editor_view()
+    }
+
     /// Re-reads every parameter value from the unit (after a state load).
     fn refresh_values(&mut self) {
         self.edits.forget_reported();

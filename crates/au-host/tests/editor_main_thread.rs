@@ -18,7 +18,7 @@ mod macos {
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSApplication;
     use objc2_foundation::{NSDate, NSRunLoop};
-    use soundcraft_au_host::units_awaiting_disposal;
+    use soundcraft_au_host::{units_awaiting_disposal, units_leaked};
     use soundcraft_dsp::Plugin;
 
     /// AUDelay (Apple, a view of its own), AUMatrixReverb (Apple, none: the generic view) and
@@ -65,6 +65,7 @@ mod macos {
             spin(0.01);
         }
         assert_eq!(units_awaiting_disposal(), 0, "views outlived their plugin by 5 s");
+        assert_eq!(units_leaked(), 0, "a unit was given up");
         start.elapsed().as_secs_f64()
     }
 
@@ -72,6 +73,27 @@ mod macos {
     fn rss_kib() -> u64 {
         let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().expect("ps");
         String::from_utf8_lossy(&out.stdout).trim().parse().expect("rss")
+    }
+
+    /// A view held alive (as a plugin's own timer may hold it) 10 s after its plugin went: the unit
+    /// is given up, uninitialized and counted as leaked, and no longer awaited. Last: it leaks.
+    fn a_view_that_never_goes(id: &str) {
+        let leaked = units_leaked();
+        let mut p = soundcraft_au_host::instantiate_plugin(id).expect("instantiate");
+        p.open_editor_hidden().expect("open");
+        let view = p.editor_view().expect("the view");
+        drop(p);
+        assert_eq!(units_awaiting_disposal(), 1, "{id}: the unit waits for its view");
+        let start = std::time::Instant::now();
+        while units_awaiting_disposal() > 0 && start.elapsed().as_secs() < 15 {
+            spin(0.05);
+        }
+        let waited = start.elapsed().as_secs_f64();
+        assert_eq!(units_awaiting_disposal(), 0, "{id}: still awaited after {waited:.1} s");
+        assert_eq!(units_leaked(), leaked + 1, "{id}: given up");
+        assert!(waited > 9.0, "{id}: given up after {waited:.1} s, not 10");
+        println!("{id}: a view held alive; the unit was given up after {waited:.1} s");
+        drop(view);
     }
 
     pub fn run() {
@@ -151,6 +173,9 @@ mod macos {
             checked += 1;
         }
         assert!(checked > 0, "no Audio Unit to test");
+        if installed.iter().any(|d| d.id == UNITS[0]) {
+            a_view_that_never_goes(UNITS[0]);
+        }
         println!("editor_main_thread: ok ({checked} units)");
     }
 }

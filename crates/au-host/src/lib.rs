@@ -44,7 +44,9 @@
 //! 0.1 s) and may still call into its unit meanwhile, so the unit is disposed only once its views
 //! are gone, on the main thread (the `testing` feature's `units_awaiting_disposal` counts the
 //! waiting ones); an instance that goes on another thread with its editor open has its editor
-//! closed on the main thread first.
+//! closed on the main thread first. A unit whose view is still alive 10 s later is given up:
+//! uninitialized (which frees what it renders with) and leaked, never disposed under the view
+//! (logged with its id; `units_leaked` counts them).
 //!
 //! Parameter edits made in a view reach the host through [`PluginEditor::idle`] (the latest value
 //! of each parameter since the last call), as VST3 `performEdit`s do: views set values with
@@ -81,7 +83,7 @@ mod plugin;
 mod registry;
 
 #[cfg(all(target_os = "macos", feature = "testing"))]
-pub use ffi::units_awaiting_disposal;
+pub use ffi::{units_awaiting_disposal, units_leaked};
 #[cfg(target_os = "macos")]
 pub use plugin::AuPlugin;
 

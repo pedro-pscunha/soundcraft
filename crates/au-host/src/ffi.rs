@@ -792,6 +792,8 @@ pub struct Instance {
     sample_rate: f64,
     sample_time: f64,
     link: Arc<UnitLink>,
+    /// `(type, subtype, manufacturer)`, for the log.
+    codes: (u32, u32, u32),
 }
 
 // SAFETY: an Audio Unit instance may be used from any thread as long as calls are not
@@ -838,6 +840,7 @@ impl Instance {
             max_frames: 0,
             sample_rate: 48_000.0,
             sample_time: 0.0,
+            codes: (ty, subtype, manufacturer),
         };
         let callbacks = HostCallbackInfo {
             host_user_data: time.cast(),
@@ -1396,6 +1399,13 @@ impl UnitLink {
         Ok(size)
     }
 
+    /// The open editor's view (main thread only). For tests.
+    #[cfg(feature = "testing")]
+    pub fn editor_view(&self) -> Option<objc2::rc::Retained<objc2_app_kit::NSView>> {
+        let mtm = MainThreadMarker::new()?;
+        self.lock().editor.as_ref()?.view_retained(mtm)
+    }
+
     /// True when the unit publishes a Cocoa view of its own.
     #[cfg(feature = "testing")]
     pub fn has_custom_editor(&self) -> bool {
@@ -1429,7 +1439,7 @@ impl UnitLink {
 impl Drop for Instance {
     fn drop(&mut self) {
         let (editor, views) = self.link.kill();
-        let remains = Remains { unit: self.unit, input: self.input, time: self.time, initialized: self.initialized };
+        let remains = Remains { unit: self.unit, input: self.input, time: self.time, initialized: self.initialized, codes: self.codes };
         if editor.is_none() && views.is_empty() {
             // SAFETY: the handles are cut off and no view of the unit is alive.
             unsafe { remains.dispose() };
@@ -1568,6 +1578,12 @@ mod window {
             unsafe { self.view.as_ref() }
         }
 
+        /// The view, retained. For tests.
+        #[cfg(feature = "testing")]
+        pub fn view_retained(&self, mtm: MainThreadMarker) -> Option<Retained<NSView>> {
+            self.view(mtm).map(objc2::Message::retain)
+        }
+
         /// The view's size in pixels.
         #[cfg(feature = "testing")]
         pub fn size(&self, mtm: MainThreadMarker) -> (u32, u32) {
@@ -1652,8 +1668,11 @@ unsafe extern "C" {
 const DISPATCH_TIME_NOW: u64 = 0;
 /// How often a deferred disposal looks again.
 const RETIRE_INTERVAL_NS: i64 = 50_000_000;
-/// Looks before a unit whose view never goes is given up (leaked): 10 s.
+/// Looks before a unit whose view never goes is given up (uninitialized and leaked): 10 s.
 const RETIRE_TRIES: u32 = 200;
+
+/// Units given up on (see [`Remains::abandon`]).
+static LEAKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Units waiting for their views to go before they are disposed (see [`units_awaiting_disposal`]).
 static AWAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1665,15 +1684,44 @@ pub fn units_awaiting_disposal() -> usize {
     AWAITING.load(Ordering::Relaxed)
 }
 
+/// Units given up on because a view of theirs outlived them by 10 s: uninitialized, never
+/// disposed. For tests (the `testing` feature).
+#[cfg(feature = "testing")]
+pub fn units_leaked() -> usize {
+    LEAKED.load(Ordering::Relaxed)
+}
+
 /// What an instance leaves to dispose of: the unit and what its callbacks read.
 struct Remains {
     unit: AudioUnit,
     input: *mut InputState,
     time: *mut HostTime,
     initialized: bool,
+    codes: (u32, u32, u32),
 }
 
 impl Remains {
+    /// Gives up on a unit whose view is still alive 10 s after the instance went: uninitializes
+    /// it, which frees what it renders with (hosts uninitialize units under open views at every
+    /// sample-rate change, so views cope with that), and leaks the rest. It is never disposed: a
+    /// view still alive (a timer of its own holds it) may call into it, or into memory the unit
+    /// owns, at any time, and disposing under it is a use-after-free. Logged with the plugin id.
+    ///
+    /// # Safety
+    /// Nothing renders the unit any more: the instance is gone.
+    unsafe fn abandon(self) {
+        if self.initialized {
+            // SAFETY: the unit is live (never disposed) and no longer rendered (the contract above).
+            unsafe { AudioUnitUninitialize(self.unit) };
+        }
+        LEAKED.fetch_add(1, Ordering::Relaxed);
+        let (ty, sub, manu) = self.codes;
+        log::warn!(
+            "au: a view of {} outlived its plugin by 10 s; the unit is uninitialized and leaked rather than disposed under the view",
+            crate::format_id(ty, sub, manu)
+        );
+    }
+
     /// Uninitializes and disposes of the unit, then frees what its callbacks read.
     ///
     /// # Safety
@@ -1739,7 +1787,8 @@ unsafe extern "C" fn retire_on_main(context: *mut c_void) {
         unsafe { r.remains.dispose() };
     } else if r.tries >= RETIRE_TRIES {
         AWAITING.fetch_sub(1, Ordering::Relaxed);
-        log::warn!("au: a plugin view outlived its plugin by 10 s; the plugin is leaked rather than disposed under it");
+        // SAFETY: the instance is gone, so nothing renders the unit.
+        unsafe { r.remains.abandon() };
     } else {
         r.tries += 1;
         schedule_retire(r, RETIRE_INTERVAL_NS);
