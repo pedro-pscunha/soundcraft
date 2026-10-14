@@ -78,6 +78,7 @@ fn main() {
     eight_stuck_helpers_cost_one_time_limit(&root.join("eight"));
     failures_on_soundcrafts_side_are_no_plugin_skips(&root.join("host-failures"));
     plugin_output_cannot_spoil_or_hide_the_answer(&root.join("noisy"));
+    an_answer_counts_when_the_module_exit_hangs(&root.join("hang-exit"));
     the_scan_cache_starts_helpers_only_for_new_or_changed_bundles(&root.join("cached"), &root.join("cache"));
     skipped_bundles_are_remembered_until_rescan(&root.join("remembered"), &root.join("remembered-cache/vst3.json"));
     #[cfg(unix)]
@@ -120,6 +121,7 @@ fn reason<'a>(skipped: &'a [SkippedBundle], bundle: &Path) -> &'a str {
 fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     let (good, _) = install(dir, "Fixture", None);
     let (hang, _) = install(dir, "Hang", Some("hang-entry"));
+    let hangs = [hang.clone(), install(dir, "Hang2", Some("hang-entry")).0, install(dir, "Hang3", Some("hang-entry")).0];
     let (crash, _) = install(dir, "Crash", Some("crash-entry"));
     let (fail, _) = install(dir, "Fail", Some("fail-entry"));
     let started = Instant::now();
@@ -131,9 +133,11 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     assert_eq!(found.len(), 2, "{found:?}");
     assert_eq!(found, direct);
     assert!(found.iter().all(|d| d.path == good));
-    assert_eq!(skipped.len(), 3, "{skipped:?}");
-    let hung = reason(&skipped, &hang);
-    assert!(hung.starts_with(&format!("timed out after {TIMEOUT:?}")), "{hung}");
+    assert_eq!(skipped.len(), 5, "{skipped:?}");
+    for h in &hangs {
+        let hung = reason(&skipped, h);
+        assert!(hung.starts_with(&format!("timed out after {TIMEOUT:?}")), "{hung}");
+    }
     let crashed = reason(&skipped, &crash);
     if cfg!(unix) {
         assert!(crashed.starts_with("the scan helper crashed (signal 9)"), "{crashed}");
@@ -142,8 +146,8 @@ fn hanging_crashing_and_failing_bundles_are_skipped(dir: &Path) {
     }
     let failed = reason(&skipped, &fail);
     assert!(failed.contains("Fail.vst3") && failed.contains("failed"), "{failed}");
-    // The helpers ran side by side: the hanging one was waited for once, not once per bundle.
-    assert!(took >= TIMEOUT && took < TIMEOUT * 4, "{took:?}");
+    // The helpers ran side by side: the three hanging ones cost one time limit, not three.
+    assert!(took >= TIMEOUT && took < TIMEOUT * 2, "{took:?}");
     assert!(soundcraft_vst3_host::skipped().is_empty(), "scan_paths_with leaves the registry alone");
 }
 
@@ -157,6 +161,30 @@ fn eight_stuck_helpers_cost_one_time_limit(dir: &Path) {
     let took = started.elapsed();
     assert!(found.is_empty() && skipped.len() == 8, "{skipped:?}");
     assert!(took >= TIMEOUT && took < TIMEOUT * 2, "{took:?}: not all eight ran at once");
+    // The pool runs as many helpers as it is given, and no more: one at a time, three stuck
+    // bundles cost three time limits.
+    let three: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("Stuck{i}.vst3"))).collect();
+    let short = Duration::from_secs(1);
+    for (parallel, at_least, below) in [(1, short * 3, short * 5), (3, short, short * 2)] {
+        let started = Instant::now();
+        let (_, skipped) = soundcraft_vst3_host::scan_paths_with(&three, &ScanHelper { timeout: short, parallel, ..helper() });
+        let took = started.elapsed();
+        assert_eq!(skipped.len(), 3);
+        assert!(took >= at_least && took < below, "{parallel} at a time took {took:?}");
+    }
+}
+
+/// A plugin whose module exit never returns once the helper has answered: the answer counts, and
+/// the helper is killed after a short grace, not at the end of its time limit.
+fn an_answer_counts_when_the_module_exit_hangs(dir: &Path) {
+    let (bundle, _) = install(dir, "HangExit", Some("hang-exit"));
+    let generous = ScanHelper { timeout: Duration::from_secs(10), ..helper() };
+    let started = Instant::now();
+    let (found, skipped) = soundcraft_vst3_host::scan_paths_with(std::slice::from_ref(&bundle), &generous);
+    let took = started.elapsed();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(found.len(), 2);
+    assert!(took < Duration::from_secs(6), "{took:?}: the helper was waited for to the end of its time limit");
 }
 
 /// A plugin printing on standard output, even lines that look like answers or more than the host
