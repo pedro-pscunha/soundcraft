@@ -1,5 +1,5 @@
-//! The only module with `unsafe`: the launch observer and the `application:openURLs:` method
-//! added to the application delegate's class.
+//! The launch observer and the `application:openURLs:` method added to the application
+//! delegate's class.
 //!
 //! The method is a plain `extern "C-unwind"` function registered with the Objective-C runtime;
 //! it reads only its arguments and the crate's queue, so it stays valid for the whole process.
@@ -90,7 +90,7 @@ extern "C-unwind" fn open_urls(_delegate: &AnyObject, _cmd: Sel, _app: Option<&A
     // A panic must never unwind into AppKit.
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Some(urls) = urls {
-            crate::QUEUE.push(file_paths(urls));
+            crate::open_documents::QUEUE.push(file_paths(urls));
         }
     }));
     if caught.is_err() {
@@ -100,7 +100,7 @@ extern "C-unwind" fn open_urls(_delegate: &AnyObject, _cmd: Sel, _app: Option<&A
 
 /// The paths of the file URLs in `urls`; other objects and other URLs are skipped.
 fn file_paths(urls: &NSArray) -> Vec<PathBuf> {
-    urls.iter().take(crate::MAX_PENDING).filter_map(|obj| obj.downcast_ref::<NSURL>().and_then(file_path)).collect()
+    urls.iter().take(crate::open_documents::MAX_PENDING).filter_map(|obj| obj.downcast_ref::<NSURL>().and_then(file_path)).collect()
 }
 
 /// The path of a file URL (a file reference URL is resolved first); `None` for other URLs.
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn file_reference_urls_resolve_to_their_path() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-macos-open-test-ref-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("soundcraft-macos-test-ref-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("Ref Song.scraft");
         std::fs::write(&file, b"{}").unwrap();
@@ -173,12 +173,12 @@ mod tests {
 
         let wakes = Arc::new(AtomicUsize::new(0));
         let w = wakes.clone();
-        crate::set_waker(move || {
+        crate::open_documents::set_waker(move || {
             w.fetch_add(1, Ordering::SeqCst);
         });
-        let song = url("file:///tmp/soundcraft-macos-open-test/My%20Song.scraft");
+        let song = url("file:///tmp/soundcraft-macos-test/My%20Song.scraft");
         let web = url("https://example.com/x.scraft");
-        let take = url("file:///tmp/soundcraft-macos-open-test/take.wav");
+        let take = url("file:///tmp/soundcraft-macos-test/take.wav");
         let not_a_url = NSString::from_str("/tmp/not-a-url.scraft");
         let urls: Retained<NSArray> = NSArray::from_slice(&[song.as_ref(), web.as_ref(), take.as_ref(), not_a_url.as_ref()] as &[&AnyObject]);
         // SAFETY: `new` on an NSObject subclass returns a +1 instance.
@@ -190,10 +190,10 @@ mod tests {
         let () = unsafe { msg_send![&*delegate, application: None::<&AnyObject>, openURLs: None::<&NSArray>] };
 
         assert_eq!(
-            crate::take_paths(),
-            [PathBuf::from("/tmp/soundcraft-macos-open-test/My Song.scraft"), PathBuf::from("/tmp/soundcraft-macos-open-test/take.wav")]
+            crate::open_documents::take_paths(),
+            [PathBuf::from("/tmp/soundcraft-macos-test/My Song.scraft"), PathBuf::from("/tmp/soundcraft-macos-test/take.wav")]
         );
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
-        assert!(crate::take_paths().is_empty());
+        assert!(crate::open_documents::take_paths().is_empty());
     }
 }

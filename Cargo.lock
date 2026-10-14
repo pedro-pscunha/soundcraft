@@ -3578,7 +3578,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "soundcraft-engine",
- "soundcraft-macos-open",
+ "soundcraft-macos",
  "soundcraft-playback",
  "soundcraft-ui-egui",
  "winresource",
@@ -3678,7 +3678,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soundcraft-macos-open"
+name = "soundcraft-macos"
 version = "0.7.0"
 dependencies = [
  "block2 0.6.2",

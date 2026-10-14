@@ -1,4 +1,4 @@
-//! SoundCraft's macOS open-documents hook.
+//! The open-documents hook: the files macOS opens with SoundCraft.
 //!
 //! Double-clicking a `.scraft` in Finder, dropping a file on the Dock icon and
 //! `open -a SoundCraft file` do not put the file on the command line: Launch Services sends the
@@ -40,12 +40,10 @@
 //!
 //! # Safety
 //!
-//! Like `soundcraft-au-host`, this is an isolated `unsafe` crate (craftrules never-crash):
-//! `unsafe` is denied crate-wide and allowed only in the private `ffi` module. The public API is
+//! The Objective-C side lives in the crate's `ffi` module (see the crate docs). The API here is
 //! safe and never panics; the added method catches any panic before it can unwind into AppKit,
 //! ignores URLs that are not file URLs and objects that are not URLs, and keeps at most
-//! [`MAX_PENDING`] paths. Off macOS the crate compiles to a stub: [`install`] does nothing and
-//! the queue stays empty.
+//! [`MAX_PENDING`] paths. Off macOS [`install`] does nothing and the queue stays empty.
 //!
 //! # End-to-end check (needs the bundle)
 //!
@@ -65,12 +63,6 @@
 //!    "open-documents: application:openURLs: added to WinitApplicationDelegate", and no other
 //!    "open-documents" record.
 
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-mod ffi;
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -85,7 +77,7 @@ pub const MAX_PENDING: usize = 4096;
 /// the app still runs, without open-documents support. Off macOS it does nothing.
 pub fn install() {
     #[cfg(target_os = "macos")]
-    ffi::install();
+    crate::ffi::open_documents::install();
 }
 
 /// The paths opened since the last call, oldest first. Cheap when there are none (one
@@ -100,12 +92,12 @@ pub fn set_waker(waker: impl Fn() + Send + Sync + 'static) {
     QUEUE.set_waker(Arc::new(waker));
 }
 
-static QUEUE: Queue = Queue::new();
+pub(crate) static QUEUE: Queue = Queue::new();
 
 type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// Opened paths waiting for the app, and how to wake it.
-struct Queue {
+pub(crate) struct Queue {
     paths: Mutex<Vec<PathBuf>>,
     waker: Mutex<Option<Waker>>,
 }
@@ -117,7 +109,7 @@ impl Queue {
 
     /// Queues paths (up to [`MAX_PENDING`] waiting) and wakes the app when any were queued.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    fn push(&self, paths: impl IntoIterator<Item = PathBuf>) {
+    pub(crate) fn push(&self, paths: impl IntoIterator<Item = PathBuf>) {
         let (mut queued, mut dropped) = (0usize, 0usize);
         {
             let mut pending = self.paths.lock().unwrap_or_else(PoisonError::into_inner);

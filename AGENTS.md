@@ -27,7 +27,7 @@ People trust SoundCraft with their recordings; a crash loses takes. **This outra
 - The one named exception is `soundcraft-clap-host` (`crates/clap-host`), the isolated unsafe helper crate for CLAP plugin FFI: `unsafe_code = "deny"` crate-wide, allowed only in `src/ffi.rs` with a `// SAFETY:` comment on every block, safe `Result` API.
 - The same exception, same rules, for `soundcraft-vst3-host` (`crates/vst3-host`), the isolated unsafe helper crate for VST3 plugin FFI (COM vtables via the `vst3` bindings, module loading, host-side COM objects).
 - And for `soundcraft-au-host` (`crates/au-host`), the isolated unsafe helper crate for Audio Unit FFI (hand-written AudioToolbox/CoreFoundation declarations, macOS only; a safe stub elsewhere).
-- And for `soundcraft-macos-open` (`crates/macos-open`), the isolated unsafe helper crate that hands the desktop app the files macOS opens with it (Finder, the Dock, `open -a`): it adds `application:openURLs:` to the application delegate's class through the Objective-C runtime (macOS only; a safe stub elsewhere).
+- And for `soundcraft-macos` (`crates/macos`), the isolated unsafe helper crate for the desktop app's macOS integration (unsafe allowed only in its `src/ffi/` module): it hands the app the files macOS opens with it (Finder, the Dock, `open -a`) by adding `application:openURLs:` to the application delegate's class through the Objective-C runtime (macOS only; a safe stub elsewhere).
 - Errors are `Result<T, E>` + `?`. An unfinished feature returns an "unsupported" error.
 - Input-derived numbers are hostile (files, commands, MCP/control params): `get()` not `[i]`, checked/saturating arithmetic, no NaN casts, cap allocations.
 - The audio callback never blocks, allocates in steady state, or panics.

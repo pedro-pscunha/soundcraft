@@ -19,7 +19,7 @@ soundcraft-engine.workspace = true
 soundcraft-ui-egui.workspace = true
 soundcraft-playback.workspace = true
 # Files opened from Finder, the Dock or `open -a` on macOS (a no-op elsewhere).
-soundcraft-macos-open.workspace = true
+soundcraft-macos.workspace = true
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "links"] }
 egui.workspace = true
 serde_json.workspace = true

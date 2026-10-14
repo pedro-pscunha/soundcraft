@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (macos-open, the macOS open-documents hook, joins the layer diagram and the `unsafe` exceptions; previously trivial: delay compensation includes the master faders' inserts (#351)) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (macos-open becomes macos, the macOS app-integration crate; previously minor: macos-open, the macOS open-documents hook, joins the layer diagram and the `unsafe` exceptions) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a Cargo workspace of small crates with enforced layering (`cargo xtask layers`).
 Nothing below the UI knows about egui, so the interface can be replaced.
@@ -14,8 +14,9 @@ requires Rust 1.95 or later without raising the core workspace's Rust 1.90 decla
 
 ```
 L0  time        audio-io        midi        video   (standalone: no workspace deps)
-    macos-open                                      (standalone: files macOS opens with the app)
-L1  dsp         clap-host   vst3-host   au-host     (plugins; the three hosts and macos-open are the
+    macos                                           (standalone: macOS app integration: files macOS
+                                                     opens with the app)
+L1  dsp         clap-host   vst3-host   au-host     (plugins; the three hosts and macos are the
                                                      only crates allowed `unsafe`, confined to their
                                                      FFI modules)
 L2  model                                       (the session document)
@@ -80,6 +81,7 @@ app as an MCP server. See `control-protocol.md` and `mcp.md`.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Renamed macos-open to macos (soundcraft-macos), the macOS app-integration crate |
 | 2026-10-13 | minor | Added macos-open (files opened from Finder, the Dock or `open -a` reach the desktop app) to the layer diagram and the `unsafe` exceptions |
 | 2026-10-13 | trivial | delay compensation includes the master faders' inserts (#351) |
 | 2026-10-10 | minor | Added video, vst3-host and au-host to the layer diagram; documented device I/O limits and in-memory media |

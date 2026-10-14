@@ -57,7 +57,7 @@ impl eframe::App for App {
         // Files the system opens with SoundCraft (macOS: Finder, the Dock, `open -a`), including
         // the one that launched it. They have no drop position, so they open like files dropped
         // away from a Sampler.
-        let opened: Vec<String> = soundcraft_macos_open::take_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let opened: Vec<String> = soundcraft_macos::open_documents::take_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
         self.2.drain(&mut self.0);
         for batch in [dropped, opened] {
             if !batch.is_empty() {
@@ -257,7 +257,7 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "windows")]
     graphics::configure(&mut options, eframe::wgpu::Backends::from_env(), eframe::wgpu::Dx12Compiler::from_env());
     // Before the event loop starts, so a document that launches the app is caught (macOS only).
-    soundcraft_macos_open::install();
+    soundcraft_macos::open_documents::install();
     eframe::run_native(
         "SoundCraft",
         options,
@@ -277,7 +277,7 @@ fn main() -> eframe::Result {
             let mut opener = open::Opener::default();
             opener.open(&mut app, files);
             let ctx = cc.egui_ctx.clone();
-            soundcraft_macos_open::set_waker(move || ctx.request_repaint());
+            soundcraft_macos::open_documents::set_waker(move || ctx.request_repaint());
             // If the system menu bar cannot be built, keep the egui menu bar rather than fail to start.
             #[cfg(target_os = "macos")]
             let menu = match native_menu::NativeMenu::new(&app, &cc.egui_ctx) {
