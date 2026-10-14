@@ -238,7 +238,7 @@ impl Autosave {
 
     /// Delete the folder: the session closed with nothing left to recover.
     fn discard(mut self) {
-        drop(self.lock.take());
+        self.lock = None;
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -261,15 +261,17 @@ pub struct Leftover {
 pub fn leftovers(root: &Path) -> Vec<Leftover> {
     let mut out = Vec::new();
     for dir in std::fs::read_dir(root).into_iter().flatten().flatten().map(|d| d.path()) {
-        let Ok(lock) = std::fs::OpenOptions::new().write(true).open(dir.join(LOCK)) else { continue };
-        if lock.try_lock().is_err() {
-            continue;
-        }
-        let origin = std::fs::read_to_string(dir.join(ORIGIN)).ok().filter(|o| !o.is_empty());
-        let origin_saved = origin.as_ref().and_then(|o| std::fs::metadata(o).and_then(|m| m.modified()).ok());
-        let saved = std::fs::metadata(dir.join(SESSION)).and_then(|m| m.modified());
-        let recording = dir.join(RECORDING).is_file();
-        drop(lock);
+        // Read under the folder's lock, closed again (by the end of this block) before the folder
+        // may be deleted.
+        let (origin, origin_saved, saved, recording) = {
+            let Ok(lock) = std::fs::OpenOptions::new().write(true).open(dir.join(LOCK)) else { continue };
+            if lock.try_lock().is_err() {
+                continue;
+            }
+            let origin = std::fs::read_to_string(dir.join(ORIGIN)).ok().filter(|o| !o.is_empty());
+            let origin_saved = origin.as_ref().and_then(|o| std::fs::metadata(o).and_then(|m| m.modified()).ok());
+            (origin, origin_saved, std::fs::metadata(dir.join(SESSION)).and_then(|m| m.modified()), dir.join(RECORDING).is_file())
+        };
         match saved {
             Ok(saved) if recording || origin_saved.is_none_or(|o| saved > o) => {
                 let text = std::fs::read_to_string(dir.join(SESSION)).unwrap_or_default();
