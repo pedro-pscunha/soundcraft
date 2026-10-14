@@ -2082,9 +2082,9 @@ mod window {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GW_OWNER, GWL_EXSTYLE, GWL_STYLE,
-        GetWindow, GetWindowLongPtrW, IDC_ARROW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_APP, WM_CLOSE, WNDCLASSEXW, WS_CAPTION,
-        WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
+        GetWindow, GetWindowLongPtrW, IDC_ARROW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassExW,
+        RegisterWindowMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE,
+        WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
     };
 
     pub const PLATFORM_TYPE: Option<*const c_char> = Some(vst3::Steinberg::kPlatformTypeHWND);
@@ -2103,8 +2103,20 @@ mod window {
     /// Work for the main thread.
     pub type Job = Box<dyn FnOnce() + Send>;
 
-    /// Posted by SoundCraft to its own editor windows: run the job in `lparam` (see [`defer`]).
-    const WM_RUN_JOB: u32 = WM_APP + 0x5C;
+    /// The message SoundCraft posts to its own editor windows: run the job in `lparam` (see
+    /// [`defer`]). Registered under a name of SoundCraft's own, so no other code's message has its
+    /// id (a fixed `WM_APP + n` is one a plugin may post for itself, to its view's parent window,
+    /// this one, too). 0 when it could not be registered: then no job is posted, and none is
+    /// taken. Every window this procedure serves is an editor window SoundCraft made (the class
+    /// is SoundCraft's own and only `HostWindow::new` makes windows of it), so the id is the check.
+    fn run_job_message() -> u32 {
+        static ID: OnceLock<u32> = OnceLock::new();
+        *ID.get_or_init(|| {
+            let name = wide("SoundCraft.Vst3RunJob");
+            // SAFETY: a NUL-terminated string that outlives the call.
+            unsafe { RegisterWindowMessageW(name.as_ptr()) }
+        })
+    }
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if msg == WM_CLOSE {
@@ -2112,7 +2124,8 @@ mod window {
             unsafe { ShowWindow(hwnd, SW_HIDE) };
             return 0;
         }
-        if msg == WM_RUN_JOB {
+        let job = run_job_message();
+        if job != 0 && msg == job {
             if lparam != 0 {
                 // SAFETY: the box `defer` posted with this message, taken back once.
                 let job = unsafe { Box::from_raw(lparam as *mut Job) };
@@ -2264,10 +2277,11 @@ mod window {
     /// gone), the job is never run, rather than run off the main thread: its plugin stays alive
     /// and its module is never exited.
     pub fn defer(window: *mut c_void, job: Job) {
+        let msg = run_job_message();
         let job = Box::into_raw(Box::new(job));
         // SAFETY: `PostMessageW` accepts any handle and only queues the message; the box goes with
         // it and `wndproc` takes it back once.
-        if window.is_null() || unsafe { PostMessageW(window, WM_RUN_JOB, 0, job as LPARAM) } == 0 {
+        if window.is_null() || msg == 0 || unsafe { PostMessageW(window, msg, 0, job as LPARAM) } == 0 {
             log::error!("vst3: an editor window took no message; its plugin is left alive rather than terminated off the main thread");
         }
     }

@@ -1635,8 +1635,8 @@ mod hostwin {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE,
-        GetWindowLongPtrW, HWND_MESSAGE, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_APP, WM_CLOSE, WNDCLASSEXW, WS_CAPTION,
+        GetWindowLongPtrW, HWND_MESSAGE, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassExW, RegisterWindowMessageW,
+        SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WNDCLASSEXW, WS_CAPTION,
         WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
     };
 
@@ -1648,8 +1648,18 @@ mod hostwin {
 
     const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 
-    /// Posted by SoundCraft to its own job window: run the job in `lparam` (see [`defer`]).
-    const WM_RUN_JOB: u32 = WM_APP + 0x5C;
+    /// The message SoundCraft posts to its own job window: run the job in `lparam` (see
+    /// [`defer`]). Registered under a name of SoundCraft's own, so no other code's message has its
+    /// id (a fixed `WM_APP + n` is one a plugin may post for itself, to its parent window too).
+    /// 0 when it could not be registered: then no job is posted, and none is taken.
+    fn run_job_message() -> u32 {
+        static ID: OnceLock<u32> = OnceLock::new();
+        *ID.get_or_init(|| {
+            let name = wide("SoundCraft.ClapRunJob");
+            // SAFETY: a NUL-terminated string that outlives the call.
+            unsafe { RegisterWindowMessageW(name.as_ptr()) }
+        })
+    }
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if msg == WM_CLOSE {
@@ -1657,7 +1667,10 @@ mod hostwin {
             unsafe { ShowWindow(hwnd, SW_HIDE) };
             return 0;
         }
-        if msg == WM_RUN_JOB {
+        // Only the job window runs jobs: the editors' host windows share this procedure, and the
+        // plugin's child window may post to its parent.
+        let job = run_job_message();
+        if job != 0 && msg == job && JOB_WINDOW.get().is_some_and(|&w| w != 0 && w == hwnd as usize) {
             if lparam != 0 {
                 // SAFETY: the box `defer` posted with this message, taken back once.
                 let job = unsafe { Box::from_raw(lparam as *mut Job) };
@@ -1680,7 +1693,7 @@ mod hostwin {
     /// Makes the job window, on the main thread (where editors open), before any work may be
     /// posted to it.
     pub fn prepare_defer() {
-        if !on_main_thread() {
+        if !on_main_thread() || run_job_message() == 0 {
             return;
         }
         JOB_WINDOW.get_or_init(|| {
@@ -1712,10 +1725,11 @@ mod hostwin {
     /// rather than run off the main thread: its plugin stays alive.
     pub fn defer(job: Job) {
         let window = JOB_WINDOW.get().copied().unwrap_or(0) as HWND;
+        let msg = run_job_message();
         let job = Box::into_raw(Box::new(job));
         // SAFETY: `PostMessageW` accepts any handle and only queues the message; the box goes with
         // it and `wndproc` takes it back once.
-        if window.is_null() || unsafe { PostMessageW(window, WM_RUN_JOB, 0, job as LPARAM) } == 0 {
+        if window.is_null() || msg == 0 || unsafe { PostMessageW(window, msg, 0, job as LPARAM) } == 0 {
             log::error!("clap: no window took work for the main thread; a plugin is left alive rather than destroyed off the main thread");
         }
     }
