@@ -256,6 +256,9 @@ enum Ended {
 /// A helper process and the threads reading its output.
 struct Running {
     child: Child,
+    /// Its job (Windows): a timeout ends it, the helper's children with it.
+    #[cfg(windows)]
+    job: Option<crate::ffi::HelperJob>,
     /// Killed but not reaped yet (see [`end`]).
     unreaped: bool,
     lines: mpsc::Receiver<Line>,
@@ -285,6 +288,9 @@ impl Running {
         // Killed with this process, however it ends (Unix helpers watch their parent instead).
         #[cfg(windows)]
         crate::ffi::end_with_this_process(&child);
+        // And in a job of its own (nested in that one), which a timeout ends.
+        #[cfg(windows)]
+        let job = crate::ffi::HelperJob::of(&child);
         let err_tail = drain_stderr(&mut child);
         let Some(lines) = read_lines(&mut child) else {
             if !end(&mut child) {
@@ -292,7 +298,14 @@ impl Running {
             }
             return Err(Skip::Host("cannot read the scan helper's output".into()));
         };
-        Ok(Running { child, unreaped: false, lines, err_tail })
+        Ok(Running {
+            child,
+            #[cfg(windows)]
+            job,
+            unreaped: false,
+            lines,
+            err_tail,
+        })
     }
 
     /// Waits for the answer, at most `limit`; once it is in, the helper has [`EXIT_GRACE`] to exit
@@ -323,12 +336,12 @@ impl Running {
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    self.unreaped = !end(&mut self.child);
+                    self.end();
                     return (answer.map_or(Ended::Lost, Ended::Answered), hello);
                 }
             }
             if Instant::now() >= deadline {
-                self.unreaped = !end(&mut self.child);
+                self.end();
                 // An answer that came in since the look above still counts.
                 let answer = self.rest(&mut hello).or(answer);
                 return (answer.map_or(Ended::TimedOut, Ended::Answered), hello);
@@ -352,6 +365,15 @@ impl Running {
     }
 
     /// Done with the helper: one that was killed but is not reaped yet is reaped on a thread.
+    /// Kills the helper, and on Windows its job (whatever it started), see [`end`].
+    fn end(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.end();
+        }
+        self.unreaped = !end(&mut self.child);
+    }
+
     fn release(self) {
         if self.unreaped {
             reap_later(self.child);

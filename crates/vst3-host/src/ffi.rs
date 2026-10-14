@@ -520,6 +520,51 @@ pub(crate) fn end_with_this_process(child: &std::process::Child) {
     }
 }
 
+/// The job of one scan helper (nested in this process's job, see [`end_with_this_process`]):
+/// ending it ends the helper and whatever it started, which inherited the job.
+#[cfg(windows)]
+pub(crate) struct HelperJob(usize);
+
+#[cfg(windows)]
+impl HelperJob {
+    /// Puts `child` in a job of its own; `None` if the system refuses.
+    pub(crate) fn of(child: &std::process::Child) -> Option<HelperJob> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        // SAFETY: null attributes and name make an unnamed job with the default security; the
+        // result is a handle or null.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return None;
+        }
+        // Owned from here on: closed when dropped, whatever happens next.
+        let owned = HelperJob(job as usize);
+        // SAFETY: `job` is the job just made (empty, so it may nest in the job the child is in);
+        // the child's handle is valid while `child` is alive (borrowed here).
+        let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
+        (assigned != 0).then_some(owned)
+    }
+
+    /// Ends every process in the job at once.
+    pub(crate) fn end(&self) {
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: the handle is this job's, open until `self` is dropped.
+        unsafe { TerminateJobObject(self.0 as HANDLE, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HelperJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        // SAFETY: the handle is this job's and is closed once, here. Closing it ends nothing (the
+        // job has no kill-on-close limit).
+        unsafe { CloseHandle(self.0 as HANDLE) };
+    }
+}
+
 /// Registers [`exit_modules`] to run at process exit. Exit handlers run in reverse order of
 /// registration, C++ static destructors included, so registering again after each module load
 /// puts the exits ahead of the destructors of every module loaded so far.
