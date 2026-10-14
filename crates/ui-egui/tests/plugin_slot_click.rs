@@ -187,6 +187,18 @@ fn window_plugin_toggles_a_parameter_window() {
     assert!(app.ui.plugin_windows.is_empty());
 }
 
+/// `null` is as good as leaving a field out, for `view` as for `value`.
+#[test]
+fn window_plugin_takes_null_as_omitted() {
+    let (mut app, id) = app("audio", true, |t| t.mixer.inserts[C] = Some(Insert::new(HOSTED)));
+    let editor = StandInEditor::default();
+    adopt(&app, id, C, &editor);
+    let p = json!({"track": "Vox", "slot": "c", "view": null, "value": null});
+    assert_eq!(app.run("window.plugin", p.clone()), Ok(json!({"view": "editor", "open": true})));
+    assert_eq!(app.run("window.plugin", p), Ok(json!({"view": "editor", "open": false})));
+    assert_eq!(editor.calls(), ["open", "close"]);
+}
+
 #[test]
 fn window_plugin_refuses_bad_parameters() {
     let (mut app, _) = app("audio", false, |t| t.mixer.inserts[1] = Some(Insert::new("eq_7band")));
@@ -200,6 +212,8 @@ fn window_plugin_refuses_bad_parameters() {
         (json!({"track": "Vox", "slot": "instrument"}), "holds no plugin"),
         (json!({"track": "Vox", "slot": 1, "view": "gui"}), "`view` must be"),
         (json!({"track": "Vox", "slot": 1, "value": "yes"}), "`value` must be"),
+        (json!({"track": "Vox", "slot": 1, "open": true}), "unknown field `open`"),
+        (json!({"track": "Vox", "slot": 1, "views": "parameters"}), "unknown field `views`"),
     ] {
         let err = app.run("window.plugin", p.clone()).unwrap_err();
         assert!(err.contains(says), "{p}: {err}");

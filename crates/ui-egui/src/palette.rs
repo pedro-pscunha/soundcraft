@@ -24,7 +24,7 @@ fn entries() -> Vec<Entry> {
             id: c.id.to_string(), label: c.label.to_string(), path: c.menu.join(" › "), shortcut: c.shortcut.unwrap_or("").to_string()
         })
         .collect();
-    for (id, label, path, sc) in crate::menus::UI_COMMANDS {
+    for (id, label, path, sc) in crate::menus::UI_COMMANDS.iter().filter(|c| !crate::menus::needs_params(c.0)) {
         v.push(Entry { id: id.to_string(), label: label.to_string(), path: path.replace(" > ", " › "), shortcut: sc.unwrap_or("").to_string() });
     }
     v
@@ -121,6 +121,18 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    /// The palette runs a command without parameters: those that need some are not offered.
+    #[test]
+    fn commands_that_need_parameters_are_not_offered() {
+        let ids: Vec<String> = super::entries().into_iter().map(|e| e.id).collect();
+        for id in ["window.plugin", "view.mix_section", "ui.dock"] {
+            assert!(!ids.iter().any(|i| i == id), "{id}");
+        }
+        for id in ["window.mix", "ui.dock.reset", "window.hide_floating", "track.new"] {
+            assert!(ids.iter().any(|i| i == id), "{id}");
+        }
+    }
+
     #[test]
     fn scoring_prefers_substrings() {
         assert!(super::score("Duplicate", "dup") > super::score("Duplicate", "dpl"));

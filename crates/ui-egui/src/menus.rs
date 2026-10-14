@@ -423,6 +423,13 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Event > MIDI Real-Time Properties", "window.rtp"),
 ];
 
+/// UI commands that do nothing without parameters (a plugin's slot, a Mix window section, a
+/// panel operation): the control channel and SoundCraft's own controls run them, and the command
+/// palette, which runs commands without any, does not list them.
+pub fn needs_params(id: &str) -> bool {
+    matches!(id, "window.plugin" | "view.mix_section" | "ui.dock")
+}
+
 /// The parameters of a UI command, as `engine.commands` lists them.
 pub fn ui_params(id: &str) -> &'static str {
     match id {

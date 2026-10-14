@@ -112,8 +112,11 @@ rules apply equally to both forms.
 insert or instrument slot does. `slot` is an insert (`0`..`9` or `"a"`..`"j"`) or `"instrument"`.
 `view` is `"editor"` (the default: a CLAP, VST3 or Audio Unit plugin's own editor; a built-in
 plugin's parameter window) or `"parameters"` (SoundCraft's parameter window). `value: true` opens
-(and raises an open editor), `false` closes, and omitting it toggles, except that a built-in's
-parameter window stays open. The result says what is open: `{"view": "editor", "open": true}`.
+(and raises an open editor), `false` closes, and omitting it toggles, except that a built-in
+plugin's parameter window asked for with `view` `"editor"` stays open (with `"parameters"` it
+toggles too). A `null` `view` or `value` counts as omitted, and any other field is refused. The
+result says what is open: `{"view": "editor", "open": true}`. The command palette does not offer
+`window.plugin`: it runs commands without parameters.
 When a plugin's own editor can't open (audio is off, the plugin did not load, it has no editor), the
 status line says why and an insert's parameter window opens instead, with that `reason` in the
 result; a hosted instrument (its sounds live in its own editor) and a plugin SoundCraft knows

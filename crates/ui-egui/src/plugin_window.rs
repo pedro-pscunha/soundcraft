@@ -12,7 +12,11 @@ use std::time::{Duration, Instant};
 
 /// The parameters of `window.plugin`, as `engine.commands` lists them.
 pub const PARAMS: &str = "{track, slot: 0..9 | a..j | \"instrument\", view?: \"editor\" (default: a hosted plugin's own editor, \
-                          else its parameter window) | \"parameters\", value?: true opens (or raises), false closes, omitted toggles}";
+                          else its parameter window) | \"parameters\", value?: true opens (or raises), false closes, omitted or null \
+                          toggles (except a built-in plugin's parameter window asked for as its editor, which stays open)}";
+
+/// The fields `window.plugin` reads; it refuses any other, rather than ignore it.
+const FIELDS: [&str; 4] = ["track", "slot", "view", "value"];
 
 /// Why a hosted plugin's editor can't open while audio is off.
 const AUDIO_OFF: &str = "is not loaded while audio is off, so its own editor can't open";
@@ -99,14 +103,20 @@ fn action(slot: Slot, editor: Option<EditorState>, view: View, want: Option<bool
 /// plugin SoundCraft doesn't know, and the result is an error.
 pub(crate) fn command(app: &mut SoundApp, p: &Value) -> Result<Value, String> {
     let bad = |m: &str| format!("bad parameters for `window.plugin`: {m}");
+    if let Some(k) = p.as_object().and_then(|o| o.keys().find(|k| !FIELDS.contains(&k.as_str()))) {
+        return Err(bad(&format!("unknown field `{k}` (it takes {})", FIELDS.join(", "))));
+    }
     let track = soundcraft_engine::cmd::track_param(&app.engine, "window.plugin", p, "track")
         .map_err(|e| e.to_string())?
         .ok_or_else(|| bad("`track` required"))?;
     let slot = slot_param(p.get("slot")).ok_or_else(|| bad("`slot` must be 0..9, a..j or \"instrument\""))?;
-    let view = match p.get("view").map(Value::as_str) {
-        None | Some(Some("editor")) => View::Editor,
-        Some(Some("parameters")) => View::Parameters,
-        Some(_) => return Err(bad("`view` must be \"editor\" or \"parameters\"")),
+    let view = match p.get("view") {
+        None | Some(Value::Null) => View::Editor,
+        Some(v) => match v.as_str() {
+            Some("editor") => View::Editor,
+            Some("parameters") => View::Parameters,
+            _ => return Err(bad("`view` must be \"editor\" or \"parameters\"")),
+        },
     };
     let want = match p.get("value") {
         None | Some(Value::Null) => None,
