@@ -10,7 +10,8 @@
 //!   `kOffline` in `setupProcessing`, like a plugin without an offline mode. State: the
 //!   component stores the gain (one LE f64), the controller the Freq value (one LE f64). Its
 //!   controller has an editor view (`IPlugView`, 320×240, no real drawing) supporting
-//!   NSView/HWND/X11.
+//!   NSView/HWND/X11. Like some real controllers, it reports a Freq the host sets
+//!   (`setParamNormalized`) back to the host as an edit (`performEdit`).
 //! - "Fixture Synth" (`Instrument|Synth`): a single-component instrument (the component is also
 //!   its edit controller). No audio input, one stereo output, one event input; every output
 //!   sample is the velocity of the held note (sample-accurate), 0 when none. Poly pressure, and
@@ -30,7 +31,7 @@ use std::ffi::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
-use vst3::{Class, ComRef, ComWrapper, uid};
+use vst3::{Class, ComPtr, ComRef, ComWrapper, uid};
 
 const GAIN_CID: TUID = uid(0x5C0A1D00, 0x11112222, 0x33334444, 0x55556666);
 const GAIN_CTRL_CID: TUID = uid(0x5C0A1D01, 0x11112222, 0x33334444, 0x55556666);
@@ -236,6 +237,8 @@ impl IAudioProcessorTrait for GainProcessor {
 struct GainController {
     gain: AtomicU64,
     freq: AtomicU64,
+    /// The host's component handler, while it is set.
+    handler: std::sync::Mutex<Option<ComPtr<IComponentHandler>>>,
     _live: Live,
 }
 
@@ -409,16 +412,23 @@ impl IEditControllerTrait for GainController {
             self.gain.store(v.to_bits(), Ordering::Relaxed);
         } else if id == 12 {
             self.freq.store(v.to_bits(), Ordering::Relaxed);
+            // The host's value reported back as an edit, as some controllers do.
+            let handler = self.handler.lock().unwrap().clone();
+            if let Some(h) = handler {
+                assert_eq!(unsafe { h.performEdit(12, v) }, kResultOk);
+            }
         }
         kResultOk
     }
     unsafe fn setComponentHandler(&self, handler: *mut IComponentHandler) -> tresult {
         // Exercise the host's handler: an edit from the "plugin GUI" must be accepted.
-        if let Some(h) = unsafe { ComRef::from_raw(handler) } {
+        let h = unsafe { ComRef::from_raw(handler) };
+        if let Some(h) = h {
             assert_eq!(unsafe { h.beginEdit(7) }, kResultOk);
             assert_eq!(unsafe { h.performEdit(7, 0.9) }, kResultOk);
             assert_eq!(unsafe { h.endEdit(7) }, kResultOk);
         }
+        *self.handler.lock().unwrap() = h.map(|h| h.to_com_ptr());
         kResultOk
     }
     unsafe fn createView(&self, name: FIDString) -> *mut IPlugView {
@@ -717,6 +727,7 @@ impl IPluginFactoryTrait for Factory {
             ComWrapper::new(GainController {
                 gain: AtomicU64::new(0.5f64.to_bits()),
                 freq: AtomicU64::new(0.5f64.to_bits()),
+                handler: std::sync::Mutex::new(None),
                 _live: Live::new(&OBJECTS),
             })
             .to_com_ptr::<FUnknown>()

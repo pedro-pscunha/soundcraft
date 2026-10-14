@@ -42,7 +42,9 @@
 //! controller from the UI thread: the state reader's `idle`, every frame, hands it the values set
 //! since (`setParamNormalized`, so the editor shows them and a preset the plugin loads afterwards
 //! is not set back at the next save), except the editor's own edits coming back from the session,
-//! which would set a knob being dragged back. An instance dropped off the main thread with its editor open (the audio
+//! which would set a knob being dragged back. A `performEdit` a controller makes from inside
+//! `setParamNormalized` for the parameter the host is setting (the SDK says it must not; some do)
+//! is the host's value coming back, not an edit, and is dropped. An instance dropped off the main thread with its editor open (the audio
 //! thread drops a torn-down mixer's instances) is not touched there: its view is removed, its
 //! window closed and the plugin terminated on the main thread (macOS: the main dispatch queue;
 //! Windows: a message to the editor window). Linux (X11) editor windows are not hosted yet:

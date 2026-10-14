@@ -434,6 +434,26 @@ fn the_editors_own_edits_coming_back_are_not_handed_to_its_controller() {
     assert_eq!(reader.param_values(&["7"]), vec![Some(ParamReading { live: 1.0, host: 1.0 })], "the host's own value");
 }
 
+/// Some controllers report a value the host sets (`setParamNormalized`) back as an edit
+/// (`performEdit`), as the fixture does for Freq. The state reader hands the session's values to
+/// the controller every UI frame, automation included: that is not the user editing, and the
+/// editor reports no edit for it (the session would take it as one: modified, an undo step, a new
+/// base value). An edit made afterwards is reported.
+#[test]
+fn a_host_set_the_controller_reports_back_is_no_edit() {
+    use soundcraft_dsp::Plugin;
+    let mut p = soundcraft_vst3_host::instantiate_plugin(&id_of("Fixture Gain")).unwrap();
+    let mut ed = Plugin::editor(&mut p).expect("editor handle");
+    let mut reader = p.state_reader().expect("every VST3 component has a state");
+    assert_eq!(ed.idle(), vec![("7".to_string(), 1.8)], "the fixture's setup edit");
+    // Automation moves Freq; the next UI frame hands it to the controller.
+    assert!(p.set_param("12", 200.0));
+    reader.idle();
+    assert_eq!(ed.idle(), vec![], "the host's own value is no edit");
+    p.edit_as_view(12, 0.0);
+    assert_eq!(ed.idle(), vec![("12".to_string(), 20.0)], "the user's edit after it is");
+}
+
 #[test]
 fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     let id = id_of("Fixture Gain");

@@ -47,6 +47,8 @@ pub(crate) const PARAM_QUEUE_CAP: usize = 1024;
 const MAX_STATE_BYTES: usize = 64 << 20;
 /// Most editor parameter edits buffered between two UI frames.
 const EDIT_CAP: usize = 256;
+/// [`HostContext::setting`] when the host is setting no parameter on the controller.
+const NOT_SETTING: u64 = u64::MAX;
 /// Magic of SoundCraft's state container: `SCV3` + u32 LE component length + component state +
 /// u32 LE controller length + controller state.
 const STATE_MAGIC: &[u8; 4] = b"SCV3";
@@ -580,7 +582,12 @@ impl Bundle {
             }
         }
         inst.editor = Arc::new(EditorLink {
-            inner: Mutex::new(EditorInner { component: Some(inst.component.clone()), controller: inst.controller.clone(), ..EditorInner::default() }),
+            inner: Mutex::new(EditorInner {
+                component: Some(inst.component.clone()),
+                controller: inst.controller.clone(),
+                host: Some(inst.host.clone()),
+                ..EditorInner::default()
+            }),
         });
         Ok(inst)
     }
@@ -610,6 +617,9 @@ pub(crate) struct HostContext {
     pub restart_requested: AtomicBool,
     /// `performEdit` values (normalized), bounded by `EDIT_CAP`.
     pub edits: Mutex<Vec<(u32, f64)>>,
+    /// The parameter the host is setting on the controller (see [`HostContext::setting`]), or
+    /// [`NOT_SETTING`].
+    setting: AtomicU64,
 }
 
 impl Default for HostContext {
@@ -618,6 +628,7 @@ impl Default for HostContext {
             latency_changed: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
             edits: Mutex::new(Vec::with_capacity(EDIT_CAP)),
+            setting: AtomicU64::new(NOT_SETTING),
         }
     }
 }
@@ -636,10 +647,12 @@ impl HostContext {
         }
     }
 
-    /// An edit made the way the plugin's editor makes one. For tests (the `testing` feature).
+    /// An edit made the way the plugin's editor makes one (`performEdit`). For tests (the
+    /// `testing` feature).
     #[cfg(feature = "testing")]
     pub fn edit_as_view(&self, id: u32, value: f64) {
-        self.record_edit(id, value);
+        // SAFETY: our own handler's method, which reads nothing through pointers.
+        unsafe { self.performEdit(id, value) };
     }
 
     /// Takes the queued editor edits.
@@ -648,6 +661,19 @@ impl HostContext {
         let out = e.clone();
         e.clear();
         out
+    }
+
+    /// Runs `set`, the host setting parameter `id` on the controller (`setParamNormalized`).
+    /// Some controllers report such a value back as an edit (`performEdit` from inside
+    /// `setParamNormalized`; the SDK says they must not, older and custom frameworks do): that is
+    /// the host's own value, not the user's, and is dropped, as hosts do. Otherwise automation
+    /// handed to the controller every UI frame would come back as editor edits, which the session
+    /// takes as the user's (modified, undo steps, a new base value).
+    fn setting<R>(&self, id: u32, set: impl FnOnce() -> R) -> R {
+        self.setting.store(u64::from(id), Ordering::Release);
+        let r = set();
+        self.setting.store(NOT_SETTING, Ordering::Release);
+        r
     }
 }
 
@@ -682,7 +708,10 @@ impl IComponentHandlerTrait for HostContext {
         sb::kResultOk
     }
     unsafe fn performEdit(&self, id: sv::ParamID, value: sv::ParamValue) -> sb::tresult {
-        self.record_edit(id, value);
+        // The host's own value coming back (see `HostContext::setting`).
+        if self.setting.load(Ordering::Acquire) != u64::from(id) {
+            self.record_edit(id, value);
+        }
         sb::kResultOk
     }
     unsafe fn endEdit(&self, _id: sv::ParamID) -> sb::tresult {
@@ -1688,6 +1717,8 @@ struct EditorInner {
     component: Option<ComPtr<sv::IComponent>>,
     /// `None` once the instance is gone, or without an edit controller.
     controller: Option<ComPtr<sv::IEditController>>,
+    /// The controller's component handler, told which parameter the host sets on the controller.
+    host: Option<ComWrapper<HostContext>>,
     view: Option<ComPtr<sb::IPlugView>>,
     frame: Option<ComWrapper<PlugFrame>>,
     window: Option<window::HostWindow>,
@@ -1794,16 +1825,29 @@ impl EditorLink {
         OpenEditor::take(g).close();
     }
 
-    /// Hands a host-set value to the controller before a state save (`setParamNormalized`,
-    /// under the lock like [`EditorLink::save_state`]). No-op once the instance is gone.
+    /// Sets parameter `id` on the controller (`setParamNormalized`), dropping the `performEdit`
+    /// of it some controllers make meanwhile (see [`HostContext::setting`]). False once the
+    /// instance is gone.
+    fn set_on_controller(g: &EditorInner, id: u32, n: f64) -> bool {
+        let Some(c) = &g.controller else { return false };
+        // SAFETY: valid controller (the instance clears it under the link's lock, held by the
+        // caller, before it terminates).
+        let set = || unsafe { c.setParamNormalized(id, n.clamp(0.0, 1.0)) };
+        match &g.host {
+            Some(h) => h.setting(id, set),
+            None => set(),
+        };
+        true
+    }
+
+    /// Hands a value the host set to the controller (`setParamNormalized`, under the lock like
+    /// [`EditorLink::save_state`]). The state reader does this on the UI thread every frame for
+    /// the values set since the last one, and before it saves or reads the state. A
+    /// `performEdit` of `id` the controller makes meanwhile is not an edit (see
+    /// [`HostContext::setting`]). No-op once the instance is gone.
     pub fn sync_param(&self, id: u32, n: f64) {
-        if !n.is_finite() {
-            return;
-        }
-        let g = self.lock();
-        if let Some(c) = &g.controller {
-            // SAFETY: valid controller (the instance clears it under this lock before it terminates).
-            unsafe { c.setParamNormalized(id, n.clamp(0.0, 1.0)) };
+        if n.is_finite() {
+            EditorLink::set_on_controller(&self.lock(), id, n);
         }
     }
 
@@ -1887,15 +1931,11 @@ impl EditorLink {
         v.is_finite().then(|| v.clamp(0.0, 1.0))
     }
 
-    /// Shows a value change in the editor (`setParamNormalized`, main thread).
+    /// Shows a value change in the editor (`setParamNormalized`, main thread; a `performEdit` of
+    /// `id` the controller makes meanwhile is not an edit, see [`HostContext::setting`]).
     pub fn set_normalized(&self, id: u32, n: f64) {
-        if !window::on_main_thread() || !n.is_finite() {
-            return;
-        }
-        let g = self.lock();
-        if let Some(c) = &g.controller {
-            // SAFETY: valid controller, main thread.
-            unsafe { c.setParamNormalized(id, n.clamp(0.0, 1.0)) };
+        if window::on_main_thread() && n.is_finite() {
+            EditorLink::set_on_controller(&self.lock(), id, n);
         }
     }
 
