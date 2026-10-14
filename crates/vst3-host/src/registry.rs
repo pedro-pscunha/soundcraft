@@ -67,16 +67,21 @@ fn add_skips(list: &mut Vec<SkippedBundle>, new: impl IntoIterator<Item = Skippe
     }
 }
 
-/// Adds the bundles a scan that ran without the lock skipped, or could not scan, to the
-/// registry's.
-fn remember_skips(new: Vec<SkippedBundle>) {
-    if new.is_empty() {
-        return;
-    }
+/// Records what a scan found in the registry's lists of skipped and not scanned bundles. The
+/// entries of the bundles it `covered` are its to replace, in both lists, so a bundle is in one
+/// list at most (`new` holds covered bundles only); the others' entries (another scan's, a folder
+/// added meanwhile) stay.
+fn note(r: &mut Registry, covered: &[PathBuf], new: Vec<SkippedBundle>) {
+    r.skipped.retain(|s| !covered.contains(&s.path));
+    r.not_scanned.retain(|s| !covered.contains(&s.path));
     let (not_scanned, skipped): (Vec<_>, Vec<_>) = new.into_iter().partition(|s| s.helper_failed);
-    let mut r = lock();
-    add_skips(&mut r.skipped, skipped);
-    add_skips(&mut r.not_scanned, not_scanned);
+    r.skipped.extend(skipped);
+    r.not_scanned.extend(not_scanned);
+}
+
+/// [`note`]s, under the lock, what a scan that ran without it found.
+fn remember_skips(covered: &[PathBuf], new: Vec<SkippedBundle>) {
+    note(&mut lock(), covered, new);
 }
 
 /// The revision of how a bundle is scanned: bump it when `Bundle::load` or the way descriptors are
@@ -159,7 +164,8 @@ fn bundle_name(path: &Path) -> String {
 }
 
 /// Scans the bundles in `dirs` in helpers, sorted by name; bundles in `known` (skipped before) are
-/// left out. Returns the plugins and the bundles skipped now, each logged. With a scan cache,
+/// left out. Returns the plugins, the bundles skipped now (each logged) and the bundles it covered
+/// (scanned or answered by the cache). With a scan cache,
 /// unchanged bundles come from the cache unless `fresh` (a rescan), and what the helpers find is
 /// written back to it.
 ///
@@ -168,7 +174,12 @@ fn bundle_name(path: &Path) -> String {
 /// last outcome, for the same fingerprint, is a list of plugins; looked up on a rescan too). No
 /// bundle is loaded here: one may hang, and nothing here could stop that. The others, and any
 /// bundle a stuck helper was running, are listed as not scanned ([`SkippedBundle::helper_failed`]).
-fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+fn scan_in_helpers(
+    dirs: &[PathBuf],
+    h: &ScanHelper,
+    known: &[SkippedBundle],
+    fresh: bool,
+) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>, Vec<PathBuf>) {
     let mut cache = h.cache.as_deref().map(ScanCache::load);
     let mut pending: Vec<Pending> = paths::find_bundles(dirs)
         .into_iter()
@@ -246,6 +257,7 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         helper_failed: true,
     };
     let (mut out, mut skipped) = (Vec::new(), Vec::new());
+    let covered: Vec<PathBuf> = pending.iter().map(|p| p.path.clone()).collect();
     for p in pending {
         let cached = known_plugins(&p);
         match p.state {
@@ -270,15 +282,20 @@ fn scan_in_helpers(dirs: &[PathBuf], h: &ScanHelper, known: &[SkippedBundle], fr
         c.save();
     }
     out.sort_by_key(|d| d.name.to_lowercase());
-    (out, skipped)
+    (out, skipped, covered)
 }
 
 /// Scans `dirs` without the registry lock: in helpers when one is set, leaving out the bundles in
 /// `known` (returns the bundles skipped now), else in this process.
-fn scan_unlocked(dirs: &[PathBuf], helper: Option<&ScanHelper>, known: &[SkippedBundle], fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
+fn scan_unlocked(
+    dirs: &[PathBuf],
+    helper: Option<&ScanHelper>,
+    known: &[SkippedBundle],
+    fresh: bool,
+) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>, Vec<PathBuf>) {
     match helper {
         Some(h) => scan_in_helpers(dirs, h, known, fresh),
-        None => (scan_in_process(dirs), Vec::new()),
+        None => (scan_in_process(dirs), Vec::new(), Vec::new()),
     }
 }
 
@@ -289,14 +306,15 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
         let r = lock();
         (r.helper.clone(), r.skipped.clone())
     };
-    let (found, new) = scan_unlocked(dirs, helper.as_ref(), &known, false);
-    remember_skips(new);
+    let (found, new, covered) = scan_unlocked(dirs, helper.as_ref(), &known, false);
+    remember_skips(&covered, new);
     found
 }
 
 /// Scans `dirs` in helpers, leaving the registry alone.
 pub fn scan_paths_with(dirs: &[PathBuf], helper: &ScanHelper) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
-    scan_in_helpers(dirs, helper, &[], false)
+    let (found, skipped, _) = scan_in_helpers(dirs, helper, &[], false);
+    (found, skipped)
 }
 
 /// The plugins of the search folders, scanned once (`fresh`: again, without the scan cache's
@@ -340,7 +358,7 @@ fn ensure_scanned(fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
         }
     }
     let _scanning = Scanning;
-    let (found, new) = scan_unlocked(&dirs, helper.as_ref(), &known, fresh);
+    let (found, new, covered) = scan_unlocked(&dirs, helper.as_ref(), &known, fresh);
     let mut r = lock();
     // A rescan that began meanwhile wins: it scans again once this one has ended. This scan's
     // own result goes back to its caller.
@@ -350,11 +368,8 @@ fn ensure_scanned(fresh: bool) -> (Vec<Vst3Descriptor>, Vec<SkippedBundle>) {
         return (found, own);
     }
     r.scanned = Some(found.clone());
-    let (not_scanned, skipped): (Vec<_>, Vec<_>) = new.into_iter().partition(|s| s.helper_failed);
-    // Added to what is there: other scans (a folder added meanwhile) may have skipped bundles too.
-    add_skips(&mut r.skipped, skipped);
-    // This scan covered every folder: only its own bundles stay not scanned.
-    r.not_scanned = not_scanned;
+    // Over what is there: other scans (a folder added meanwhile) may have skipped bundles too.
+    note(&mut r, &covered, new);
     (found, all_skipped(&r))
 }
 
@@ -390,9 +405,9 @@ pub fn add_search_dir(dir: &Path) -> usize {
         }
         (r.helper.clone(), r.skipped.clone())
     };
-    let (found, new) = scan_unlocked(&[dir.to_path_buf()], helper.as_ref(), &known, false);
+    let (found, new, covered) = scan_unlocked(&[dir.to_path_buf()], helper.as_ref(), &known, false);
     let n = found.len();
-    remember_skips(new);
+    remember_skips(&covered, new);
     // A scan of the search folders running now began without this folder: its result is merged
     // into that scan's once it is stored.
     let mut r = lock();

@@ -58,6 +58,26 @@ fn main() {
     }
     // A fresh process for `adding_a_folder_first_keeps_the_standard_ones`: its standard folders hold
     // `standard`; `extra` is added before anything has scanned.
+    // A fresh process for `what_a_folder_added_during_a_scan_could_not_scan_is_kept`: a scan of the
+    // standard folders is stuck on `slow`; meanwhile the helper breaks and `other` is added, so its
+    // bundle is not scanned. That must still be listed once the stuck scan has stored its result.
+    if let [mode, slow, other] = args.as_slice()
+        && mode == "--not-scanned-during-scan"
+    {
+        let (slow, other) = (PathBuf::from(slow), PathBuf::from(other));
+        soundcraft_vst3_host::set_scan_helper(Some(helper()));
+        let first = std::thread::spawn(soundcraft_vst3_host::scan);
+        assert!(wait_for(&entered(&slow, "hang-entry"), TIMEOUT), "the scan never got stuck");
+        soundcraft_vst3_host::set_scan_helper(Some(ScanHelper { exe: other.join("no-such-helper"), ..helper() }));
+        soundcraft_vst3_host::add_search_dir(&other);
+        first.join().unwrap();
+        let listed: Vec<SkippedBundle> = soundcraft_vst3_host::skipped().into_iter().filter(|s| s.path.starts_with(&other)).collect();
+        let ok = listed.len() == 1 && listed.iter().all(|s| s.helper_failed);
+        if !ok {
+            eprintln!("not scanned during the scan: {listed:?}");
+        }
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     // A fresh process for `a_folder_added_during_a_scan_is_kept`: a scan of the standard folders is
     // stuck on `slow` while `late` (one good bundle, one that crashes) is added.
     if let [mode, slow, late] = args.as_slice()
@@ -176,6 +196,8 @@ fn main() {
     a_rescan_keeps_a_timeout_after_a_timeout_a_verdict(&root.join("late"), &root.join("late-cache/vst3.json"));
     a_rescan_asked_for_during_a_scan_rescans(&root.join("pending"));
     a_folder_added_during_a_scan_is_kept(&root.join("during"));
+    what_a_folder_added_during_a_scan_could_not_scan_is_kept(&root.join("during-broken"));
+    a_bundle_is_in_one_skip_list_at_most(&root.join("one-list"));
     adding_a_folder_first_keeps_the_standard_ones(&root.join("add-first"));
     #[cfg(unix)]
     a_helper_ends_when_its_host_is_gone(&root.join("orphan"));
@@ -678,6 +700,36 @@ fn a_folder_added_during_a_scan_is_kept(dir: &Path) {
         .output()
         .unwrap();
     assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stderr));
+}
+
+/// What a folder added during a scan could not scan (its helper failed) is still listed once that
+/// scan has stored its result (in a fresh process, see `--not-scanned-during-scan`).
+fn what_a_folder_added_during_a_scan_could_not_scan_is_kept(dir: &Path) {
+    let (slow, _) = install(&dir.join("standard"), "Slow", Some("hang-entry"));
+    let other = dir.join("other");
+    install(&other, "Other", None);
+    let child = Command::new(std::env::current_exe().unwrap())
+        .arg("--not-scanned-during-scan")
+        .arg(&slow)
+        .arg(&other)
+        .env("SOUNDCRAFT_VST3_DEFAULT_PATHS", dir.join("standard"))
+        .output()
+        .unwrap();
+    assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stderr));
+}
+
+/// A bundle is listed once: one that could not be scanned (its helper failed) and then crashed in a
+/// working helper is listed as skipped, no longer as not scanned too.
+fn a_bundle_is_in_one_skip_list_at_most(dir: &Path) {
+    let (flip, _) = install(dir, "Flip", Some("crash-entry"));
+    let listed = || -> Vec<SkippedBundle> { soundcraft_vst3_host::skipped().into_iter().filter(|s| s.path == flip).collect() };
+    soundcraft_vst3_host::set_scan_helper(Some(ScanHelper { exe: dir.join("no-such-helper"), ..helper() }));
+    soundcraft_vst3_host::scan_paths(&[dir.to_path_buf()]);
+    assert!(matches!(listed().as_slice(), [s] if s.helper_failed), "{:?}", listed());
+    soundcraft_vst3_host::set_scan_helper(Some(helper()));
+    soundcraft_vst3_host::scan_paths(&[dir.to_path_buf()]);
+    assert!(matches!(listed().as_slice(), [s] if !s.helper_failed), "{:?}", listed());
+    soundcraft_vst3_host::set_scan_helper(None);
 }
 
 /// A rescan asked for while a scan runs is a rescan, whichever caller begins the next scan: with
