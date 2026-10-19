@@ -31,6 +31,7 @@ test-util = []
 
 [dev-dependencies]
 serde_json.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true

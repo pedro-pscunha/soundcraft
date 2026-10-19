@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (a failing scan helper's bundles are listed from the cache, none loaded in-process; the scan paragraph no longer contradicts itself; previously trivial: bundles a failing helper did not scan wait for the next rescan or the next start; previously minor: the VST3 scan cache names the scanning code and retries a timeout once; a failing helper loads in-process only bundles known to load; previously minor: one plugin-scan startup call for both apps; previously minor: the VST3 scan is cached per bundle across runs, in the settings folder the engine now resolves for both apps; previously minor: the apps scan VST3 plugins in helper processes, their own executable run with `--soundcraft-scan-vst3`; previously trivial: macos also runs the hosts' main-queue jobs, the CLAP host's too, and records app activation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-19 · **Change:** trivial (live playback renders every strip on the audio thread; previously minor: a failing scan helper's bundles are listed from the cache, none loaded in-process; the scan paragraph no longer contradicts itself; previously trivial: bundles a failing helper did not scan wait for the next rescan or the next start; previously minor: the VST3 scan cache names the scanning code and retries a timeout once; a failing helper loads in-process only bundles known to load; previously minor: one plugin-scan startup call for both apps; previously minor: the VST3 scan is cached per bundle across runs, in the settings folder the engine now resolves for both apps; previously minor: the apps scan VST3 plugins in helper processes, their own executable run with `--soundcraft-scan-vst3`; previously trivial: macos also runs the hosts' main-queue jobs, the CLAP host's too, and records app activation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a Cargo workspace of small crates with enforced layering (`cargo xtask layers`).
 Nothing below the UI knows about egui, so the interface can be replaced.
@@ -51,7 +51,7 @@ report.
 `soundcraft_mix::MixEngine::render(session, pos, frames, out)` renders one block: clips (gain,
 fades, clip effects) → trim → inserts → pre-fader sends → fader/mute (automation, VCA, trim
 automation) → post-fader sends → pan → busses → aux inputs → master faders. Independent strips
-process in parallel; plugin delay compensation aligns every path, the master faders' inserts included. The same engine renders
+process in parallel, except on the realtime audio thread, which renders them itself (waiting for a pool worker, an ordinary thread, missed the device's deadline on a busy machine); plugin delay compensation aligns every path, the master faders' inserts included. The same engine renders
 bounces offline (`RangeRender`, streamed to the file block by block) and realtime playback
 (`soundcraft_playback::Player`, which owns it on the audio thread and receives new session
 snapshots through a channel).
@@ -104,6 +104,7 @@ app as an MCP server. See `control-protocol.md` and `mcp.md`.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | trivial | Live playback renders every strip on the audio thread; only offline renders use the worker pool |
 | 2026-10-14 | minor | A scan helper failing on SoundCraft's side: bundles known to load are listed from their cached plugins, none is loaded in-process; a timeout is retried on the next run; the cache file is named after its format and records the scanning code |
 | 2026-10-14 | trivial | Bundles a failing scan helper did not scan are tried again by the next rescan or the next start, not by a later scan in the same run |
 | 2026-10-14 | minor | The VST3 scan cache is named after the scanning code (an update starts cold) and retries a timeout once; a failing helper loads in-process only bundles known to load |

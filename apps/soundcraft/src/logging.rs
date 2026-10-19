@@ -22,8 +22,8 @@
 //! callback must never do. Code that runs on the audio thread logs anyway (the cpal error callback,
 //! the synth's full event queue, a hosted plugin's failed `process`, a CLAP plugin calling the
 //! host's `log` from its audio thread, the panic hook). So the cpal callbacks mark their thread
-//! (`soundcraft_playback::mark_audio_thread`; the mix engine carries the mark into the worker
-//! threads that render strips for it), and a record from a marked thread is not written
+//! (`soundcraft_playback::mark_audio_thread`; the mix engine renders every strip on the marked
+//! thread itself), and a record from a marked thread is not written
 //! there: the first one is kept in a fixed buffer (`try_lock`, no allocation, never waits) and the
 //! rest are only counted (an atomic). Another thread writes them out: the UI thread every frame
 //! ([`AppLogger::report_audio_thread`]) and any other thread before its own next record.

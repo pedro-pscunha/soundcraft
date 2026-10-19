@@ -42,8 +42,8 @@ const BLOCK: usize = 512;
 /// Room for replaced snapshots on their way back; `update_session` empties it before each send.
 const OLD_SESSIONS: usize = 16;
 
-/// The realtime audio thread marker lives in the mix engine, which carries it into the strips it
-/// renders on worker threads; the cpal callbacks here set it.
+/// The realtime audio thread marker lives in the mix engine, which renders every strip on the
+/// marked thread itself; the cpal callbacks here set it.
 pub use soundcraft_mix::{mark_audio_thread, on_audio_thread};
 
 /// Meter values for the UI.
@@ -1314,6 +1314,60 @@ mod tests {
         let mut out = vec![0.0f32; 2 * 64];
         st.fill(&mut out, 2);
         assert_eq!(shared.position.load(Ordering::Relaxed), 64);
+    }
+
+    /// The device calls back on its realtime thread. When the mixer handed a session's strips to
+    /// its worker pool, that thread slept until a pool worker, an ordinary thread, got a core; on
+    /// a busy machine that came after the device's deadline, and live playback had gaps of silence
+    /// that a bounce of the same session did not. Here every pool worker is held up: the callback
+    /// still fills its buffer.
+    #[test]
+    fn the_callback_never_waits_for_the_worker_pool() {
+        use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+        let mut s = soundcraft_model::Session::default();
+        s.edit.click = false;
+        s.pool.insert(
+            SourceId(5),
+            Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.05; 4800]; 2] })),
+        );
+        // Enough tracks for the mixer to render them in parallel.
+        for _ in 0..6 {
+            let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+            let id = s.new_clip_id();
+            s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(id, "x", SourceId(5), 0, 0, 4800));
+        }
+        let shared = Player::new_shared();
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+
+        let gate = Arc::new(std::sync::RwLock::new(()));
+        let held = gate.write().unwrap();
+        let busy = Arc::new(AtomicUsize::new(0));
+        for _ in 0..rayon::current_num_threads() {
+            let (gate, busy) = (Arc::clone(&gate), Arc::clone(&busy));
+            rayon::spawn(move || {
+                busy.fetch_add(1, Ordering::SeqCst);
+                drop(gate.read());
+            });
+        }
+        while busy.load(Ordering::SeqCst) < rayon::current_num_threads() {
+            std::thread::yield_now();
+        }
+        let (done, filled) = channel();
+        let callback = std::thread::spawn(move || {
+            mark_audio_thread();
+            let mut out = vec![0.0f32; 2 * BLOCK];
+            st.fill(&mut out, 2);
+            done.send(out).unwrap();
+        });
+        let out = filled.recv_timeout(Duration::from_secs(2));
+        drop(held);
+        callback.join().unwrap();
+        let out = out.expect("the callback waited for the worker pool");
+        assert!(out.iter().all(|x| (x - 0.3).abs() < 1e-4), "six clips at 0.05 sum to 0.3: {:?}", &out[..4]);
     }
 
     #[test]

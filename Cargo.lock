@@ -3751,6 +3751,7 @@ version = "0.7.0"
 dependencies = [
  "cpal",
  "log",
+ "rayon",
  "serde",
  "serde_json",
  "soundcraft-audio-io",
